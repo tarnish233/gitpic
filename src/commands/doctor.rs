@@ -28,7 +28,12 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<()> {
     let mut detail = None;
 
     if config_ok {
-        match GitHub::new(&cfg.github.token, &cfg.github.owner, &cfg.github.repo, &cfg.github.branch) {
+        match GitHub::new(
+            &cfg.github.token,
+            &cfg.github.owner,
+            &cfg.github.repo,
+            &cfg.github.branch,
+        ) {
             Ok(gh) => {
                 match gh.whoami().await {
                     Ok(name) => {
@@ -40,10 +45,8 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<()> {
                 if token_valid {
                     match gh.repo_info().await {
                         Ok(info) => {
-                            repo_writable = info
-                                .permissions
-                                .map(|p| p.push || p.admin)
-                                .unwrap_or(false);
+                            repo_writable =
+                                info.permissions.map(|p| p.push || p.admin).unwrap_or(false);
                         }
                         Err(e) => detail = Some(e.message),
                     }
@@ -56,15 +59,38 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<()> {
     }
 
     let ok = config_ok && token_valid && repo_writable;
-    let report = DoctorReport { ok, config_ok, token_valid, repo_writable, login, detail };
+    let report = DoctorReport {
+        ok,
+        config_ok,
+        token_valid,
+        repo_writable,
+        login,
+        detail,
+    };
 
     if mode.is_json() {
-        println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap_or_default()
+        );
     } else {
-        let mark = |b: bool| if b { "✓".green().to_string() } else { "✗".red().to_string() };
+        let mark = |b: bool| {
+            if b {
+                "✓".green().to_string()
+            } else {
+                "✗".red().to_string()
+            }
+        };
         println!("{} config present", mark(report.config_ok));
-        println!("{} token valid{}", mark(report.token_valid),
-            report.login.as_ref().map(|l| format!(" ({l})")).unwrap_or_default());
+        println!(
+            "{} token valid{}",
+            mark(report.token_valid),
+            report
+                .login
+                .as_ref()
+                .map(|l| format!(" ({l})"))
+                .unwrap_or_default()
+        );
         println!("{} repo writable", mark(report.repo_writable));
         if let Some(d) = &report.detail {
             println!("  {} {}", "note:".yellow(), d);

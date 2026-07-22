@@ -1,6 +1,7 @@
 //! Command-line interface definition (clap derive).
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -64,6 +65,22 @@ pub struct Cli {
     #[arg(long)]
     pub no_copy: bool,
 
+    /// Compress/resize the image before uploading
+    #[arg(long)]
+    pub compress: bool,
+
+    /// Disable compression even if enabled in config
+    #[arg(long)]
+    pub no_compress: bool,
+
+    /// Resize so width <= N pixels (0 = keep original)
+    #[arg(long)]
+    pub max_width: Option<u32>,
+
+    /// JPEG quality 1-100 when compressing (default from config)
+    #[arg(long)]
+    pub quality: Option<u8>,
+
     /// Override the upload path template
     #[arg(short, long)]
     pub path: Option<String>,
@@ -89,6 +106,18 @@ pub enum Command {
     },
     /// Health check: config present, token valid, repo writable
     Doctor,
+    /// List recent uploads from local history
+    List {
+        /// Max number of records to show
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Generate a shell completion script
+    Completion {
+        /// Target shell
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 #[derive(Debug, Subcommand)]

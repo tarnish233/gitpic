@@ -5,6 +5,8 @@ mod commands;
 mod config;
 mod error;
 mod github;
+mod history;
+mod imageproc;
 mod link;
 mod naming;
 mod output;
@@ -35,6 +37,8 @@ async fn dispatch(cli: &Cli, mode: Mode) -> Result<()> {
     match &cli.command {
         Some(Command::Init) => return commands::init::run(),
         Some(Command::Config { action }) => return commands::config_cmd::run(action),
+        Some(Command::List { limit }) => return commands::list::run(*limit, mode),
+        Some(Command::Completion { shell }) => return commands::completion::run(*shell),
         _ => {}
     }
 
@@ -50,6 +54,9 @@ async fn dispatch(cli: &Cli, mode: Mode) -> Result<()> {
         Some(Command::Paste) => commands::upload::run(cli, &cfg, mode).await,
         None => commands::upload::run(cli, &cfg, mode).await,
         // handled above
-        Some(Command::Init) | Some(Command::Config { .. }) => unreachable!(),
+        Some(Command::Init)
+        | Some(Command::Config { .. })
+        | Some(Command::List { .. })
+        | Some(Command::Completion { .. }) => unreachable!(),
     }
 }

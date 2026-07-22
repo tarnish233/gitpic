@@ -1,8 +1,10 @@
 //! Subcommand implementations.
 
+pub mod completion;
 pub mod config_cmd;
 pub mod doctor;
 pub mod init;
+pub mod list;
 pub mod upload;
 
 use crate::cli::{Cli, LinkKind, OutputFormat};
@@ -19,7 +21,8 @@ pub struct InputImage {
 
 /// Resolve the effective link kind from CLI flag or config.
 pub fn resolve_link_kind(cli: &Cli, cfg: &Config) -> LinkKind {
-    cli.link.unwrap_or_else(|| link::parse_link_kind(&cfg.upload.link_kind))
+    cli.link
+        .unwrap_or_else(|| link::parse_link_kind(&cfg.upload.link_kind))
 }
 
 /// Resolve the effective path template.

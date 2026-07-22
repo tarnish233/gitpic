@@ -86,7 +86,10 @@ impl GitHub {
         match status.as_u16() {
             401 | 403 => AppError::auth(format!("GitHub auth failed ({status}): {body}")),
             404 => AppError::not_found(format!("not found ({status}): {body}")),
-            _ => AppError::new(ErrorCode::General, format!("GitHub error ({status}): {body}")),
+            _ => AppError::new(
+                ErrorCode::General,
+                format!("GitHub error ({status}): {body}"),
+            ),
         }
     }
 

@@ -51,7 +51,10 @@ pub struct AppError {
 
 impl AppError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self {
+            code,
+            message: message.into(),
+        }
     }
     pub fn config_missing(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::ConfigMissing, msg)

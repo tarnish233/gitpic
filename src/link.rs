@@ -40,3 +40,25 @@ pub fn parse_link_kind(s: &str) -> LinkKind {
         _ => LinkKind::Cdn,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cdn_and_raw_urls() {
+        assert_eq!(
+            cdn_url("o", "r", "main", "a/b.png"),
+            "https://cdn.jsdelivr.net/gh/o/r@main/a/b.png"
+        );
+        assert_eq!(
+            raw_url("o", "r", "main", "a/b.png"),
+            "https://raw.githubusercontent.com/o/r/main/a/b.png"
+        );
+    }
+
+    #[test]
+    fn markdown_format() {
+        assert_eq!(markdown("alt", "u"), "![alt](u)");
+    }
+}

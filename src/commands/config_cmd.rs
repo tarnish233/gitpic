@@ -33,7 +33,10 @@ pub fn run(action: &ConfigAction) -> Result<()> {
                 .status()
                 .map_err(|e| AppError::new(ErrorCode::General, format!("launch editor: {e}")))?;
             if !status.success() {
-                return Err(AppError::new(ErrorCode::General, "editor exited with error"));
+                return Err(AppError::new(
+                    ErrorCode::General,
+                    "editor exited with error",
+                ));
             }
         }
     }
@@ -50,6 +53,9 @@ fn get_key(cfg: &Config, key: &str) -> Result<String> {
         "upload.link_kind" => cfg.upload.link_kind.clone(),
         "upload.dedup" => cfg.upload.dedup.to_string(),
         "upload.auto_copy" => cfg.upload.auto_copy.to_string(),
+        "upload.compress" => cfg.upload.compress.to_string(),
+        "upload.max_width" => cfg.upload.max_width.to_string(),
+        "upload.quality" => cfg.upload.quality.to_string(),
         _ => return Err(AppError::usage(format!("unknown key: {key}"))),
     };
     Ok(v)
@@ -65,6 +71,17 @@ fn set_key(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
         "upload.link_kind" => cfg.upload.link_kind = value.to_string(),
         "upload.dedup" => cfg.upload.dedup = parse_bool(value)?,
         "upload.auto_copy" => cfg.upload.auto_copy = parse_bool(value)?,
+        "upload.compress" => cfg.upload.compress = parse_bool(value)?,
+        "upload.max_width" => {
+            cfg.upload.max_width = value
+                .parse()
+                .map_err(|_| AppError::usage(format!("invalid u32: {value}")))?
+        }
+        "upload.quality" => {
+            cfg.upload.quality = value
+                .parse()
+                .map_err(|_| AppError::usage(format!("invalid u8 (1-100): {value}")))?
+        }
         _ => return Err(AppError::usage(format!("unknown key: {key}"))),
     }
     Ok(())

@@ -5,6 +5,8 @@ use crate::cli::{Cli, Command};
 use crate::config::Config;
 use crate::error::{AppError, Result};
 use crate::github::GitHub;
+use crate::history::{self, Record};
+use crate::imageproc::{self, CompressOpts};
 use crate::naming;
 use crate::output::{self, ItemResult, Mode};
 use std::io::Read;
@@ -41,21 +43,38 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<()> {
     let template = resolve_template(cli, cfg).to_string();
     let dedup = cfg.upload.dedup;
 
+    let compress = CompressOpts {
+        enabled: (cfg.upload.compress || cli.compress) && !cli.no_compress,
+        max_width: cli.max_width.unwrap_or(cfg.upload.max_width),
+        quality: cli.quality.unwrap_or(cfg.upload.quality),
+    };
+
     let mut results: Vec<ItemResult> = Vec::with_capacity(inputs.len());
     for img in &inputs {
-        let hash = naming::sha256_hex(&img.bytes);
-        let remote_path = naming::render_path(&template, &img.name, &hash);
+        let (bytes, name) = imageproc::maybe_compress(&img.name, img.bytes.clone(), &compress);
+        let hash = naming::sha256_hex(&bytes);
+        let remote_path = naming::render_path(&template, &name, &hash);
         let message = format!("gitpic: upload {}", remote_path);
-        let outcome = gh.put_file(&remote_path, &img.bytes, &message, dedup).await?;
+        let outcome = gh.put_file(&remote_path, &bytes, &message, dedup).await?;
         let item = build_item(
             &outcome,
-            &img.name,
+            &name,
             kind,
             cli.format,
             &cfg.github.owner,
             &cfg.github.repo,
             &cfg.github.branch,
         );
+        // Record to local history (best-effort; never fail an upload for this).
+        let _ = history::append(&Record {
+            time: chrono::Local::now().to_rfc3339(),
+            name: item.name.clone(),
+            path: item.path.clone(),
+            url: item.url.clone(),
+            sha: item.sha.clone(),
+            size: item.size,
+            deduped: item.deduped,
+        });
         results.push(item);
     }
 
@@ -80,7 +99,10 @@ fn read_files(files: &[std::path::PathBuf]) -> Result<Vec<InputImage>> {
     let mut out = Vec::with_capacity(files.len());
     for f in files {
         if !f.exists() {
-            return Err(AppError::not_found(format!("file not found: {}", f.display())));
+            return Err(AppError::not_found(format!(
+                "file not found: {}",
+                f.display()
+            )));
         }
         let bytes = std::fs::read(f)
             .map_err(|e| AppError::not_found(format!("read {}: {e}", f.display())))?;
@@ -126,7 +148,10 @@ fn read_clipboard(cli: &Cli) -> Result<InputImage> {
         )
         .map_err(|e| AppError::new(crate::error::ErrorCode::General, format!("encode png: {e}")))?;
 
-    let raw_name = cli.name.clone().unwrap_or_else(|| "clipboard.png".to_string());
+    let raw_name = cli
+        .name
+        .clone()
+        .unwrap_or_else(|| "clipboard.png".to_string());
     // ensure .png extension for clipboard captures
     let name = if Path::new(&raw_name).extension().is_some() {
         raw_name

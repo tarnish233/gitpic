@@ -73,7 +73,11 @@ pub fn print_results(mode: Mode, results: &[ItemResult]) {
         }
         Mode::Human => {
             for r in results {
-                let tag = if r.deduped { " (deduped)".yellow().to_string() } else { String::new() };
+                let tag = if r.deduped {
+                    " (deduped)".yellow().to_string()
+                } else {
+                    String::new()
+                };
                 println!("{} {}{}", "✓ uploaded".green().bold(), r.name.bold(), tag);
                 println!("{}", r.output);
             }
@@ -86,7 +90,10 @@ pub fn print_error(mode: Mode, code: &str, message: &str) {
     if mode.is_json() {
         let env = ErrorEnvelope {
             ok: false,
-            error: ErrorBody { code: code.to_string(), message: message.to_string() },
+            error: ErrorBody {
+                code: code.to_string(),
+                message: message.to_string(),
+            },
         };
         println!("{}", serde_json::to_string_pretty(&env).unwrap_or_default());
     } else {

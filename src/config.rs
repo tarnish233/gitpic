@@ -50,6 +50,12 @@ pub struct UploadConfig {
     pub dedup: bool,
     #[serde(default = "default_true")]
     pub auto_copy: bool,
+    #[serde(default)]
+    pub compress: bool,
+    #[serde(default)]
+    pub max_width: u32,
+    #[serde(default = "default_quality")]
+    pub quality: u8,
 }
 
 impl Default for UploadConfig {
@@ -59,21 +65,50 @@ impl Default for UploadConfig {
             link_kind: default_link_kind(),
             dedup: true,
             auto_copy: true,
+            compress: false,
+            max_width: 0,
+            quality: default_quality(),
         }
     }
 }
 
-fn default_branch() -> String { "main".to_string() }
-fn default_path_template() -> String { "images/{year}/{month}/{hash8}-{name}.{ext}".to_string() }
-fn default_link_kind() -> String { "cdn".to_string() }
-fn default_true() -> bool { true }
+fn default_branch() -> String {
+    "main".to_string()
+}
+fn default_path_template() -> String {
+    "images/{year}/{month}/{hash8}-{name}.{ext}".to_string()
+}
+fn default_link_kind() -> String {
+    "cdn".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_quality() -> u8 {
+    82
+}
 
 impl Config {
     /// Locate the config file path (does not require it to exist).
     pub fn path() -> Result<PathBuf> {
-        let dirs = ProjectDirs::from("dev", "gitpic", "gitpic")
-            .ok_or_else(|| AppError::new(crate::error::ErrorCode::General, "cannot resolve config directory"))?;
+        let dirs = ProjectDirs::from("dev", "gitpic", "gitpic").ok_or_else(|| {
+            AppError::new(
+                crate::error::ErrorCode::General,
+                "cannot resolve config directory",
+            )
+        })?;
         Ok(dirs.config_dir().join("config.toml"))
+    }
+
+    /// Locate the upload-history file (JSONL).
+    pub fn history_path() -> Result<PathBuf> {
+        let dirs = ProjectDirs::from("dev", "gitpic", "gitpic").ok_or_else(|| {
+            AppError::new(
+                crate::error::ErrorCode::General,
+                "cannot resolve data directory",
+            )
+        })?;
+        Ok(dirs.data_dir().join("history.jsonl"))
     }
 
     /// Load config from disk, or return defaults if the file is missing.
@@ -82,23 +117,37 @@ impl Config {
         if !path.exists() {
             return Ok(Config::default());
         }
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| AppError::new(crate::error::ErrorCode::General, format!("read config: {e}")))?;
-        toml::from_str(&text)
-            .map_err(|e| AppError::new(crate::error::ErrorCode::General, format!("parse config: {e}")))
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            AppError::new(
+                crate::error::ErrorCode::General,
+                format!("read config: {e}"),
+            )
+        })?;
+        toml::from_str(&text).map_err(|e| {
+            AppError::new(
+                crate::error::ErrorCode::General,
+                format!("parse config: {e}"),
+            )
+        })
     }
 
     /// Persist config to disk (creating parent dirs).
     pub fn save(&self) -> Result<PathBuf> {
         let path = Self::path()?;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| AppError::new(crate::error::ErrorCode::General, format!("mkdir: {e}")))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AppError::new(crate::error::ErrorCode::General, format!("mkdir: {e}"))
+            })?;
         }
-        let text = toml::to_string_pretty(self)
-            .map_err(|e| AppError::new(crate::error::ErrorCode::General, format!("serialize: {e}")))?;
-        std::fs::write(&path, text)
-            .map_err(|e| AppError::new(crate::error::ErrorCode::General, format!("write config: {e}")))?;
+        let text = toml::to_string_pretty(self).map_err(|e| {
+            AppError::new(crate::error::ErrorCode::General, format!("serialize: {e}"))
+        })?;
+        std::fs::write(&path, text).map_err(|e| {
+            AppError::new(
+                crate::error::ErrorCode::General,
+                format!("write config: {e}"),
+            )
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -110,19 +159,29 @@ impl Config {
     /// Apply environment variable overrides in-place.
     pub fn apply_env(&mut self) {
         if let Ok(v) = std::env::var("GITPIC_TOKEN") {
-            if !v.is_empty() { self.github.token = v; }
+            if !v.is_empty() {
+                self.github.token = v;
+            }
         }
         if let Ok(v) = std::env::var("GITPIC_OWNER") {
-            if !v.is_empty() { self.github.owner = v; }
+            if !v.is_empty() {
+                self.github.owner = v;
+            }
         }
         if let Ok(v) = std::env::var("GITPIC_BRANCH") {
-            if !v.is_empty() { self.github.branch = v; }
+            if !v.is_empty() {
+                self.github.branch = v;
+            }
         }
         if let Ok(v) = std::env::var("GITPIC_LINK") {
-            if !v.is_empty() { self.upload.link_kind = v; }
+            if !v.is_empty() {
+                self.upload.link_kind = v;
+            }
         }
         if let Ok(v) = std::env::var("GITPIC_REPO") {
-            if !v.is_empty() { self.set_repo_spec(&v); }
+            if !v.is_empty() {
+                self.set_repo_spec(&v);
+            }
         }
     }
 

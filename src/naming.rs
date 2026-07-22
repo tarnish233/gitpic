@@ -28,7 +28,11 @@ fn slugify(stem: &str) -> String {
         // drop everything else
     }
     let trimmed = out.trim_matches('-').to_string();
-    if trimmed.is_empty() { "image".to_string() } else { trimmed }
+    if trimmed.is_empty() {
+        "image".to_string()
+    } else {
+        trimmed
+    }
 }
 
 /// Render the path template.
@@ -38,10 +42,7 @@ fn slugify(stem: &str) -> String {
 pub fn render_path(template: &str, original_name: &str, hash_hex: &str) -> String {
     let now = chrono::Local::now();
     let path = Path::new(original_name);
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("image");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
     let ext = path
         .extension()
         .and_then(|s| s.to_str())
@@ -67,4 +68,21 @@ pub fn alt_text(original_name: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("image")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn template_renders_placeholders() {
+        let hash = "abcdef1234567890";
+        let p = render_path("images/{hash8}-{name}.{ext}", "My Photo.PNG", hash);
+        assert_eq!(p, "images/abcdef12-my-photo.png");
+    }
+
+    #[test]
+    fn alt_text_strips_ext() {
+        assert_eq!(alt_text("dir/shot.jpg"), "shot");
+    }
 }
