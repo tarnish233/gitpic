@@ -5,6 +5,13 @@ edition = "2021"
 description = "Upload local/clipboard images to a GitHub repo (image host) and get a Markdown link"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/tarnish233/gitpic-cli"
+homepage = "https://github.com/tarnish233/gitpic-cli"
+documentation = "https://github.com/tarnish233/gitpic-cli"
+authors = ["tarnish233"]
+keywords = ["github", "image", "upload", "markdown", "cli"]
+categories = ["command-line-utilities"]
+exclude = [".github/", "target/"]
 
 [[bin]]
 name = "gitpic"
