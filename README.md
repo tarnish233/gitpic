@@ -31,8 +31,28 @@ export GITPIC_BRANCH="main"            # optional (default: main)
 export GITPIC_LINK="cdn"               # optional: cdn (jsDelivr) | raw
 ```
 
-Config lives at (platform dependent, e.g. macOS):
-`~/Library/Application Support/gitpic/config.toml`
+Config lives at `~/.config/gitpic/config.toml` (honors `$XDG_CONFIG_HOME`).
+You can hand-write it or generate it with `gitpic init`. Example:
+
+```toml
+[github]
+token  = "github_pat_xxx"
+owner  = "your-name"
+repo   = "img"
+branch = "main"
+
+[upload]
+path_template = "images/{year}/{month}/{hash8}-{name}.{ext}"
+link_kind     = "cdn"   # cdn (jsDelivr) | raw
+dedup         = true
+auto_copy     = true
+compress      = false
+max_width     = 0        # 0 = keep original
+quality       = 82       # JPEG quality when compressing
+```
+
+Upload history is stored at `~/.local/share/gitpic/history.jsonl`
+(honors `$XDG_DATA_HOME`).
 
 ## Usage
 
@@ -69,6 +89,9 @@ gitpic config set upload.quality 82
 ```
 
 ## Shell completion
+
+Installed automatically when you use Homebrew (`bash`, `zsh`, `fish`). For manual
+installs, generate the script yourself:
 
 ```bash
 gitpic completion zsh  > ~/.zfunc/_gitpic     # then autoload

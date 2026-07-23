@@ -5,7 +5,6 @@
 //!             GITPIC_BRANCH, GITPIC_LINK (cdn|raw)
 
 use crate::error::{AppError, Result};
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -88,27 +87,44 @@ fn default_quality() -> u8 {
     82
 }
 
-impl Config {
-    /// Locate the config file path (does not require it to exist).
-    pub fn path() -> Result<PathBuf> {
-        let dirs = ProjectDirs::from("dev", "gitpic", "gitpic").ok_or_else(|| {
+/// Resolve a base directory: prefer the given XDG env var, else `$HOME/<fallback>`
+/// (on Windows, fall back to `%USERPROFILE%`).
+fn base_dir(xdg_var: &str, fallback: &str) -> Result<PathBuf> {
+    if let Ok(v) = std::env::var(xdg_var) {
+        if !v.is_empty() {
+            return Ok(PathBuf::from(v));
+        }
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| {
             AppError::new(
                 crate::error::ErrorCode::General,
-                "cannot resolve config directory",
+                "cannot resolve home directory",
             )
         })?;
-        Ok(dirs.config_dir().join("config.toml"))
+    let mut p = PathBuf::from(home);
+    for part in fallback.split('/') {
+        p.push(part);
+    }
+    Ok(p)
+}
+
+impl Config {
+    /// Locate the config file: `$XDG_CONFIG_HOME/gitpic/config.toml`
+    /// (falls back to `~/.config/gitpic/config.toml`). Does not require it to exist.
+    pub fn path() -> Result<PathBuf> {
+        Ok(base_dir("XDG_CONFIG_HOME", ".config")?
+            .join("gitpic")
+            .join("config.toml"))
     }
 
-    /// Locate the upload-history file (JSONL).
+    /// Locate the upload-history file: `$XDG_DATA_HOME/gitpic/history.jsonl`
+    /// (falls back to `~/.local/share/gitpic/history.jsonl`).
     pub fn history_path() -> Result<PathBuf> {
-        let dirs = ProjectDirs::from("dev", "gitpic", "gitpic").ok_or_else(|| {
-            AppError::new(
-                crate::error::ErrorCode::General,
-                "cannot resolve data directory",
-            )
-        })?;
-        Ok(dirs.data_dir().join("history.jsonl"))
+        Ok(base_dir("XDG_DATA_HOME", ".local/share")?
+            .join("gitpic")
+            .join("history.jsonl"))
     }
 
     /// Load config from disk, or return defaults if the file is missing.
