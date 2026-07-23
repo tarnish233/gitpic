@@ -49,13 +49,37 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<()> {
         quality: cli.quality.unwrap_or(cfg.upload.quality),
     };
 
+    if cli.verbose > 0 {
+        eprintln!(
+            "gitpic: target {}/{}@{} link={:?} compress={}",
+            cfg.github.owner, cfg.github.repo, cfg.github.branch, kind, compress.enabled
+        );
+    }
+
     let mut results: Vec<ItemResult> = Vec::with_capacity(inputs.len());
     for img in &inputs {
         let (bytes, name) = imageproc::maybe_compress(&img.name, img.bytes.clone(), &compress);
+        if cli.verbose > 1 && bytes.len() != img.bytes.len() {
+            eprintln!(
+                "gitpic: {} compressed {} -> {} bytes",
+                img.name,
+                img.bytes.len(),
+                bytes.len()
+            );
+        }
         let hash = naming::sha256_hex(&bytes);
         let remote_path = naming::render_path(&template, &name, &hash);
         let message = format!("gitpic: upload {}", remote_path);
         let outcome = gh.put_file(&remote_path, &bytes, &message, dedup).await?;
+        if cli.verbose > 0 {
+            eprintln!(
+                "gitpic: {} -> {} ({} bytes){}",
+                name,
+                outcome.path,
+                outcome.size,
+                if outcome.deduped { " [deduped]" } else { "" }
+            );
+        }
         let item = build_item(
             &outcome,
             &name,

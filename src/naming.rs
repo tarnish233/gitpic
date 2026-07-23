@@ -27,12 +27,9 @@ fn slugify(stem: &str) -> String {
         }
         // drop everything else
     }
-    let trimmed = out.trim_matches('-').to_string();
-    if trimmed.is_empty() {
-        "image".to_string()
-    } else {
-        trimmed
-    }
+    // May be empty for all-non-ASCII names; the caller substitutes a unique
+    // fallback (content hash) so distinct images never collapse to one name.
+    out.trim_matches('-').to_string()
 }
 
 /// Render the path template.
@@ -50,6 +47,14 @@ pub fn render_path(template: &str, original_name: &str, hash_hex: &str) -> Strin
         .to_ascii_lowercase();
 
     let hash8 = &hash_hex[..hash_hex.len().min(8)];
+    // Use the slug when available; otherwise fall back to the content hash so
+    // non-ASCII filenames stay unique instead of all becoming the same name.
+    let slug = slugify(stem);
+    let name = if slug.is_empty() {
+        hash8.to_string()
+    } else {
+        slug
+    };
 
     template
         .replace("{year}", &format!("{:04}", now.year()))
@@ -57,7 +62,7 @@ pub fn render_path(template: &str, original_name: &str, hash_hex: &str) -> Strin
         .replace("{day}", &format!("{:02}", now.day()))
         .replace("{hash8}", hash8)
         .replace("{hash}", hash_hex)
-        .replace("{name}", &slugify(stem))
+        .replace("{name}", &name)
         .replace("{ext}", &ext)
 }
 
@@ -84,5 +89,13 @@ mod tests {
     #[test]
     fn alt_text_strips_ext() {
         assert_eq!(alt_text("dir/shot.jpg"), "shot");
+    }
+
+    #[test]
+    fn non_ascii_name_falls_back_to_hash() {
+        let hash = "abcdef1234567890";
+        // All non-ASCII stem => slug empty => name becomes hash8, not "image".
+        let p = render_path("{name}.{ext}", "\u{56fe}\u{7247}.png", hash);
+        assert_eq!(p, "abcdef12.png");
     }
 }

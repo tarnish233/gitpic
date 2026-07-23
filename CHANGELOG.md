@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-07-23
+
+### Fixed
+- Upload options (`--link`, `--format`, `--no-copy`, `--name`, `--stdin`,
+  `--path`, `--repo`, `--compress`, `--max-width`, `--quality`) are now global,
+  so they work after a subcommand too, e.g. `gitpic paste --name shot.png --link raw`.
+- `--verbose`/`-v` now emits progress diagnostics to stderr (was a no-op).
+- `--max-width` resize is honored even when the re-encoded file is not smaller
+  (resize intent no longer silently discarded).
+- Non-ASCII filenames no longer all collapse to `image`; the remote name falls
+  back to the content hash so distinct images stay unique.
+
+### Tests
+- Added CLI parsing tests (options after subcommand), a non-ASCII naming test,
+  and an image-resize test.
+
 ## [0.1.1] - 2026-07-23
 
 ### Changed
@@ -32,5 +48,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
+[0.1.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.2
 [0.1.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.1
 [0.1.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.0

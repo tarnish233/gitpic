@@ -46,47 +46,47 @@ pub struct Cli {
     pub verbose: u8,
 
     /// Read image bytes from stdin instead of a file
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub stdin: bool,
 
     /// Filename for stdin/clipboard uploads (e.g. shot.png)
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub name: Option<String>,
 
     /// Link kind override: cdn (jsDelivr) or raw (GitHub)
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, global = true)]
     pub link: Option<LinkKind>,
 
     /// Output format: md | html | url
-    #[arg(short, long, value_enum, default_value_t = OutputFormat::Md)]
+    #[arg(short, long, value_enum, default_value_t = OutputFormat::Md, global = true)]
     pub format: OutputFormat,
 
     /// Do not copy the result to the clipboard
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub no_copy: bool,
 
     /// Compress/resize the image before uploading
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub compress: bool,
 
     /// Disable compression even if enabled in config
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub no_compress: bool,
 
     /// Resize so width <= N pixels (0 = keep original)
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub max_width: Option<u32>,
 
     /// JPEG quality 1-100 when compressing (default from config)
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub quality: Option<u8>,
 
     /// Override the upload path template
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     pub path: Option<String>,
 
     /// Override target repo (owner/repo)
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub repo: Option<String>,
 
     #[command(subcommand)]
@@ -130,4 +130,47 @@ pub enum ConfigAction {
     Path,
     /// Open the config file in $EDITOR
     Edit,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn upload_options_work_after_subcommand() {
+        // Regression: these used to be rejected after `paste` (not global).
+        let cli = Cli::try_parse_from([
+            "gitpic",
+            "paste",
+            "--no-copy",
+            "--link",
+            "raw",
+            "--name",
+            "shot.png",
+            "-f",
+            "url",
+        ])
+        .expect("paste should accept upload options");
+        assert!(matches!(cli.command, Some(Command::Paste)));
+        assert!(cli.no_copy);
+        assert_eq!(cli.link, Some(LinkKind::Raw));
+        assert_eq!(cli.name.as_deref(), Some("shot.png"));
+        assert_eq!(cli.format, OutputFormat::Url);
+    }
+
+    #[test]
+    fn upload_options_work_before_and_default() {
+        let cli = Cli::try_parse_from(["gitpic", "a.png", "--json", "--max-width", "800"])
+            .expect("default upload should parse");
+        assert!(cli.command.is_none());
+        assert!(cli.json);
+        assert_eq!(cli.max_width, Some(800));
+    }
+
+    #[test]
+    fn completion_parses_shell() {
+        let cli = Cli::try_parse_from(["gitpic", "completion", "zsh"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Completion { .. })));
+    }
 }

@@ -31,10 +31,12 @@ pub fn maybe_compress(name: &str, bytes: Vec<u8>, opts: &CompressOpts) -> (Vec<u
     };
 
     let mut img = img;
+    let mut resized = false;
     if opts.max_width > 0 && img.width() > opts.max_width {
         let new_h = ((img.height() as u64 * opts.max_width as u64) / img.width() as u64) as u32;
         let new_h = new_h.max(1);
         img = img.resize(opts.max_width, new_h, image::imageops::FilterType::Lanczos3);
+        resized = true;
     }
 
     let mut out: Vec<u8> = Vec::new();
@@ -66,8 +68,9 @@ pub fn maybe_compress(name: &str, bytes: Vec<u8>, opts: &CompressOpts) -> (Vec<u
         return (bytes, name.to_string());
     }
 
-    // Only keep the compressed version if it is actually smaller.
-    if out.len() >= bytes.len() {
+    // If we resized, honor the explicit dimension change even if the byte size
+    // did not shrink. For pure recompression, only keep it when it is smaller.
+    if !resized && out.len() >= bytes.len() {
         return (bytes, name.to_string());
     }
     (out, name.to_string())
@@ -102,6 +105,21 @@ mod tests {
         assert_eq!(decoded.width(), 200);
         assert_eq!(decoded.height(), 100);
         assert_eq!(name, "big.png");
+    }
+
+    #[test]
+    fn resized_output_is_kept_and_smaller() {
+        // A large gradient PNG resized to a small width must come back resized.
+        let bytes = png_of(1200, 600);
+        let opts = CompressOpts {
+            enabled: true,
+            max_width: 64,
+            quality: 82,
+        };
+        let (out, _) = maybe_compress("big.png", bytes.clone(), &opts);
+        let decoded = image::load_from_memory(&out).unwrap();
+        assert_eq!(decoded.width(), 64);
+        assert!(out.len() < bytes.len());
     }
 
     #[test]
