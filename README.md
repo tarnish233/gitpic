@@ -1,38 +1,48 @@
 # gitpic
 
-Upload local or clipboard images to a GitHub repository (used as an image host)
-and get a Markdown link — instantly copied to your clipboard.
+**简体中文** | [English](./README.en.md)
 
-Human-friendly on the terminal, machine-friendly (`--json`) for scripts and AI
-agents. Single static binary, no runtime required.
+把本地或剪贴板里的图片上传到 GitHub 仓库（当图床），一键生成 Markdown 链接，并自动复制到剪贴板。
 
-## Install
+终端里对人友好，加 `--json` 后对脚本 / AI Agent 友好。单个静态二进制，无需运行时。
+
+## 安装
+
+**Homebrew（推荐，自动进 PATH、自动装补全）**
+
+```bash
+brew install tarnish233/tap/gitpic
+```
+
+**下载预编译二进制**
+
+到 [Releases](https://github.com/tarnish233/gitpic-cli/releases) 下载对应平台的压缩包，解压得到 `gitpic`。macOS 首次运行需解除隔离：
+
+```bash
+tar -xzf gitpic-aarch64-apple-darwin.tar.gz     # Apple Silicon
+xattr -d com.apple.quarantine ./gitpic 2>/dev/null
+chmod +x ./gitpic && mv ./gitpic ~/.local/bin/  # 确保 ~/.local/bin 在 PATH
+```
+
+> Intel Mac 用 `x86_64-apple-darwin`，Linux 用 `x86_64-unknown-linux-gnu`，Windows 是 `.zip`（解压得到 `gitpic.exe`）。
+
+**从源码**
 
 ```bash
 cargo install --path .
-# or after building:
-cargo build --release && cp target/release/gitpic ~/.local/bin/
 ```
 
-## Setup
+## 配置
 
-Interactive:
+需要一个 GitHub 细粒度 token（对图床仓库有 `Contents: Read/Write` 权限）。
+
+交互式：
 
 ```bash
 gitpic init
 ```
 
-Or via environment variables (nothing written to disk):
-
-```bash
-export GITPIC_TOKEN="github_pat_xxx"   # fine-grained token, Contents: Read/Write
-export GITPIC_REPO="your-name/img"     # owner/name
-export GITPIC_BRANCH="main"            # optional (default: main)
-export GITPIC_LINK="cdn"               # optional: cdn (jsDelivr) | raw
-```
-
-Config lives at `~/.config/gitpic/config.toml` (honors `$XDG_CONFIG_HOME`).
-You can hand-write it or generate it with `gitpic init`. Example:
+或直接手写 `~/.config/gitpic/config.toml`（遵循 `$XDG_CONFIG_HOME`）：
 
 ```toml
 [github]
@@ -47,73 +57,79 @@ link_kind     = "cdn"   # cdn (jsDelivr) | raw
 dedup         = true
 auto_copy     = true
 compress      = false
-max_width     = 0        # 0 = keep original
-quality       = 82       # JPEG quality when compressing
+max_width     = 0        # 0 = 不缩放
+quality       = 82       # 压缩时的 JPEG 质量
 ```
 
-Upload history is stored at `~/.local/share/gitpic/history.jsonl`
-(honors `$XDG_DATA_HOME`).
-
-## Usage
+或用环境变量（不落盘，优先级高于配置文件）：
 
 ```bash
-gitpic screenshot.png            # upload, print markdown, copy to clipboard
-gitpic a.png b.png               # batch upload
-gitpic paste                     # upload the image on your clipboard
+export GITPIC_TOKEN="github_pat_xxx"
+export GITPIC_REPO="your-name/img"     # owner/name
+export GITPIC_BRANCH="main"            # 可选
+export GITPIC_LINK="cdn"               # 可选：cdn | raw
+```
+
+上传历史保存在 `~/.local/share/gitpic/history.jsonl`（遵循 `$XDG_DATA_HOME`）。
+
+## 使用
+
+```bash
+gitpic screenshot.png            # 上传 → 打印 markdown → 复制到剪贴板
+gitpic a.png b.png               # 批量上传
+gitpic paste                     # 上传剪贴板里的图片（截图后直接用）
 cat img.png | gitpic --stdin --name shot.png
-gitpic doctor                    # verify token + repo access
-gitpic list                      # show recent uploads (local history)
-gitpic completion zsh            # print shell completion script
+gitpic doctor                    # 检查 token 与仓库权限
+gitpic list                      # 查看最近上传（本地历史）
+gitpic completion zsh            # 打印 shell 补全脚本
 
-# output control
-gitpic photo.jpg -q -f url       # only print the URL
-gitpic photo.jpg --json          # structured JSON (for scripts / agents)
-gitpic photo.jpg --link raw      # use raw.githubusercontent.com
+# 输出控制
+gitpic photo.jpg -q -f url       # 只打印 URL
+gitpic photo.jpg --json          # 结构化 JSON（脚本 / agent）
+gitpic photo.jpg --link raw      # 用 raw.githubusercontent.com
 
-# compression / resizing
-gitpic big.png --compress                    # compress before upload
-gitpic big.png --compress --max-width 1600   # resize so width <= 1600
-gitpic big.jpg --compress --quality 80       # JPEG quality
+# 压缩 / 缩放
+gitpic big.png --compress                    # 上传前压缩
+gitpic big.png --compress --max-width 1600   # 缩放到宽度 <= 1600
+gitpic big.jpg --compress --quality 80       # JPEG 质量
 ```
 
-## Config keys
+## 配置管理
 
 ```bash
-gitpic config path
-gitpic config get
-gitpic config set github.repo owner/name
+gitpic config path                       # 打印配置文件路径
+gitpic config get                        # 查看全部配置
+gitpic config set github.repo owner/name # 修改某项
 gitpic config set upload.link_kind raw
 gitpic config set upload.compress true
 gitpic config set upload.max_width 1600
-gitpic config set upload.quality 82
+gitpic config edit                       # 用 $EDITOR 打开配置文件
 ```
 
-## Shell completion
+`path_template` 占位符：`{year} {month} {day} {hash} {hash8} {name} {ext}`
 
-Installed automatically when you use Homebrew (`bash`, `zsh`, `fish`). For manual
-installs, generate the script yourself:
+## Shell 补全
+
+用 Homebrew 安装时会**自动装好** bash / zsh / fish 补全（zsh 用户新开终端即可生效）。手动安装可自己生成：
 
 ```bash
-gitpic completion zsh  > ~/.zfunc/_gitpic     # then autoload
+gitpic completion zsh  > ~/.zfunc/_gitpic
 gitpic completion bash > /etc/bash_completion.d/gitpic
 gitpic completion fish > ~/.config/fish/completions/gitpic.fish
 ```
 
-## Downloads
+## 退出码
 
-Prebuilt binaries for macOS (Apple Silicon + Intel), Linux, and Windows are
-attached to each [GitHub Release](../../releases) (built by CI on `v*` tags).
+`0` 成功 · `2` 参数错误 · `3` 缺少配置 · `4` 认证失败 · `5` 网络错误 · `6` 文件不存在
 
-`path_template` placeholders: `{year} {month} {day} {hash} {hash8} {name} {ext}`
+## Agent 集成
 
-## Exit codes
+见 [`SKILL.md`](./SKILL.md)。调用时始终带上 `--json --no-copy`。
 
-`0` ok · `2` usage · `3` config missing · `4` auth failed · `5` network · `6` file not found
+## 更新日志
 
-## Agent integration
+见 [CHANGELOG.md](./CHANGELOG.md)。
 
-See [`SKILL.md`](./SKILL.md). Always call with `--json --no-copy`.
-
-## License
+## 许可证
 
 MIT
