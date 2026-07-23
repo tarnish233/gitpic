@@ -6,6 +6,26 @@
 
 终端里对人友好，加 `--json` 后对脚本 / AI Agent 友好。单个静态二进制，无需运行时。
 
+## 演示
+
+```console
+$ gitpic init
+✓ saved config to ~/.config/gitpic/config.toml
+
+$ gitpic ~/Desktop/shot.png
+✓ uploaded shot  📋 已复制到剪贴板
+![shot](https://cdn.jsdelivr.net/gh/your-name/img@main/images/2026/07/a1b2c3d4-shot.png)
+
+$ pbpaste                       # 剪贴板里已是上面的 markdown
+
+$ gitpic list
+2026-07-23  shot
+  https://cdn.jsdelivr.net/gh/your-name/img@main/images/2026/07/a1b2c3d4-shot.png
+```
+
+> 提示：录制动图可用 [asciinema](https://asciinema.org/)：`asciinema rec demo.cast`，
+> 跑几条上面的命令后 `Ctrl-D` 结束，再上传获取分享链接放到这里。
+
 ## 安装
 
 **Homebrew（推荐，自动进 PATH、自动装补全）**

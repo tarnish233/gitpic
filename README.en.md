@@ -8,6 +8,25 @@ and get a Markdown link — instantly copied to your clipboard.
 Human-friendly on the terminal, machine-friendly (`--json`) for scripts and AI
 agents. Single static binary, no runtime required.
 
+## Demo
+
+```console
+$ gitpic init
+✓ saved config to ~/.config/gitpic/config.toml
+
+$ gitpic ~/Desktop/shot.png
+✓ uploaded shot  📋 copied to clipboard
+![shot](https://cdn.jsdelivr.net/gh/your-name/img@main/images/2026/07/a1b2c3d4-shot.png)
+
+$ gitpic list
+2026-07-23  shot
+  https://cdn.jsdelivr.net/gh/your-name/img@main/images/2026/07/a1b2c3d4-shot.png
+```
+
+> Tip: record a cast with [asciinema](https://asciinema.org/): run
+> `asciinema rec demo.cast`, execute a few commands above, press `Ctrl-D`, then
+> upload it and drop the share link here.
+
 ## Install
 
 ```bash
