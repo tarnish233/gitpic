@@ -5,7 +5,7 @@ description: >-
   Markdown link. Use when the user wants to "upload an image", "turn this image
   into a link", "host an image", "get a markdown link for a screenshot",
   "把图片上传图床", or "生成图片 markdown 链接". Requires the `gitpic` CLI installed
-  and a GitHub token configured.
+  and a GitHub token configured (install via `brew install tarnish233/tap/gitpic`).
 ---
 
 # gitpic — GitHub image host uploader
@@ -13,6 +13,26 @@ description: >-
 `gitpic` uploads an image to a GitHub repository (used as an image host) and
 prints a Markdown link. It is human/agent dual-mode: always pass `--json` and
 `--no-copy` when calling it programmatically.
+
+## Installation
+
+First check whether the CLI exists: `command -v gitpic`. If it is missing,
+install it one of these ways, then verify with `gitpic --version`:
+
+- Homebrew (macOS/Linux, recommended — also auto-installs shell completions):
+  ```bash
+  brew install tarnish233/tap/gitpic
+  ```
+- Prebuilt binary: download the matching asset from the latest
+  [release](https://github.com/tarnish233/gitpic-cli/releases), extract, and put
+  `gitpic` on `PATH`. On macOS clear the quarantine flag first:
+  ```bash
+  xattr -d com.apple.quarantine ./gitpic 2>/dev/null; chmod +x ./gitpic
+  ```
+- From source (needs Rust):
+  ```bash
+  cargo install --git https://github.com/tarnish233/gitpic-cli
+  ```
 
 ## 0. Preflight
 
@@ -51,6 +71,14 @@ cat image.png | gitpic --stdin --name shot.png --json
 ```
 
 Use this when you only have image bytes (e.g. a screenshot buffer).
+
+## 4. Other useful commands
+
+```bash
+gitpic big.png --compress --max-width 1600 --json --no-copy   # shrink before upload
+gitpic photo.png --link raw --json --no-copy                  # force raw GitHub URL
+gitpic list --json                                            # recent uploads (history)
+```
 
 ## Output schema (success)
 
