@@ -82,7 +82,9 @@ fn set_key(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
                 .parse()
                 .map_err(|_| AppError::usage(format!("invalid u8 (1-100): {value}")))?;
             if !(1..=100).contains(&q) {
-                return Err(AppError::usage(format!("quality out of range (1-100): {value}")));
+                return Err(AppError::usage(format!(
+                    "quality out of range (1-100): {value}"
+                )));
             }
             cfg.upload.quality = q;
         }
