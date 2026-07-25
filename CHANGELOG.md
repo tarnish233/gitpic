@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-25
+
 ### Changed
 - `gitpic config set upload.quality` now rejects values outside `1-100`
   instead of silently storing an out-of-range value (it was clamped at
@@ -55,6 +57,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
+[0.1.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.3
 [0.1.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.2
 [0.1.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.1
 [0.1.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.0
