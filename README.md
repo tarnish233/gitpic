@@ -78,7 +78,7 @@ dedup         = true
 auto_copy     = true
 compress      = false
 max_width     = 0        # 0 = 不缩放
-quality       = 82       # 压缩时的 JPEG 质量
+quality       = 82       # 压缩时的 JPEG 质量（1-100）
 ```
 
 或用环境变量（不落盘，优先级高于配置文件）：

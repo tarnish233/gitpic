@@ -69,7 +69,7 @@ dedup         = true
 auto_copy     = true
 compress      = false
 max_width     = 0        # 0 = keep original
-quality       = 82       # JPEG quality when compressing
+quality       = 82       # JPEG quality when compressing (1-100)
 ```
 
 Upload history is stored at `~/.local/share/gitpic/history.jsonl`

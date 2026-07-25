@@ -76,6 +76,7 @@ Use this when you only have image bytes (e.g. a screenshot buffer).
 
 ```bash
 gitpic big.png --compress --max-width 1600 --json --no-copy   # shrink before upload
+gitpic big.jpg --compress --quality 80 --json --no-copy       # JPEG quality (1-100)
 gitpic photo.png --link raw --json --no-copy                  # force raw GitHub URL
 gitpic list --json                                            # recent uploads (history)
 ```
