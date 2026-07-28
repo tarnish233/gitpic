@@ -3,6 +3,7 @@
 use crate::error::{AppError, ErrorCode, Result};
 use base64::Engine;
 use serde::Deserialize;
+use sha1::{Digest, Sha1};
 
 const API: &str = "https://api.github.com";
 const UA: &str = concat!("gitpic/", env!("CARGO_PKG_VERSION"));
@@ -84,8 +85,18 @@ impl GitHub {
 
     fn map_status(status: reqwest::StatusCode, body: &str) -> AppError {
         match status.as_u16() {
-            401 | 403 => AppError::auth(format!("GitHub auth failed ({status}): {body}")),
-            404 => AppError::not_found(format!("not found ({status}): {body}")),
+            401 => AppError::auth(format!("GitHub authentication failed ({status}): {body}")),
+            403 if body.to_ascii_lowercase().contains("rate limit") => {
+                AppError::rate_limited(format!("GitHub rate limit reached ({status}): {body}"))
+            }
+            403 => {
+                AppError::permission_denied(format!("GitHub permission denied ({status}): {body}"))
+            }
+            404 => AppError::remote_not_found(format!(
+                "GitHub repository, branch, or remote path not found ({status}): {body}"
+            )),
+            429 => AppError::rate_limited(format!("GitHub rate limit reached ({status}): {body}")),
+            500..=599 => AppError::network(format!("GitHub server error ({status}): {body}")),
             _ => AppError::new(
                 ErrorCode::General,
                 format!("GitHub error ({status}): {body}"),
@@ -120,7 +131,7 @@ impl GitHub {
     }
 
     /// Upload (create or update) a file at `path` with `bytes`.
-    /// If `dedup` is true and a file already exists at `path`, skip the upload.
+    /// If `dedup` is true and identical bytes already exist at `path`, skip the upload.
     pub async fn put_file(
         &self,
         path: &str,
@@ -131,7 +142,7 @@ impl GitHub {
         let existing = self.get_existing(path).await?;
 
         if let Some(ref e) = existing {
-            if dedup {
+            if dedup && content_matches(&e.sha, bytes) {
                 return Ok(PutOutcome {
                     path: path.to_string(),
                     content_sha: e.sha.clone(),
@@ -219,5 +230,61 @@ impl GitHub {
         resp.json()
             .await
             .map_err(|e| AppError::new(ErrorCode::General, format!("parse repo: {e}")))
+    }
+}
+
+/// GitHub's Contents API reports a Git blob SHA-1, not a plain file SHA-1.
+fn git_blob_sha(bytes: &[u8]) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(format!("blob {}\0", bytes.len()).as_bytes());
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn content_matches(existing_blob_sha: &str, bytes: &[u8]) -> bool {
+    existing_blob_sha.eq_ignore_ascii_case(&git_blob_sha(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn computes_git_blob_sha() {
+        assert_eq!(
+            git_blob_sha(b""),
+            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+        );
+    }
+
+    #[test]
+    fn dedup_requires_identical_content() {
+        let existing = git_blob_sha(b"first image");
+        assert!(content_matches(&existing, b"first image"));
+        assert!(!content_matches(&existing, b"different image"));
+    }
+
+    #[test]
+    fn classifies_remote_errors_for_agents() {
+        assert_eq!(
+            GitHub::map_status(reqwest::StatusCode::UNAUTHORIZED, "bad credentials").code,
+            ErrorCode::AuthFailed
+        );
+        assert_eq!(
+            GitHub::map_status(reqwest::StatusCode::FORBIDDEN, "Resource not accessible").code,
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            GitHub::map_status(reqwest::StatusCode::FORBIDDEN, "API rate limit exceeded").code,
+            ErrorCode::RateLimited
+        );
+        assert_eq!(
+            GitHub::map_status(reqwest::StatusCode::NOT_FOUND, "Not Found").code,
+            ErrorCode::RemoteNotFound
+        );
+        assert_eq!(
+            GitHub::map_status(reqwest::StatusCode::BAD_GATEWAY, "upstream").code,
+            ErrorCode::Network
+        );
     }
 }

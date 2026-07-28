@@ -12,12 +12,15 @@ pub fn run(action: &ConfigAction) -> Result<()> {
         ConfigAction::Get { key } => {
             let cfg = Config::load()?;
             match key.as_deref() {
-                None => println!("{}", toml::to_string_pretty(&cfg).unwrap_or_default()),
+                None => {
+                    let safe = redacted_config(&cfg);
+                    println!("{}", toml::to_string_pretty(&safe).unwrap_or_default());
+                }
                 Some(k) => println!("{}", get_key(&cfg, k)?),
             }
         }
         ConfigAction::Set { key, value } => {
-            let mut cfg = Config::load().unwrap_or_default();
+            let mut cfg = Config::load()?;
             set_key(&mut cfg, key, value)?;
             let path = cfg.save()?;
             println!("\u{2713} set {key} in {}", path.display());
@@ -45,7 +48,7 @@ pub fn run(action: &ConfigAction) -> Result<()> {
 
 fn get_key(cfg: &Config, key: &str) -> Result<String> {
     let v = match key {
-        "github.token" => cfg.github.token.clone(),
+        "github.token" => redact_token(&cfg.github.token),
         "github.owner" => cfg.github.owner.clone(),
         "github.repo" => cfg.github.repo.clone(),
         "github.branch" => cfg.github.branch.clone(),
@@ -59,6 +62,20 @@ fn get_key(cfg: &Config, key: &str) -> Result<String> {
         _ => return Err(AppError::usage(format!("unknown key: {key}"))),
     };
     Ok(v)
+}
+
+fn redact_token(token: &str) -> String {
+    if token.is_empty() {
+        String::new()
+    } else {
+        "<redacted>".to_string()
+    }
+}
+
+fn redacted_config(cfg: &Config) -> Config {
+    let mut safe = cfg.clone();
+    safe.github.token = redact_token(&safe.github.token);
+    safe
 }
 
 fn set_key(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
@@ -98,5 +115,25 @@ fn parse_bool(v: &str) -> Result<bool> {
         "true" | "1" | "yes" | "on" => Ok(true),
         "false" | "0" | "no" | "off" => Ok(false),
         _ => Err(AppError::usage(format!("invalid bool: {v}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_is_never_returned_by_get_key() {
+        let mut cfg = Config::default();
+        cfg.github.token = "sensitive-value-for-test".to_string();
+        assert_eq!(get_key(&cfg, "github.token").unwrap(), "<redacted>");
+        let rendered = toml::to_string_pretty(&redacted_config(&cfg)).unwrap();
+        assert!(!rendered.contains("sensitive-value-for-test"));
+        assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn empty_token_stays_empty_when_redacted() {
+        assert_eq!(redact_token(""), "");
     }
 }

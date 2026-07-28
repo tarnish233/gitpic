@@ -24,14 +24,16 @@ fn prompt(label: &str, default: &str) -> Result<String> {
 }
 
 pub fn run() -> Result<()> {
-    let mut cfg = Config::load().unwrap_or_default();
+    let mut cfg = Config::load()?;
 
     println!("gitpic init — configure your GitHub image host\n");
 
-    let token = prompt(
-        "GitHub token (fine-grained, Contents R/W)",
-        &cfg.github.token,
-    )?;
+    let token_label = if cfg.github.token.is_empty() {
+        "GitHub token (fine-grained, Contents R/W)"
+    } else {
+        "GitHub token (leave blank to keep the configured token)"
+    };
+    let token = prompt(token_label, "")?;
     let repo_spec = {
         let cur = if cfg.github.owner.is_empty() {
             String::new()
@@ -43,7 +45,9 @@ pub fn run() -> Result<()> {
     let branch = prompt("Branch", &cfg.github.branch)?;
     let link = prompt("Link kind (cdn|raw)", &cfg.upload.link_kind)?;
 
-    cfg.github.token = token;
+    if !token.is_empty() {
+        cfg.github.token = token;
+    }
     cfg.set_repo_spec(&repo_spec);
     cfg.github.branch = if branch.is_empty() {
         "main".into()

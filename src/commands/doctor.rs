@@ -1,7 +1,7 @@
 //! Environment health check (agent-friendly).
 
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{ErrorCode, Result};
 use crate::github::GitHub;
 use crate::output::Mode;
 use owo_colors::OwoColorize;
@@ -19,13 +19,14 @@ struct DoctorReport {
     detail: Option<String>,
 }
 
-pub async fn run(cfg: &Config, mode: Mode) -> Result<()> {
+pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
     let config_ok = cfg.require_ready().is_ok();
 
     let mut token_valid = false;
     let mut repo_writable = false;
     let mut login = None;
     let mut detail = None;
+    let mut failure_code = None;
 
     if config_ok {
         match GitHub::new(
@@ -40,7 +41,10 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<()> {
                         token_valid = true;
                         login = Some(name);
                     }
-                    Err(e) => detail = Some(e.message),
+                    Err(e) => {
+                        failure_code = Some(e.code);
+                        detail = Some(e.message);
+                    }
                 }
                 if token_valid {
                     match gh.repo_info().await {
@@ -48,13 +52,20 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<()> {
                             repo_writable =
                                 info.permissions.map(|p| p.push || p.admin).unwrap_or(false);
                         }
-                        Err(e) => detail = Some(e.message),
+                        Err(e) => {
+                            failure_code = Some(e.code);
+                            detail = Some(e.message);
+                        }
                     }
                 }
             }
-            Err(e) => detail = Some(e.message),
+            Err(e) => {
+                failure_code = Some(e.code);
+                detail = Some(e.message);
+            }
         }
     } else {
+        failure_code = Some(ErrorCode::ConfigMissing);
         detail = Some("run `gitpic init` or set GITPIC_TOKEN and GITPIC_REPO".into());
     }
 
@@ -96,5 +107,13 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<()> {
             println!("  {} {}", "note:".yellow(), d);
         }
     }
-    Ok(())
+    if ok {
+        Ok(0)
+    } else if let Some(code) = failure_code {
+        Ok(code.exit_code())
+    } else {
+        // The token is valid and the repository exists, but GitHub reports no
+        // push/admin permission for it.
+        Ok(ErrorCode::PermissionDenied.exit_code())
+    }
 }

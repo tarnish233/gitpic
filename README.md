@@ -118,7 +118,7 @@ gitpic big.jpg --compress --quality 80       # JPEG 质量
 
 ```bash
 gitpic config path                       # 打印配置文件路径
-gitpic config get                        # 查看全部配置
+gitpic config get                        # 查看全部配置（token 会被隐藏）
 gitpic config set github.repo owner/name # 修改某项
 gitpic config set upload.link_kind raw
 gitpic config set upload.compress true
@@ -145,6 +145,10 @@ gitpic completion fish > ~/.config/fish/completions/gitpic.fish
 ## Agent 集成
 
 见 [`SKILL.md`](./SKILL.md)。调用时始终带上 `--json --no-copy`。
+
+`gitpic doctor` 在任一检查失败时返回非零退出码；脚本仍应解析 JSON 中的
+`config_ok`、`token_valid` 和 `repo_writable`。参数解析错误在 `--json` 模式下
+也会使用统一的 `{ "ok": false, "error": ... }` 结构。
 
 ## 更新日志
 

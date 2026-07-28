@@ -43,9 +43,12 @@ gitpic doctor --json
 ```
 
 Parse stdout JSON. Require `config_ok`, `token_valid`, and `repo_writable` to be
-`true`. If `config_ok` is false, tell the user to either run `gitpic init` or
+`true`; an unhealthy report also has a non-zero exit status. If `config_ok` is
+false, tell the user to either run `gitpic init` or
 set env vars `GITPIC_TOKEN` and `GITPIC_REPO=owner/name` (and optionally
-`GITPIC_BRANCH`, `GITPIC_LINK=cdn|raw`), then stop.
+`GITPIC_BRANCH`, `GITPIC_LINK=cdn|raw`), then stop. If `token_valid` is false,
+ask the user to update the token. If `repo_writable` is false, ask them to check
+the target repository and grant Contents read/write permission, then stop.
 
 ## 1. Upload a local image
 
@@ -67,12 +70,22 @@ gitpic "/abs/a.png" "/abs/b.jpg" --json --no-copy
 ## 3. Upload raw bytes (no file path)
 
 ```bash
-cat image.png | gitpic --stdin --name shot.png --json
+cat image.png | gitpic --stdin --name shot.png --json --no-copy
 ```
 
 Use this when you only have image bytes (e.g. a screenshot buffer).
 
-## 4. Other useful commands
+## 4. Upload an image explicitly requested from the clipboard
+
+```bash
+gitpic paste --json --no-copy
+```
+
+Use `paste` only when the user explicitly asks for the current clipboard image
+and the execution environment has clipboard access. Otherwise prefer a local
+absolute path or stdin.
+
+## 5. Other useful commands
 
 ```bash
 gitpic big.png --compress --max-width 1600 --json --no-copy   # shrink before upload
@@ -94,19 +107,23 @@ gitpic list --json                                            # recent uploads (
 
 ## Error handling (exit code / error.code)
 
-| exit | error.code       | agent action                          |
-|------|------------------|---------------------------------------|
-| 2    | USAGE            | fix the invocation                    |
-| 3    | CONFIG_MISSING   | ask user to configure token/repo      |
-| 4    | AUTH_FAILED      | token invalid/expired — ask to update |
-| 5    | NETWORK          | retry once, then report               |
-| 6    | NOT_FOUND        | check the file path                   |
+| exit | error.code          | agent action                                      |
+|------|---------------------|---------------------------------------------------|
+| 2    | USAGE               | fix the invocation                                |
+| 3    | CONFIG_MISSING      | ask user to configure token/repo                  |
+| 4    | AUTH_FAILED         | token invalid/expired — ask to update             |
+| 5    | NETWORK             | retry once, then report                           |
+| 6    | NOT_FOUND           | check the local input file path                   |
+| 7    | PERMISSION_DENIED   | check token Contents permission/repo access       |
+| 8    | REMOTE_NOT_FOUND    | check GitHub repository, branch, and remote path  |
+| 9    | RATE_LIMITED        | wait or ask the user before retrying later        |
 
 Error JSON: `{ "ok": false, "error": { "code": "AUTH_FAILED", "message": "…" } }`
 
 ## Constraints
 
-- Always pass `--json` and `--no-copy` (clipboard is meaningless for an agent).
+- Always pass `--json` and `--no-copy` for programmatic calls.
+- Only access the clipboard when the user explicitly requests it.
 - Use absolute file paths.
 - Never print the GitHub token in the conversation.
 - Prefer `--link cdn` (default) unless the user asks for raw GitHub links.

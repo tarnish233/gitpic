@@ -17,6 +17,12 @@ pub enum ErrorCode {
     Network,
     /// 6 - input file not found / unreadable
     NotFound,
+    /// 7 - authenticated, but the token cannot perform the requested action
+    PermissionDenied,
+    /// 8 - GitHub repository, branch, or remote path not found
+    RemoteNotFound,
+    /// 9 - GitHub API rate limit reached
+    RateLimited,
 }
 
 impl ErrorCode {
@@ -28,6 +34,9 @@ impl ErrorCode {
             ErrorCode::AuthFailed => 4,
             ErrorCode::Network => 5,
             ErrorCode::NotFound => 6,
+            ErrorCode::PermissionDenied => 7,
+            ErrorCode::RemoteNotFound => 8,
+            ErrorCode::RateLimited => 9,
         }
     }
 
@@ -39,6 +48,9 @@ impl ErrorCode {
             ErrorCode::AuthFailed => "AUTH_FAILED",
             ErrorCode::Network => "NETWORK",
             ErrorCode::NotFound => "NOT_FOUND",
+            ErrorCode::PermissionDenied => "PERMISSION_DENIED",
+            ErrorCode::RemoteNotFound => "REMOTE_NOT_FOUND",
+            ErrorCode::RateLimited => "RATE_LIMITED",
         }
     }
 }
@@ -70,6 +82,15 @@ impl AppError {
     }
     pub fn usage(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::Usage, msg)
+    }
+    pub fn permission_denied(msg: impl Into<String>) -> Self {
+        Self::new(ErrorCode::PermissionDenied, msg)
+    }
+    pub fn remote_not_found(msg: impl Into<String>) -> Self {
+        Self::new(ErrorCode::RemoteNotFound, msg)
+    }
+    pub fn rate_limited(msg: impl Into<String>) -> Self {
+        Self::new(ErrorCode::RateLimited, msg)
     }
 }
 

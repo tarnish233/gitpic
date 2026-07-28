@@ -101,7 +101,7 @@ gitpic big.jpg --compress --quality 80       # JPEG quality
 
 ```bash
 gitpic config path
-gitpic config get
+gitpic config get                        # token is redacted
 gitpic config set github.repo owner/name
 gitpic config set upload.link_kind raw
 gitpic config set upload.compress true
@@ -134,6 +134,11 @@ attached to each [GitHub Release](../../releases) (built by CI on `v*` tags).
 ## Agent integration
 
 See [`SKILL.md`](./SKILL.md). Always call with `--json --no-copy`.
+
+`gitpic doctor` exits non-zero when any check fails; scripts should still parse
+`config_ok`, `token_valid`, and `repo_writable` from its JSON report. Argument
+parsing failures also use the standard `{ "ok": false, "error": ... }` envelope
+when `--json` is present.
 
 ## Changelog
 
