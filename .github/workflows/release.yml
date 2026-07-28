@@ -29,6 +29,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Prepare release title and changelog
+        id: release_notes
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v version="$version" '
+            $0 ~ "^## \\[" version "\\]" { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          test -s RELEASE_NOTES.md
+          subtitle="$(awk '/^### / { sub(/^### /, ""); print; exit }' RELEASE_NOTES.md)"
+          if [[ -z "$subtitle" ]]; then subtitle="Release"; fi
+          echo "name=gitpic ${GITHUB_REF_NAME} — ${subtitle}" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -61,6 +76,8 @@ jobs:
       - name: Upload to release
         uses: softprops/action-gh-release@v3
         with:
+          name: ${{ steps.release_notes.outputs.name }}
+          body_path: RELEASE_NOTES.md
           files: |
             gitpic-${{ matrix.target }}.tar.gz
             gitpic-${{ matrix.target }}.tar.gz.sha256

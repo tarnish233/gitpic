@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-07-28
+
+### Safer credentials and reliable agent workflows
+- Protect configured GitHub tokens from accidental terminal or agent output.
+- Make health checks and JSON errors deterministic for scripts and agents.
+
+### Fixed
+- Redact configured GitHub tokens from `config get` and interactive prompts.
+- Preserve malformed configurations instead of silently replacing them with defaults.
+- Compare Git blob hashes before treating an existing remote path as deduplicated.
+- Emit JSON for argument errors when `--json` is requested, and make unhealthy
+  `doctor` reports exit non-zero.
+- Distinguish authentication, permission, remote-not-found, rate-limit, and
+  retryable GitHub server errors.
+
 ## [0.1.4] - 2026-07-25
 
 ### CI
@@ -63,6 +78,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
+[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.5
 [0.1.4]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.4
 [0.1.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.3
 [0.1.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.2
