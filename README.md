@@ -4,7 +4,7 @@
 
 把本地或剪贴板里的图片上传到 GitHub 仓库（当图床），一键生成 Markdown 链接，并自动复制到剪贴板。
 
-终端里对人友好，加 `--json` 后对脚本 / AI Agent 友好。单个静态二进制，无需运行时。
+命令行交互对人友好，加 `--json` 后也便于脚本和 AI 助手调用。程序为单个静态二进制文件，无需额外运行时。
 
 ## 演示
 
@@ -16,7 +16,7 @@ $ gitpic ~/Desktop/shot.png
 ✓ uploaded shot  📋 已复制到剪贴板
 ![shot](https://cdn.jsdelivr.net/gh/your-name/img@main/images/2026/07/a1b2c3d4-shot.png)
 
-$ pbpaste                       # 剪贴板里已是上面的 markdown
+$ pbpaste                       # 剪贴板里已是上面的 Markdown
 
 $ gitpic list
 2026-07-23  shot
@@ -28,7 +28,7 @@ $ gitpic list
 
 ## 安装
 
-**Homebrew（推荐，自动进 PATH、自动装补全）**
+**Homebrew（推荐，自动加入 PATH 并安装命令行补全）**
 
 ```bash
 brew install tarnish233/tap/gitpic
@@ -52,9 +52,9 @@ chmod +x ./gitpic && mv ./gitpic ~/.local/bin/  # 确保 ~/.local/bin 在 PATH
 cargo install --path .
 ```
 
-## 配置
+## 初始化与设置
 
-需要一个 GitHub 细粒度 token（对图床仓库有 `Contents: Read/Write` 权限）。
+需要一个 GitHub 细粒度访问令牌（对图床仓库有 `Contents: Read/Write` 权限）。
 
 交互式：
 
@@ -95,17 +95,17 @@ export GITPIC_LINK="cdn"               # 可选：cdn | raw
 ## 使用
 
 ```bash
-gitpic screenshot.png            # 上传 → 打印 markdown → 复制到剪贴板
+gitpic screenshot.png            # 上传 → 打印 Markdown → 复制到剪贴板
 gitpic a.png b.png               # 批量上传
 gitpic paste                     # 上传剪贴板里的图片（截图后直接用）
 cat img.png | gitpic --stdin --name shot.png
-gitpic doctor                    # 检查 token 与仓库权限
+gitpic doctor                    # 检查访问令牌与仓库权限
 gitpic list                      # 查看最近上传（本地历史）
-gitpic completion zsh            # 打印 shell 补全脚本
+gitpic completion zsh            # 打印命令行补全脚本
 
 # 输出控制
 gitpic photo.jpg -q -f url       # 只打印 URL
-gitpic photo.jpg --json          # 结构化 JSON（脚本 / agent）
+gitpic photo.jpg --json          # 结构化 JSON（脚本 / AI 助手）
 gitpic photo.jpg --link raw      # 用 raw.githubusercontent.com
 
 # 压缩 / 缩放
@@ -114,11 +114,11 @@ gitpic big.png --compress --max-width 1600   # 缩放到宽度 <= 1600
 gitpic big.jpg --compress --quality 80       # JPEG 质量
 ```
 
-## 配置管理
+## 设置管理
 
 ```bash
 gitpic config path                       # 打印配置文件路径
-gitpic config get                        # 查看全部配置（token 会被隐藏）
+gitpic config get                        # 查看全部设置（访问令牌会被隐藏）
 gitpic config set github.repo owner/name # 修改某项
 gitpic config set upload.link_kind raw
 gitpic config set upload.compress true
@@ -128,9 +128,9 @@ gitpic config edit                       # 用 $EDITOR 打开配置文件
 
 `path_template` 占位符：`{year} {month} {day} {hash} {hash8} {name} {ext}`
 
-## Shell 补全
+## 命令行补全
 
-用 Homebrew 安装时会**自动装好** bash / zsh / fish 补全（zsh 用户新开终端即可生效）。手动安装可自己生成：
+用 Homebrew 安装时会自动安装 bash、zsh 和 fish 的补全脚本（zsh 用户重新打开终端即可生效）。也可以通过以下命令手动生成：
 
 ```bash
 gitpic completion zsh  > ~/.zfunc/_gitpic
@@ -140,9 +140,9 @@ gitpic completion fish > ~/.config/fish/completions/gitpic.fish
 
 ## 退出码
 
-`0` 成功 · `2` 参数错误 · `3` 缺少配置 · `4` 认证失败 · `5` 网络错误 · `6` 文件不存在
+`0` 成功 · `2` 参数错误 · `3` 缺少设置 · `4` 认证失败 · `5` 网络错误 · `6` 本地文件不存在 · `7` 权限不足 · `8` 远端资源不存在 · `9` 请求过于频繁
 
-## Agent 集成
+## AI 助手集成
 
 见 [`SKILL.md`](./SKILL.md)。调用时始终带上 `--json --no-copy`。
 
