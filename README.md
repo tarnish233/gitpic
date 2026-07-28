@@ -36,7 +36,7 @@ brew install tarnish233/tap/gitpic
 
 **下载预编译二进制**
 
-到 [Releases](https://github.com/tarnish233/gitpic-cli/releases) 下载对应平台的压缩包，解压得到 `gitpic`。macOS 首次运行需解除隔离：
+到 [发布页](https://github.com/tarnish233/gitpic-cli/releases) 下载对应平台的压缩包，解压得到 `gitpic`。macOS 首次运行需解除隔离：
 
 ```bash
 tar -xzf gitpic-aarch64-apple-darwin.tar.gz     # Apple Silicon
