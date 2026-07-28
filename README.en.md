@@ -129,7 +129,9 @@ attached to each [GitHub Release](../../releases) (built by CI on `v*` tags).
 
 ## Exit codes
 
-`0` ok · `2` usage · `3` config missing · `4` auth failed · `5` network · `6` file not found
+`0` ok · `2` usage · `3` config missing · `4` auth failed · `5` network ·
+`6` local file not found · `7` permission denied · `8` remote resource not found ·
+`9` rate limited
 
 ## Agent integration
 

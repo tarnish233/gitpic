@@ -38,7 +38,7 @@ jobs:
             $0 ~ "^## \\[" version "\\]" { found = 1; next }
             found && /^## \[/ { exit }
             found { print }
-          ' CHANGELOG.md > RELEASE_NOTES.md
+          ' CHANGELOG.zh-CN.md > RELEASE_NOTES.md
           test -s RELEASE_NOTES.md
           subtitle="$(awk '/^### / { sub(/^### /, ""); print; exit }' RELEASE_NOTES.md)"
           if [[ -z "$subtitle" ]]; then subtitle="Release"; fi

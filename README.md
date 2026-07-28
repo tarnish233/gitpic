@@ -152,7 +152,7 @@ gitpic completion fish > ~/.config/fish/completions/gitpic.fish
 
 ## 更新日志
 
-见 [CHANGELOG.md](./CHANGELOG.md)。
+见 [中文更新日志](./CHANGELOG.zh-CN.md)；英文版见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 许可证
 

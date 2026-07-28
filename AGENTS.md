@@ -9,7 +9,10 @@
 - `naming.rs`, `link.rs`, `imageproc.rs`, `output.rs`, `error.rs` — path/hash, URL/markdown, compression, human/JSON output, error types.
 - `commands/` — one module per action (`upload`, `init`, `doctor`, `list`, `config_cmd`, `completion`).
 
-Docs: `README.md` (中文, default), `README.en.md`, `SKILL.md` (agent usage), `CHANGELOG.md`. CI in `.github/workflows/`. The Homebrew formula lives in the separate `tarnish233/homebrew-tap` repo.
+Docs: `README.md` (中文, default), `README.en.md`, `SKILL.md` (agent usage),
+`CHANGELOG.zh-CN.md` (中文, Release source), and `CHANGELOG.md` (English). Keep
+both changelogs aligned for every release. CI lives in `.github/workflows/`.
+The Homebrew formula lives in the separate `tarnish233/homebrew-tap` repo.
 
 ## Build, Test, and Development Commands
 - `cargo build` — debug build.
