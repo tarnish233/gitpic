@@ -60,15 +60,15 @@
 ### 首次发布
 - 把本地图片上传到 GitHub 图床仓库并输出 Markdown 链接。
 - 支持文件路径、标准输入和剪贴板图片。
-- 支持 Markdown、HTML 和纯 URL 输出，以及 jsDelivr CDN 与 GitHub Raw 链接。
+- 支持 Markdown、HTML 和纯 URL 输出，以及 jsDelivr CDN 与 GitHub 原始文件链接。
 - 人类可读模式下自动把结果复制到剪贴板。
 - 支持内容哈希去重和可配置的远端路径模板。
 - 支持图片压缩、缩放和本地上传历史。
 - 支持 bash、zsh 和 fish 命令行补全。
 - 提供 `doctor`、`init`、`config` 等管理命令。
-- 提供稳定的 JSON 输出和退出码，并包含 AI 助手 skill。
+- 提供稳定的 JSON 输出和退出码，并包含 AI 助手技能说明。
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
-  自动生成多平台 Release。
+  自动生成多平台发布包。
 
 [未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.1.5...HEAD
 [0.1.5]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.5
