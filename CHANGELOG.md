@@ -6,18 +6,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Breaking:** `gitpic doctor` now exits non-zero when a check fails, using the
+  most specific code available — `CONFIG_MISSING` (3) for a missing token or
+  repo, `AUTH_FAILED` (4) or `NETWORK` (5) as returned by the GitHub probe, and
+  `PERMISSION_DENIED` (7) when the token authenticates but lacks push. It
+  previously always exited 0, so `gitpic doctor && gitpic <file>` would proceed
+  with a broken config. Scripts that relied on `doctor` always succeeding need
+  updating, though they were not detecting failures before either.
+- `doctor --json` gained a `code` field carrying the same stable `ErrorCode`
+  string as the exit status, so the failure cause is machine-readable instead of
+  only present as prose in `detail`. `doctor` still prints just the report and
+  never a second error envelope, so `--json` stdout remains exactly one object.
+- `doctor`'s `detail` for a missing config now names the specific missing field
+  (token vs repo) instead of the generic "run `gitpic init` or set
+  GITPIC_TOKEN and GITPIC_REPO".
+
+### Added
+- `PERMISSION_DENIED` error code (exit 7): authenticated but not permitted.
+  Uploads that receive a 403 still report `AUTH_FAILED`, since GitHub also uses
+  403 for rate limiting.
+
+### Fixed
+- `doctor` no longer reports a repo as un-writable-because-denied when GitHub
+  simply did not return a `permissions` block. That case was indistinguishable
+  from an actual refusal; it now surfaces as `GENERAL` with an explicit message,
+  so users are not sent to fix permissions that may be fine.
+
+### Tests
+- Pinned the full exit-code table so reordering `ErrorCode` cannot silently
+  renumber it, and covered the permission classifier including the
+  absent-permissions regression.
+
 ### Docs
-- `SKILL.md` no longer documents `PERMISSION_DENIED` (7), `REMOTE_NOT_FOUND` (8),
-  or `RATE_LIMITED` (9) — `ErrorCode` only defines codes 1-6, so an agent
-  matching on those would never hit them. The table now notes that permission,
-  missing-repo, and rate-limit failures surface as `AUTH_FAILED`, `NOT_FOUND`,
-  or `NETWORK`, and that `error.message` distinguishes them.
-- `SKILL.md` no longer claims `doctor` exits non-zero on an unhealthy report; it
-  always exits 0, so the preflight section now tells agents to read the
-  `config_ok`/`token_valid`/`repo_writable` JSON fields and never the exit
-  status. Trusting the exit code meant a broken config read as healthy.
+- `SKILL.md` dropped two error codes it documented that `ErrorCode` never
+  defined: `REMOTE_NOT_FOUND` (8) and `RATE_LIMITED` (9). An agent matching on
+  them would never hit them. Missing-repo failures arrive as `NOT_FOUND` and
+  rate limiting as `NETWORK`, distinguished by `error.message`.
 - `SKILL.md` documents the `paste` subcommand, `--no-copy` on the `--stdin`
-  example, and the `GITPIC_OWNER` env var, all of which were missing.
+  example, the `GITPIC_OWNER` env var, and the `doctor` JSON schema, all of
+  which were missing.
+- `README.md` lists exit code 7 and notes that `doctor` reports failures through
+  the exit status.
+
 
 ## [0.1.4] - 2026-07-25
 

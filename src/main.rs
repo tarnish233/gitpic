@@ -26,7 +26,9 @@ async fn main() -> ExitCode {
     match dispatch(&cli, mode).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            output::print_error(mode, e.code.as_str(), &e.message);
+            if !e.reported {
+                output::print_error(mode, e.code.as_str(), &e.message);
+            }
             ExitCode::from(e.code.exit_code())
         }
     }

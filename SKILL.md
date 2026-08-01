@@ -43,14 +43,18 @@ gitpic doctor --json
 ```
 
 Parse stdout JSON. Require `config_ok`, `token_valid`, and `repo_writable` to be
-`true`. Note that `doctor` always exits 0, even when unhealthy — you must read
-the JSON fields, never the exit status. If `config_ok` is
+`true`. `doctor` exits non-zero when a check fails, with the same code as the
+report's `code` field, so gating on either the exit status or `ok` works.
+If `config_ok` is
 false, tell the user to either run `gitpic init` or
 set env vars `GITPIC_TOKEN` and `GITPIC_REPO=owner/name` (and optionally
 `GITPIC_OWNER`, `GITPIC_BRANCH`, `GITPIC_LINK=cdn|raw`), then stop.
 If `token_valid` is false,
 ask the user to update the token. If `repo_writable` is false, ask them to check
 the target repository and grant Contents read/write permission, then stop.
+
+`doctor` prints only the report, never a separate error envelope, so stdout in
+`--json` mode is always exactly one JSON object.
 
 ## 1. Upload a local image
 
@@ -107,6 +111,17 @@ gitpic list --json                                            # recent uploads (
   "deduped": false, "output": "![shot](https://...)" } ] }
 ```
 
+## Output schema (`doctor`)
+
+```json
+{ "ok": false, "config_ok": true, "token_valid": false, "repo_writable": false,
+  "code": "AUTH_FAILED", "detail": "GitHub auth failed (401 …)" }
+```
+
+`login` appears when the token resolves; `code` and `detail` only when a check
+fails. `code` matches the exit status, and `detail` may contain the raw GitHub
+response body, including newlines.
+
 ## Error handling (exit code / error.code)
 
 | exit | error.code          | agent action                                      |
@@ -114,13 +129,18 @@ gitpic list --json                                            # recent uploads (
 | 1    | GENERAL             | unexpected — report the message to the user        |
 | 2    | USAGE               | fix the invocation                                |
 | 3    | CONFIG_MISSING      | ask user to configure token/repo                  |
-| 4    | AUTH_FAILED         | token invalid/expired — ask to update             |
+| 4    | AUTH_FAILED         | token invalid/expired, or forbidden — ask to update |
 | 5    | NETWORK             | retry once, then report                           |
 | 6    | NOT_FOUND           | check the local input file path                   |
+| 7    | PERMISSION_DENIED   | token works but lacks push — grant Contents read/write |
 
-These six are the complete set. Permission, missing-repo, and rate-limit
-failures surface as `AUTH_FAILED`, `NOT_FOUND`, or `NETWORK` rather than
-codes of their own — read `error.message` to tell them apart.
+These seven are the complete set. Two caveats when matching on them:
+
+- `PERMISSION_DENIED` currently comes only from `doctor`, which inspects the
+  repo's reported permissions. An upload that gets a 403 still reports
+  `AUTH_FAILED`, because GitHub also uses 403 for rate limiting.
+- A 404 from GitHub (missing repo or branch) arrives as `NOT_FOUND`, same as a
+  missing local file. Read `error.message` to tell them apart.
 
 Error JSON: `{ "ok": false, "error": { "code": "AUTH_FAILED", "message": "…" } }`
 
