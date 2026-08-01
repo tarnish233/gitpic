@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Docs
+- `SKILL.md` no longer documents `PERMISSION_DENIED` (7), `REMOTE_NOT_FOUND` (8),
+  or `RATE_LIMITED` (9) — `ErrorCode` only defines codes 1-6, so an agent
+  matching on those would never hit them. The table now notes that permission,
+  missing-repo, and rate-limit failures surface as `AUTH_FAILED`, `NOT_FOUND`,
+  or `NETWORK`, and that `error.message` distinguishes them.
+- `SKILL.md` no longer claims `doctor` exits non-zero on an unhealthy report; it
+  always exits 0, so the preflight section now tells agents to read the
+  `config_ok`/`token_valid`/`repo_writable` JSON fields and never the exit
+  status. Trusting the exit code meant a broken config read as healthy.
+- `SKILL.md` documents the `paste` subcommand, `--no-copy` on the `--stdin`
+  example, and the `GITPIC_OWNER` env var, all of which were missing.
+
 ## [0.1.4] - 2026-07-25
 
 ### CI
