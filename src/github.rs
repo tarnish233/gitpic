@@ -1,16 +1,34 @@
 //! Minimal GitHub REST client for the Contents API + health checks.
 
 use crate::error::{AppError, ErrorCode, Result};
+use crate::naming::encode_path;
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use std::time::Duration;
 
-const API: &str = "https://api.github.com";
+const DEFAULT_API: &str = "https://api.github.com";
 const UA: &str = concat!("gitpic/", env!("CARGO_PKG_VERSION"));
+
+/// Whole-request ceiling. Uploads of a few MB over a slow link must still fit,
+/// but a half-open connection must not hang the CLI forever.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// TCP/TLS connect ceiling — a black-holed address should fail fast.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// API base URL. `GITPIC_API_BASE` overrides it so the client can be pointed at
+/// a stub server in tests; it is not a documented user-facing setting.
+fn api_base() -> String {
+    match std::env::var("GITPIC_API_BASE") {
+        Ok(v) if !v.is_empty() => v.trim_end_matches('/').to_string(),
+        _ => DEFAULT_API.to_string(),
+    }
+}
 
 pub struct GitHub {
     client: reqwest::Client,
     token: String,
+    api: String,
     pub owner: String,
     pub repo: String,
     pub branch: String,
@@ -44,6 +62,17 @@ struct PutContent {
     sha: String,
 }
 
+/// Request body for the Contents API PUT. Borrows its fields so the base64
+/// payload is not copied into an intermediate `serde_json::Value`.
+#[derive(Serialize)]
+struct PutRequest<'a> {
+    message: &'a str,
+    content: &'a str,
+    branch: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha: Option<&'a str>,
+}
+
 #[derive(Deserialize)]
 pub struct RepoInfo {
     #[serde(default)]
@@ -64,11 +93,14 @@ impl GitHub {
     pub fn new(token: &str, owner: &str, repo: &str, branch: &str) -> Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent(UA)
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .map_err(|e| AppError::network(format!("http client: {e}")))?;
         Ok(Self {
             client,
             token: token.to_string(),
+            api: api_base(),
             owner: owner.to_string(),
             repo: repo.to_string(),
             branch: branch.to_string(),
@@ -107,8 +139,12 @@ impl GitHub {
     /// GET the existing file sha, if present.
     async fn get_existing(&self, path: &str) -> Result<Option<ContentsGet>> {
         let url = format!(
-            "{API}/repos/{}/{}/contents/{}?ref={}",
-            self.owner, self.repo, path, self.branch
+            "{}/repos/{}/{}/contents/{}?ref={}",
+            self.api,
+            self.owner,
+            self.repo,
+            encode_path(path),
+            self.branch
         );
         let resp = self
             .req(reqwest::Method::GET, url)
@@ -153,16 +189,20 @@ impl GitHub {
         }
 
         let content_b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-        let mut body = serde_json::json!({
-            "message": message,
-            "content": content_b64,
-            "branch": self.branch,
-        });
-        if let Some(e) = existing {
-            body["sha"] = serde_json::Value::String(e.sha);
-        }
+        let body = PutRequest {
+            message,
+            content: &content_b64,
+            branch: &self.branch,
+            sha: existing.as_ref().map(|e| e.sha.as_str()),
+        };
 
-        let url = format!("{API}/repos/{}/{}/contents/{}", self.owner, self.repo, path);
+        let url = format!(
+            "{}/repos/{}/{}/contents/{}",
+            self.api,
+            self.owner,
+            self.repo,
+            encode_path(path)
+        );
         let resp = self
             .req(reqwest::Method::PUT, url)
             .json(&body)
@@ -196,7 +236,7 @@ impl GitHub {
             login: String,
         }
         let resp = self
-            .req(reqwest::Method::GET, format!("{API}/user"))
+            .req(reqwest::Method::GET, format!("{}/user", self.api))
             .send()
             .await
             .map_err(|e| AppError::network(format!("network: {e}")))?;
@@ -217,7 +257,7 @@ impl GitHub {
         let resp = self
             .req(
                 reqwest::Method::GET,
-                format!("{API}/repos/{}/{}", self.owner, self.repo),
+                format!("{}/repos/{}/{}", self.api, self.owner, self.repo),
             )
             .send()
             .await

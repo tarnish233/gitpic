@@ -78,7 +78,7 @@ pub struct Cli {
     pub max_width: Option<u32>,
 
     /// JPEG quality 1-100 when compressing (default from config)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, value_parser = clap::value_parser!(u8).range(1..=100))]
     pub quality: Option<u8>,
 
     /// Override the upload path template
@@ -172,5 +172,23 @@ mod tests {
     fn completion_parses_shell() {
         let cli = Cli::try_parse_from(["gitpic", "completion", "zsh"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Completion { .. })));
+    }
+
+    #[test]
+    fn quality_outside_1_to_100_is_rejected() {
+        // Regression: --quality 0 was silently clamped to 1 instead of erroring,
+        // and --quality 300 reported a misleading "not in 0..=255".
+        assert!(Cli::try_parse_from(["gitpic", "a.png", "--quality", "0"]).is_err());
+        assert!(Cli::try_parse_from(["gitpic", "a.png", "--quality", "101"]).is_err());
+        assert!(Cli::try_parse_from(["gitpic", "a.png", "--quality", "300"]).is_err());
+    }
+
+    #[test]
+    fn quality_bounds_are_accepted() {
+        for q in ["1", "82", "100"] {
+            let cli = Cli::try_parse_from(["gitpic", "a.png", "--quality", q])
+                .unwrap_or_else(|e| panic!("quality {q} should parse: {e}"));
+            assert_eq!(cli.quality, Some(q.parse().unwrap()));
+        }
     }
 }

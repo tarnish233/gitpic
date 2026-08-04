@@ -8,26 +8,29 @@ pub struct CompressOpts {
     pub quality: u8,
 }
 
-/// Possibly compress/resize `bytes`. Returns the (possibly new) bytes and the
-/// filename to use (extension may change if the format changes). Falls back to
-/// the original bytes on any error or unsupported format.
-pub fn maybe_compress(name: &str, bytes: Vec<u8>, opts: &CompressOpts) -> (Vec<u8>, String) {
+/// Possibly compress/resize `bytes`. Returns the (possibly new) bytes; takes
+/// ownership so a no-op returns the original buffer without copying. Falls back
+/// to the original bytes on any error or unsupported format.
+///
+/// The re-encode always preserves the input format, so the caller's filename
+/// and extension stay valid.
+pub fn maybe_compress(bytes: Vec<u8>, opts: &CompressOpts) -> Vec<u8> {
     if !opts.enabled {
-        return (bytes, name.to_string());
+        return bytes;
     }
 
     let fmt = match image::guess_format(&bytes) {
         Ok(f) => f,
-        Err(_) => return (bytes, name.to_string()),
+        Err(_) => return bytes,
     };
     // Only handle raster formats we can re-encode meaningfully.
     if !matches!(fmt, ImageFormat::Png | ImageFormat::Jpeg) {
-        return (bytes, name.to_string());
+        return bytes;
     }
 
     let img = match image::load_from_memory_with_format(&bytes, fmt) {
         Ok(i) => i,
-        Err(_) => return (bytes, name.to_string()),
+        Err(_) => return bytes,
     };
 
     let mut img = img;
@@ -65,15 +68,15 @@ pub fn maybe_compress(name: &str, bytes: Vec<u8>, opts: &CompressOpts) -> (Vec<u
     };
 
     if !ok || out.is_empty() {
-        return (bytes, name.to_string());
+        return bytes;
     }
 
     // If we resized, honor the explicit dimension change even if the byte size
     // did not shrink. For pure recompression, only keep it when it is smaller.
     if !resized && out.len() >= bytes.len() {
-        return (bytes, name.to_string());
+        return bytes;
     }
-    (out, name.to_string())
+    out
 }
 
 #[cfg(test)]
@@ -100,11 +103,10 @@ mod tests {
             max_width: 200,
             quality: 82,
         };
-        let (out, name) = maybe_compress("big.png", bytes, &opts);
+        let out = maybe_compress(bytes, &opts);
         let decoded = image::load_from_memory(&out).unwrap();
         assert_eq!(decoded.width(), 200);
         assert_eq!(decoded.height(), 100);
-        assert_eq!(name, "big.png");
     }
 
     #[test]
@@ -116,7 +118,7 @@ mod tests {
             max_width: 64,
             quality: 82,
         };
-        let (out, _) = maybe_compress("big.png", bytes.clone(), &opts);
+        let out = maybe_compress(bytes.clone(), &opts);
         let decoded = image::load_from_memory(&out).unwrap();
         assert_eq!(decoded.width(), 64);
         assert!(out.len() < bytes.len());
@@ -131,7 +133,33 @@ mod tests {
             max_width: 10,
             quality: 82,
         };
-        let (out, _) = maybe_compress("x.png", bytes, &opts);
+        let out = maybe_compress(bytes, &opts);
         assert_eq!(out.len(), orig_len);
+    }
+
+    #[test]
+    fn compression_preserves_the_input_format() {
+        // The caller keeps using the original filename, so a PNG in must not
+        // come back as a JPEG (or vice versa).
+        let bytes = png_of(300, 300);
+        let opts = CompressOpts {
+            enabled: true,
+            max_width: 100,
+            quality: 82,
+        };
+        let out = maybe_compress(bytes, &opts);
+        assert_eq!(image::guess_format(&out).unwrap(), ImageFormat::Png);
+    }
+
+    #[test]
+    fn non_image_bytes_pass_through_unchanged() {
+        let bytes = b"not an image at all".to_vec();
+        let opts = CompressOpts {
+            enabled: true,
+            max_width: 100,
+            quality: 82,
+        };
+        let out = maybe_compress(bytes.clone(), &opts);
+        assert_eq!(out, bytes);
     }
 }

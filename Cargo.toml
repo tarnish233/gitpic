@@ -33,7 +33,7 @@ base64 = "0.22"
 anyhow = "1"
 thiserror = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-owo-colors = "4"
+owo-colors = { version = "4", features = ["supports-colors"] }
 
 [profile.release]
 opt-level = "z"

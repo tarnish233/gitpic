@@ -60,15 +60,15 @@ async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
 
     // Resolve config: file -> env -> CLI overrides.
     let mut cfg = Config::load()?;
-    cfg.apply_env();
+    cfg.apply_env()?;
     if let Some(repo) = &cli.repo {
-        cfg.set_repo_spec(repo);
+        cfg.set_repo_spec(repo)?;
     }
 
     match &cli.command {
         Some(Command::Doctor) => commands::doctor::run(&cfg, mode).await,
-        Some(Command::Paste) => commands::upload::run(cli, &cfg, mode).await.map(|_| 0),
-        None => commands::upload::run(cli, &cfg, mode).await.map(|_| 0),
+        Some(Command::Paste) => commands::upload::run(cli, &cfg, mode).await,
+        None => commands::upload::run(cli, &cfg, mode).await,
         // handled above
         Some(Command::Init)
         | Some(Command::Config { .. })

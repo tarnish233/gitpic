@@ -3,7 +3,7 @@
 use crate::error::Result;
 use crate::history;
 use crate::output::Mode;
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -28,12 +28,16 @@ pub fn run(limit: usize, mode: Mode) -> Result<()> {
     }
     for r in &recs {
         let date = r.time.split('T').next().unwrap_or(&r.time);
-        let tag = if r.deduped {
-            " (dedup)".yellow().to_string()
+        let date = date.if_supports_color(Stream::Stdout, |t| t.dimmed().to_string());
+        let name = r
+            .name
+            .if_supports_color(Stream::Stdout, |t| t.bold().to_string());
+        if r.deduped {
+            let tag = " (dedup)".if_supports_color(Stream::Stdout, |t| t.yellow().to_string());
+            println!("{date}  {name}{tag}");
         } else {
-            String::new()
-        };
-        println!("{}  {}{}", date.dimmed(), r.name.bold(), tag);
+            println!("{date}  {name}");
+        }
         println!("  {}", r.url);
     }
     Ok(())

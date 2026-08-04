@@ -120,6 +120,21 @@ gitpic list --json                                            # recent uploads (
 
 Error JSON: `{ "ok": false, "error": { "code": "AUTH_FAILED", "message": "…" } }`
 
+## Partial success (multiple images)
+
+Uploads run serially. If an image fails after earlier ones succeeded, the exit
+code is that of the failure, but `results` still lists every image that did
+upload — those links are live and must not be discarded:
+
+```json
+{ "ok": false,
+  "results": [ { "name": "one", "markdown": "![one](https://…)", "…": "…" } ],
+  "error": { "code": "RATE_LIMITED", "message": "…" } }
+```
+
+Report the successful links, then handle `error.code` per the table above for the
+remaining images.
+
 ## Constraints
 
 - Always pass `--json` and `--no-copy` for programmatic calls.

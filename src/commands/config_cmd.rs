@@ -82,7 +82,7 @@ fn set_key(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
     match key {
         "github.token" => cfg.github.token = value.to_string(),
         "github.owner" => cfg.github.owner = value.to_string(),
-        "github.repo" => cfg.set_repo_spec(value),
+        "github.repo" => cfg.set_repo_spec(value)?,
         "github.branch" => cfg.github.branch = value.to_string(),
         "upload.path_template" => cfg.upload.path_template = value.to_string(),
         "upload.link_kind" => cfg.upload.link_kind = value.to_string(),

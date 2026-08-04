@@ -6,6 +6,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- Sanitize the `{ext}` placeholder like `{name}`: a filename such as `a.p#ng` no
+  longer produces a truncated remote path or a broken link.
+- Add request and connect timeouts to the GitHub client. A stalled connection
+  previously hung the CLI indefinitely instead of reporting a retryable
+  `NETWORK` error.
+- Strip ANSI colour codes when stdout/stderr is not a terminal, and honour
+  `NO_COLOR` / `CLICOLOR_FORCE`.
+- Keep links for images that already uploaded when a later image in the same
+  invocation fails. `--json` reports these under a new envelope carrying both
+  `results` and `error`.
+- Percent-encode remote paths in API requests and generated URLs, so templates
+  containing spaces or non-ASCII characters produce valid links.
+- Escape alt text in Markdown and HTML output; `a]b.png` no longer emits broken
+  Markdown, and quotes can no longer escape the HTML `alt` attribute.
+- Reject a repo spec with extra path segments (`a/b/c`) instead of silently
+  setting the repo to `b/c`.
+- Reject `--quality` outside 1-100 at parse time, matching
+  `config set upload.quality`. `--quality 0` was previously clamped to 1.
+- Reject `--stdin` combined with file arguments, and `--stdin` combined with
+  `paste`, instead of silently ignoring an input.
+- Warn when a branch containing `/` is used with jsDelivr CDN links, where the
+  branch/path boundary is ambiguous.
+
+### Changed
+- Report a warning when an upload cannot be recorded in local history, at `-v`.
+
+### Performance
+- Avoid copying image bytes when compression is disabled.
+- Build the upload request body without an intermediate `serde_json::Value`,
+  removing one full copy of the base64 payload.
+- Hash to hex without a per-byte allocation.
+
 ## [0.1.5] - 2026-07-28
 
 ### Safer credentials and reliable agent workflows
