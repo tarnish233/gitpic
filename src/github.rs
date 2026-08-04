@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::time::Duration;
 
-const DEFAULT_API: &str = "https://api.github.com";
+const API: &str = "https://api.github.com";
 const UA: &str = concat!("gitpic/", env!("CARGO_PKG_VERSION"));
 
 /// Whole-request ceiling. Uploads of a few MB over a slow link must still fit,
@@ -16,51 +16,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// TCP/TLS connect ceiling — a black-holed address should fail fast.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// API base URL.
-///
-/// Release builds always talk to GitHub. Debug and test builds may retarget the
-/// client with `GITPIC_API_BASE` so the failure paths can be exercised against a
-/// stub, but only to a loopback address: every request carries the configured
-/// token in an `Authorization` header, so an arbitrary host would exfiltrate it.
-fn api_base() -> String {
-    #[cfg(debug_assertions)]
-    if let Ok(v) = std::env::var("GITPIC_API_BASE") {
-        let v = v.trim_end_matches('/');
-        if !v.is_empty() {
-            if is_loopback_url(v) {
-                return v.to_string();
-            }
-            // Never silently fall back — a test pointed somewhere unexpected
-            // should fail loudly rather than hit the real API with a real token.
-            panic!("GITPIC_API_BASE must be a loopback address, got {v:?}");
-        }
-    }
-    DEFAULT_API.to_string()
-}
-
-/// True when `url` parses and its host is a loopback address (`127.0.0.0/8`,
-/// `::1`, or `localhost`).
-#[cfg(debug_assertions)]
-fn is_loopback_url(url: &str) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return false;
-    };
-    match parsed.host_str() {
-        Some("localhost") => true,
-        // Resolve the literal so 127.0.0.1 and any other 127.0.0.0/8 address
-        // both pass, while a name that merely looks local does not.
-        Some(h) => match h.trim_start_matches('[').trim_end_matches(']').parse() {
-            Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback(),
-            Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback(),
-            Err(_) => false,
-        },
-        None => false,
-    }
-}
-
 pub struct GitHub {
     client: reqwest::Client,
     token: String,
+    /// API base URL. Always `API` in real use; injectable in unit tests so the
+    /// request-building logic can be exercised without a network or an env var.
     api: String,
     pub owner: String,
     pub repo: String,
@@ -124,6 +84,15 @@ pub struct RepoPermissions {
 
 impl GitHub {
     pub fn new(token: &str, owner: &str, repo: &str, branch: &str) -> Result<Self> {
+        Self::with_api(API, token, owner, repo, branch)
+    }
+
+    /// Construct a client against an explicit API base.
+    ///
+    /// Deliberately private: every request carries the token in an
+    /// `Authorization` header, so the base must never be influenced by the
+    /// environment. Tests in this module inject a loopback stub directly.
+    fn with_api(api: &str, token: &str, owner: &str, repo: &str, branch: &str) -> Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent(UA)
             .timeout(REQUEST_TIMEOUT)
@@ -133,7 +102,7 @@ impl GitHub {
         Ok(Self {
             client,
             token: token.to_string(),
-            api: api_base(),
+            api: api.to_string(),
             owner: owner.to_string(),
             repo: repo.to_string(),
             branch: branch.to_string(),
@@ -361,42 +330,119 @@ mod tests {
         );
     }
 
-    // Every request carries the token in an Authorization header, so the test
-    // override must never accept a host that could receive it. The helper only
-    // exists in debug builds, so the test is gated the same way.
-    #[cfg(debug_assertions)]
+    // The API base is a compile-time constant, so there is no env var or
+    // runtime host check that an attacker (or a stray proxy setting) could use
+    // to redirect the token-bearing Authorization header.
     #[test]
-    fn only_loopback_hosts_are_accepted_as_an_api_base() {
-        for ok in [
-            "http://127.0.0.1:8771",
-            "http://127.5.5.5:1",
-            "http://localhost:8771",
-            "http://LocalHost:8771",
-            "http://[::1]:8771",
-        ] {
-            assert!(is_loopback_url(ok), "{ok} should be accepted");
-        }
-        for bad in [
-            "http://evil.example.com",
-            "https://api.github.com",
-            "http://169.254.169.254",
-            "http://10.0.0.1",
-            "http://127.0.0.1.evil.com",
-            "http://localhost.evil.com",
-            "not a url",
-            "",
-        ] {
-            assert!(!is_loopback_url(bad), "{bad} must be rejected");
-        }
+    fn api_base_is_a_compile_time_constant() {
+        assert_eq!(API, "https://api.github.com");
+        let gh = GitHub::new("t", "o", "r", "main").unwrap();
+        assert_eq!(gh.api, API);
     }
 
-    #[test]
-    fn release_builds_always_use_the_real_github_api() {
-        // In a release build api_base() ignores the env var entirely; in a debug
-        // build (where tests run) it is only consulted when set.
-        assert_eq!(DEFAULT_API, "https://api.github.com");
-        if std::env::var_os("GITPIC_API_BASE").is_none() {
-            assert_eq!(api_base(), DEFAULT_API);
-        }
+    /// Single-connection stub server. Returns the bound address and a handle
+    /// that yields the raw request text once served.
+    fn stub(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for body in responses {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 65536];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                seen.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let _ = sock.write_all(body.as_bytes());
+                let _ = sock.flush();
+            }
+            seen
+        });
+        (addr, handle)
+    }
+
+    fn http(status: &str, json: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+            json.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn put_file_uploads_and_percent_encodes_the_path() {
+        // Arrange: 404 (no existing file), then a successful create.
+        let (addr, handle) = stub(vec![
+            http("404 Not Found", r#"{"message":"Not Found"}"#),
+            http("201 Created", r#"{"content":{"sha":"newsha"}}"#),
+        ]);
+        let gh = GitHub::with_api(&addr, "tok", "o", "r", "main").unwrap();
+
+        // Act
+        let out = gh
+            .put_file("img/a b.png", b"bytes", "msg", true)
+            .await
+            .unwrap();
+
+        // Assert
+        assert_eq!(out.content_sha, "newsha");
+        assert!(!out.deduped);
+        assert_eq!(out.size, 5);
+        let reqs = handle.join().unwrap();
+        assert!(reqs[0].contains("img/a%20b.png"), "GET: {}", reqs[0]);
+        assert!(reqs[1].starts_with("PUT "), "expected PUT: {}", reqs[1]);
+        assert!(reqs[1].contains("img/a%20b.png"), "PUT: {}", reqs[1]);
+    }
+
+    #[tokio::test]
+    async fn put_file_skips_upload_when_content_already_matches() {
+        // Arrange: the existing blob sha equals the sha of the bytes we send,
+        // so only ONE request (the GET) may happen.
+        let existing = git_blob_sha(b"same");
+        let (addr, handle) = stub(vec![http(
+            "200 OK",
+            &format!(r#"{{"sha":"{existing}","size":4}}"#),
+        )]);
+        let gh = GitHub::with_api(&addr, "tok", "o", "r", "main").unwrap();
+
+        let out = gh.put_file("a.png", b"same", "msg", true).await.unwrap();
+
+        assert!(out.deduped);
+        assert_eq!(out.content_sha, existing);
+        let reqs = handle.join().unwrap();
+        assert_eq!(reqs.len(), 1, "dedup must not issue a PUT");
+        assert!(reqs[0].starts_with("GET "));
+    }
+
+    #[tokio::test]
+    async fn put_file_sends_the_existing_sha_when_overwriting() {
+        // dedup disabled, so an existing file must be updated with its sha.
+        let (addr, handle) = stub(vec![
+            http("200 OK", r#"{"sha":"oldsha","size":3}"#),
+            http("200 OK", r#"{"content":{"sha":"updated"}}"#),
+        ]);
+        let gh = GitHub::with_api(&addr, "tok", "o", "r", "main").unwrap();
+
+        let out = gh.put_file("a.png", b"new", "msg", false).await.unwrap();
+
+        assert_eq!(out.content_sha, "updated");
+        let reqs = handle.join().unwrap();
+        assert!(reqs[1].contains("oldsha"), "PUT body: {}", reqs[1]);
+    }
+
+    #[tokio::test]
+    async fn put_file_maps_a_remote_error_to_a_stable_code() {
+        let (addr, handle) = stub(vec![
+            http("404 Not Found", r#"{"message":"Not Found"}"#),
+            http("401 Unauthorized", r#"{"message":"Bad credentials"}"#),
+        ]);
+        let gh = GitHub::with_api(&addr, "tok", "o", "r", "main").unwrap();
+
+        let err = gh
+            .put_file("a.png", b"x", "msg", true)
+            .await
+            .expect_err("401 must be an error");
+
+        assert_eq!(err.code, ErrorCode::AuthFailed);
+        let _ = handle.join();
     }
 }

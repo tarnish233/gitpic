@@ -154,3 +154,71 @@ pub fn print_error(mode: Mode, code: &str, message: &str) {
         eprint_error_label(message);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(name: &str) -> ItemResult {
+        ItemResult {
+            name: name.to_string(),
+            url: "u".into(),
+            raw_url: "r".into(),
+            markdown: "m".into(),
+            html: "h".into(),
+            path: "p".into(),
+            sha: "s".into(),
+            size: 1,
+            deduped: false,
+            output: "o".into(),
+        }
+    }
+
+    #[test]
+    fn success_envelope_has_ok_true_and_no_error_key() {
+        let results = [item("one")];
+        let json = serde_json::to_string(&SuccessEnvelope {
+            ok: true,
+            results: &results,
+        })
+        .unwrap();
+        assert!(json.contains(r#""ok":true"#));
+        assert!(!json.contains(r#""error""#));
+    }
+
+    #[test]
+    fn error_envelope_has_no_results_key() {
+        // Agents distinguish a total failure from a partial one by the presence
+        // of `results`, so a plain error must not carry an empty array.
+        let json = serde_json::to_string(&ErrorEnvelope {
+            ok: false,
+            error: ErrorBody {
+                code: "AUTH_FAILED".into(),
+                message: "nope".into(),
+            },
+        })
+        .unwrap();
+        assert!(json.contains(r#""ok":false"#));
+        assert!(
+            !json.contains(r#""results""#),
+            "plain errors must omit results: {json}"
+        );
+    }
+
+    #[test]
+    fn partial_envelope_carries_both_results_and_error() {
+        let results = [item("one")];
+        let json = serde_json::to_string(&PartialEnvelope {
+            ok: false,
+            results: &results,
+            error: ErrorBody {
+                code: "RATE_LIMITED".into(),
+                message: "slow down".into(),
+            },
+        })
+        .unwrap();
+        assert!(json.contains(r#""ok":false"#));
+        assert!(json.contains(r#""name":"one""#));
+        assert!(json.contains(r#""code":"RATE_LIMITED""#));
+    }
+}

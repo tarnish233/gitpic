@@ -171,8 +171,10 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
             output::print_results(mode, &results);
             Ok(0)
         }
-        // Nothing uploaded: this is an ordinary failure, so use the standard
-        // error envelope rather than a partial one with an empty `results`.
+        // Nothing uploaded: an ordinary failure, so use the standard error
+        // envelope. The partial shape means "some of these links are live" and
+        // agents key off that distinction (see SKILL.md), so an empty `results`
+        // must never be reported that way.
         Some(e) if results.is_empty() => Err(e),
         Some(e) => {
             // Some inputs did upload. Report their links alongside the error so
