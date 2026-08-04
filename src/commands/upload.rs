@@ -171,9 +171,12 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
             output::print_results(mode, &results);
             Ok(0)
         }
+        // Nothing uploaded: this is an ordinary failure, so use the standard
+        // error envelope rather than a partial one with an empty `results`.
+        Some(e) if results.is_empty() => Err(e),
         Some(e) => {
-            // Successful uploads are still reported alongside the error so the
-            // caller never loses a link that is already live.
+            // Some inputs did upload. Report their links alongside the error so
+            // the caller never loses a link that is already live.
             output::print_partial(mode, &results, e.code.as_str(), &e.message);
             Ok(e.code.exit_code())
         }

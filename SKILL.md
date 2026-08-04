@@ -133,7 +133,8 @@ upload — those links are live and must not be discarded:
 ```
 
 Report the successful links, then handle `error.code` per the table above for the
-remaining images.
+remaining images. When no image uploaded, the plain error JSON above is returned
+instead — `results` is never present and empty.
 
 ## Constraints
 

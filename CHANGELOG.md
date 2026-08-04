@@ -16,7 +16,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `NO_COLOR` / `CLICOLOR_FORCE`.
 - Keep links for images that already uploaded when a later image in the same
   invocation fails. `--json` reports these under a new envelope carrying both
-  `results` and `error`.
+  `results` and `error`. When nothing uploaded, the existing error envelope is
+  used unchanged.
 - Percent-encode remote paths in API requests and generated URLs, so templates
   containing spaces or non-ASCII characters produce valid links.
 - Escape alt text in Markdown and HTML output; `a]b.png` no longer emits broken
