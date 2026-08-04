@@ -16,12 +16,45 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// TCP/TLS connect ceiling — a black-holed address should fail fast.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// API base URL. `GITPIC_API_BASE` overrides it so the client can be pointed at
-/// a stub server in tests; it is not a documented user-facing setting.
+/// API base URL.
+///
+/// Release builds always talk to GitHub. Debug and test builds may retarget the
+/// client with `GITPIC_API_BASE` so the failure paths can be exercised against a
+/// stub, but only to a loopback address: every request carries the configured
+/// token in an `Authorization` header, so an arbitrary host would exfiltrate it.
 fn api_base() -> String {
-    match std::env::var("GITPIC_API_BASE") {
-        Ok(v) if !v.is_empty() => v.trim_end_matches('/').to_string(),
-        _ => DEFAULT_API.to_string(),
+    #[cfg(debug_assertions)]
+    if let Ok(v) = std::env::var("GITPIC_API_BASE") {
+        let v = v.trim_end_matches('/');
+        if !v.is_empty() {
+            if is_loopback_url(v) {
+                return v.to_string();
+            }
+            // Never silently fall back — a test pointed somewhere unexpected
+            // should fail loudly rather than hit the real API with a real token.
+            panic!("GITPIC_API_BASE must be a loopback address, got {v:?}");
+        }
+    }
+    DEFAULT_API.to_string()
+}
+
+/// True when `url` parses and its host is a loopback address (`127.0.0.0/8`,
+/// `::1`, or `localhost`).
+#[cfg(debug_assertions)]
+fn is_loopback_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    match parsed.host_str() {
+        Some("localhost") => true,
+        // Resolve the literal so 127.0.0.1 and any other 127.0.0.0/8 address
+        // both pass, while a name that merely looks local does not.
+        Some(h) => match h.trim_start_matches('[').trim_end_matches(']').parse() {
+            Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback(),
+            Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback(),
+            Err(_) => false,
+        },
+        None => false,
     }
 }
 
@@ -326,5 +359,44 @@ mod tests {
             GitHub::map_status(reqwest::StatusCode::BAD_GATEWAY, "upstream").code,
             ErrorCode::Network
         );
+    }
+
+    // Every request carries the token in an Authorization header, so the test
+    // override must never accept a host that could receive it. The helper only
+    // exists in debug builds, so the test is gated the same way.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn only_loopback_hosts_are_accepted_as_an_api_base() {
+        for ok in [
+            "http://127.0.0.1:8771",
+            "http://127.5.5.5:1",
+            "http://localhost:8771",
+            "http://LocalHost:8771",
+            "http://[::1]:8771",
+        ] {
+            assert!(is_loopback_url(ok), "{ok} should be accepted");
+        }
+        for bad in [
+            "http://evil.example.com",
+            "https://api.github.com",
+            "http://169.254.169.254",
+            "http://10.0.0.1",
+            "http://127.0.0.1.evil.com",
+            "http://localhost.evil.com",
+            "not a url",
+            "",
+        ] {
+            assert!(!is_loopback_url(bad), "{bad} must be rejected");
+        }
+    }
+
+    #[test]
+    fn release_builds_always_use_the_real_github_api() {
+        // In a release build api_base() ignores the env var entirely; in a debug
+        // build (where tests run) it is only consulted when set.
+        assert_eq!(DEFAULT_API, "https://api.github.com");
+        if std::env::var_os("GITPIC_API_BASE").is_none() {
+            assert_eq!(api_base(), DEFAULT_API);
+        }
     }
 }
