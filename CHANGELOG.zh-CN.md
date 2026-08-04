@@ -6,6 +6,14 @@
 
 ## [未发布]
 
+## [0.1.6] - 2026-08-04
+
+### 链接正确性与凭据安全
+- 修复会生成失效链接的路径与文件名处理问题。
+- 为网络请求添加超时，避免命令无限等待。
+- 输出重定向到管道或文件时不再混入终端颜色码。
+- 多图上传中途失败时，保留此前已成功上传的图片链接。
+
 ### 修复
 - `{ext}` 占位符现在与 `{name}` 一样做安全清洗：`a.p#ng` 之类的文件名不再生成被
   截断的远端路径或失效链接。
@@ -98,7 +106,8 @@
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.1.5...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.6
 [0.1.5]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.5
 [0.1.4]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.4
 [0.1.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.3
