@@ -48,7 +48,7 @@ pub fn run() -> Result<()> {
     if !token.is_empty() {
         cfg.github.token = token;
     }
-    cfg.set_repo_spec(&repo_spec);
+    cfg.set_repo_spec(&repo_spec)?;
     cfg.github.branch = if branch.is_empty() {
         "main".into()
     } else {

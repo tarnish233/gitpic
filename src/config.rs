@@ -173,7 +173,10 @@ impl Config {
     }
 
     /// Apply environment variable overrides in-place.
-    pub fn apply_env(&mut self) {
+    ///
+    /// # Errors
+    /// Returns a usage error if `GITPIC_REPO` is malformed.
+    pub fn apply_env(&mut self) -> Result<()> {
         if let Ok(v) = std::env::var("GITPIC_TOKEN") {
             if !v.is_empty() {
                 self.github.token = v;
@@ -196,19 +199,33 @@ impl Config {
         }
         if let Ok(v) = std::env::var("GITPIC_REPO") {
             if !v.is_empty() {
-                self.set_repo_spec(&v);
+                self.set_repo_spec(&v)?;
             }
         }
+        Ok(())
     }
 
     /// Accept "owner/name" or bare "name" (keeps existing owner).
-    pub fn set_repo_spec(&mut self, spec: &str) {
+    ///
+    /// # Errors
+    /// Returns a usage error when the spec has more than one `/`, since the
+    /// extra segment would silently become part of the repo name and produce
+    /// broken upload URLs.
+    pub fn set_repo_spec(&mut self, spec: &str) -> Result<()> {
+        let spec = spec.trim();
         if let Some((owner, repo)) = spec.split_once('/') {
-            self.github.owner = owner.trim().to_string();
-            self.github.repo = repo.trim().to_string();
+            let (owner, repo) = (owner.trim(), repo.trim());
+            if repo.contains('/') {
+                return Err(AppError::usage(format!(
+                    "invalid repo spec {spec:?}: expected \"owner/name\" or \"name\""
+                )));
+            }
+            self.github.owner = owner.to_string();
+            self.github.repo = repo.to_string();
         } else {
-            self.github.repo = spec.trim().to_string();
+            self.github.repo = spec.to_string();
         }
+        Ok(())
     }
 
     /// Ensure the minimum required fields are present.
@@ -224,5 +241,59 @@ impl Config {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ErrorCode;
+
+    #[test]
+    fn repo_spec_accepts_owner_and_name() {
+        let mut cfg = Config::default();
+        cfg.set_repo_spec("owner/name").unwrap();
+        assert_eq!(cfg.github.owner, "owner");
+        assert_eq!(cfg.github.repo, "name");
+    }
+
+    #[test]
+    fn repo_spec_bare_name_keeps_existing_owner() {
+        let mut cfg = Config::default();
+        cfg.github.owner = "keep".to_string();
+        cfg.set_repo_spec("just-the-repo").unwrap();
+        assert_eq!(cfg.github.owner, "keep");
+        assert_eq!(cfg.github.repo, "just-the-repo");
+    }
+
+    #[test]
+    fn repo_spec_rejects_extra_path_segments() {
+        // Regression: "a/b/c" used to set repo="b/c", producing broken URLs.
+        let mut cfg = Config::default();
+        let err = cfg.set_repo_spec("a/b/c").expect_err("must be rejected");
+        assert_eq!(err.code, ErrorCode::Usage);
+        // The config must be left untouched by a rejected spec.
+        assert_eq!(cfg.github.owner, "");
+        assert_eq!(cfg.github.repo, "");
+    }
+
+    #[test]
+    fn repo_spec_trims_whitespace() {
+        let mut cfg = Config::default();
+        cfg.set_repo_spec("  owner / name  ").unwrap();
+        assert_eq!(cfg.github.owner, "owner");
+        assert_eq!(cfg.github.repo, "name");
+    }
+
+    #[test]
+    fn incomplete_repo_spec_is_caught_by_require_ready() {
+        // "owner/" parses, but require_ready must still reject the empty repo.
+        let mut cfg = Config::default();
+        cfg.github.token = "t".to_string();
+        cfg.set_repo_spec("owner/").unwrap();
+        assert_eq!(
+            cfg.require_ready().unwrap_err().code,
+            ErrorCode::ConfigMissing
+        );
     }
 }

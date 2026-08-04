@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::error::{ErrorCode, Result};
 use crate::github::GitHub;
 use crate::output::Mode;
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -87,9 +87,13 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
     } else {
         let mark = |b: bool| {
             if b {
-                "✓".green().to_string()
+                "✓"
+                    .if_supports_color(Stream::Stdout, |t| t.green().to_string())
+                    .to_string()
             } else {
-                "✗".red().to_string()
+                "✗"
+                    .if_supports_color(Stream::Stdout, |t| t.red().to_string())
+                    .to_string()
             }
         };
         println!("{} config present", mark(report.config_ok));
@@ -104,7 +108,8 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
         );
         println!("{} repo writable", mark(report.repo_writable));
         if let Some(d) = &report.detail {
-            println!("  {} {}", "note:".yellow(), d);
+            let note = "note:".if_supports_color(Stream::Stdout, |t| t.yellow().to_string());
+            println!("  {note} {d}");
         }
     }
     if ok {
