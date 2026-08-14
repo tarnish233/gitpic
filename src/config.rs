@@ -87,10 +87,11 @@ fn default_quality() -> u8 {
     82
 }
 
-/// Resolve a base directory: prefer the given XDG env var, else `$HOME/<fallback>`
-/// (on Windows, fall back to `%USERPROFILE%`).
-fn base_dir(xdg_var: &str, fallback: &str) -> Result<PathBuf> {
-    if let Ok(v) = std::env::var(xdg_var) {
+/// Resolve a base directory: prefer the given env var, else `$HOME/<fallback>`
+/// (on Windows, fall back to `%USERPROFILE%`). Used for the XDG config/data dirs
+/// and for agent home dirs such as `CLAUDE_CONFIG_DIR` / `CODEX_HOME`.
+pub(crate) fn base_dir(env_var: &str, fallback: &str) -> Result<PathBuf> {
+    if let Ok(v) = std::env::var(env_var) {
         if !v.is_empty() {
             return Ok(PathBuf::from(v));
         }

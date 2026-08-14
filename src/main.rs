@@ -55,6 +55,7 @@ async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
         Some(Command::Config { action }) => return commands::config_cmd::run(action).map(|_| 0),
         Some(Command::List { limit }) => return commands::list::run(*limit, mode).map(|_| 0),
         Some(Command::Completion { shell }) => return commands::completion::run(*shell).map(|_| 0),
+        Some(Command::Skill { action }) => return commands::skill::run(action, mode).map(|_| 0),
         _ => {}
     }
 
@@ -73,6 +74,7 @@ async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
         Some(Command::Init)
         | Some(Command::Config { .. })
         | Some(Command::List { .. })
-        | Some(Command::Completion { .. }) => unreachable!(),
+        | Some(Command::Completion { .. })
+        | Some(Command::Skill { .. }) => unreachable!(),
     }
 }

@@ -6,6 +6,27 @@
 
 ## [未发布]
 
+### AI 助手技能的安装方式
+
+此前 `SKILL.md` 只躺在仓库根目录，没有任何安装路径 —— 但 Claude Code 和 Codex 都只从
+`<skills-dir>/<名称>/SKILL.md` 发现技能，根目录那份永远不会被加载。用户只能手抄，抄完就开始
+和仓库版本脱节（实际发生过：有副本停留在 0.1.5，缺少多图部分成功的说明）。
+
+### 新增
+- 新增 `gitpic skill` 子命令：`install` / `print` / `path`。技能文档通过 `include_str!`
+  编入二进制，所以装上的副本永远与所运行的 `gitpic` 版本一致。
+- `gitpic skill install` 会检测 `~/.claude/skills` 与 `~/.codex/skills`（尊重
+  `CLAUDE_CONFIG_DIR` / `CODEX_HOME`），写入前先询问；`--agent`、`--dir`、`--yes`
+  可跳过交互。若两家的 skills 目录软链到同一处，会合并为一个目标而不会重复写入。
+  没有终端（脚本 / CI / 助手调用）时返回 `USAGE` 错误，不会挂住也不会擅自写入。
+- 新增 Claude Code 插件市场清单，可用 `/plugin marketplace add tarnish233/gitpic-cli`
+  安装。
+- 新增 Codex 插件清单，可用 `codex plugin marketplace add tarnish233/gitpic-cli` 安装。
+
+### 变更
+- `SKILL.md` 移到 `skills/gitpic/SKILL.md`。这是两家插件格式共同的落点，因此三条分发渠道
+  共用同一个源文件，不存在副本。CI 新增校验，确保各清单的版本号与 `Cargo.toml` 一致。
+
 ## [0.1.6] - 2026-08-04
 
 ### 链接正确性与凭据安全

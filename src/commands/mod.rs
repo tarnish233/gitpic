@@ -5,13 +5,47 @@ pub mod config_cmd;
 pub mod doctor;
 pub mod init;
 pub mod list;
+pub mod skill;
 pub mod upload;
 
 use crate::cli::{Cli, LinkKind, OutputFormat};
 use crate::config::Config;
+use crate::error::{AppError, ErrorCode, Result};
 use crate::github::PutOutcome;
 use crate::link;
 use crate::output::ItemResult;
+use std::io::{self, Write};
+
+/// Prompt on stdout and read a line from stdin. Returns `None` on EOF
+/// (Ctrl-D / closed stdin), which callers must not confuse with an empty
+/// reply — for a write action EOF means "abort", not "take the default".
+pub(crate) fn prompt_opt(label: &str, default: &str) -> Result<Option<String>> {
+    if default.is_empty() {
+        print!("{label}: ");
+    } else {
+        print!("{label} [{default}]: ");
+    }
+    io::stdout().flush().ok();
+    let mut line = String::new();
+    let read = io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| AppError::new(ErrorCode::General, format!("read input: {e}")))?;
+    if read == 0 {
+        return Ok(None);
+    }
+    let v = line.trim();
+    if v.is_empty() {
+        Ok(Some(default.to_string()))
+    } else {
+        Ok(Some(v.to_string()))
+    }
+}
+
+/// Prompt, treating EOF as the default. Suitable for `init`, where EOF on a
+/// field just means "keep what is already configured".
+pub(crate) fn prompt(label: &str, default: &str) -> Result<String> {
+    Ok(prompt_opt(label, default)?.unwrap_or_else(|| default.to_string()))
+}
 
 /// An image ready to upload.
 pub struct InputImage {

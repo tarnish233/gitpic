@@ -1,0 +1,31 @@
+{
+  "name": "gitpic",
+  "owner": {
+    "name": "tarnish233",
+    "url": "https://github.com/tarnish233"
+  },
+  "metadata": {
+    "description": "Upload images to a GitHub repo (image host) and get a Markdown link.",
+    "version": "0.1.6"
+  },
+  "plugins": [
+    {
+      "name": "gitpic",
+      "description": "Upload a local or clipboard image to a GitHub repo (image host) and return a Markdown link.",
+      "version": "0.1.6",
+      "author": {
+        "name": "tarnish233"
+      },
+      "homepage": "https://github.com/tarnish233/gitpic-cli",
+      "repository": "https://github.com/tarnish233/gitpic-cli",
+      "license": "MIT",
+      "keywords": [
+        "github",
+        "image",
+        "markdown",
+        "upload"
+      ],
+      "source": "./"
+    }
+  ]
+}

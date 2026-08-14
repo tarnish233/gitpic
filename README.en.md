@@ -85,6 +85,7 @@ cat img.png | gitpic --stdin --name shot.png
 gitpic doctor                    # verify token + repo access
 gitpic list                      # show recent uploads (local history)
 gitpic completion zsh            # print shell completion script
+gitpic skill install             # install the agent skill (see below)
 
 # output control
 gitpic photo.jpg -q -f url       # only print the URL
@@ -135,7 +136,43 @@ attached to each [GitHub Release](../../releases) (built by CI on `v*` tags).
 
 ## Agent integration
 
-See [`SKILL.md`](./SKILL.md). Always call with `--json --no-copy`.
+`gitpic` ships an [Agent Skill](./skills/gitpic/SKILL.md) that teaches Claude Code,
+Codex, and other agents how to call it. Install it one of these ways.
+
+**From the CLI (any agent)**
+
+The skill is embedded in the binary, so the installed copy always matches the
+`gitpic` version you are running — re-run this after `brew upgrade gitpic` to
+resync:
+
+```bash
+gitpic skill install                 # pick from the detected agents
+gitpic skill install --agent codex   # or name one
+gitpic skill install --dir DIR       # or an explicit skills directory
+gitpic skill path                    # show where it would be written
+gitpic skill print                   # dump the document to stdout
+```
+
+It detects `~/.claude/skills` and `~/.codex/skills` (honouring
+`CLAUDE_CONFIG_DIR` / `CODEX_HOME`), and prompts before writing. Pass `--yes`,
+`--agent`, or `--dir` in scripts and CI — without a terminal it errors instead
+of guessing.
+
+**As a Claude Code plugin**
+
+```
+/plugin marketplace add tarnish233/gitpic-cli
+/plugin install gitpic@gitpic
+```
+
+**As a Codex plugin**
+
+```bash
+codex plugin marketplace add tarnish233/gitpic-cli
+codex plugin add gitpic@gitpic
+```
+
+Always call `gitpic` with `--json --no-copy` from an agent.
 
 `gitpic doctor` exits non-zero when any check fails; scripts should still parse
 `config_ok`, `token_valid`, and `repo_writable` from its JSON report. Argument

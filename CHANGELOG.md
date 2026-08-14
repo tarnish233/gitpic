@@ -6,6 +6,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### An install path for the agent skill
+
+`SKILL.md` previously just sat in the repository root with no way to install it —
+but Claude Code and Codex both discover skills only at
+`<skills-dir>/<name>/SKILL.md`, so the root copy was never loaded. Users had to
+copy it by hand, and hand-copies drift: one was found stuck at 0.1.5, missing the
+partial-success semantics for multi-image uploads.
+
+### Added
+- New `gitpic skill` subcommand: `install` / `print` / `path`. The document is
+  embedded with `include_str!`, so an installed copy always matches the version of
+  `gitpic` that wrote it.
+- `gitpic skill install` detects `~/.claude/skills` and `~/.codex/skills`
+  (honouring `CLAUDE_CONFIG_DIR` / `CODEX_HOME`) and prompts before writing;
+  `--agent`, `--dir`, and `--yes` skip the prompt. Agents whose skills
+  directories are symlinked to one place collapse into a single target instead of
+  being written twice. Without a terminal (scripts, CI, agent calls) it returns a
+  `USAGE` error rather than hanging or writing unasked.
+- Claude Code marketplace manifest, installable with
+  `/plugin marketplace add tarnish233/gitpic-cli`.
+- Codex plugin manifest, installable with
+  `codex plugin marketplace add tarnish233/gitpic-cli`.
+
+### Changed
+- Moved `SKILL.md` to `skills/gitpic/SKILL.md`. That is where both plugin formats
+  look, so all three distribution channels share one source file with no copies.
+  CI now asserts the manifest versions still match `Cargo.toml`.
+
 ## [0.1.6] - 2026-08-04
 
 ### Link correctness and credential safety
