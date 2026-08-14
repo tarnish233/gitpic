@@ -6,6 +6,12 @@
 
 ## [未发布]
 
+## [0.1.8] - 2026-08-14
+
+### 修复
+- 用 `.gitattributes` 把 `SKILL.md` 钉成 LF。Windows 上 `include_str!` 会把 CRLF 编进二进制，
+  导致 `gitpic skill install` 永远把已安装的副本判成过期。
+
 ## [0.1.7] - 2026-08-14
 
 ### AI 助手技能的安装方式

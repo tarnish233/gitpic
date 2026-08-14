@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-08-14
+
+### Fixed
+- Pin `SKILL.md` to LF via `.gitattributes`. A Windows checkout was embedding
+  CRLF through `include_str!`, so `gitpic skill install` always treated an
+  already-installed copy as outdated.
+
 ## [0.1.7] - 2026-08-14
 
 ### An install path for the agent skill
