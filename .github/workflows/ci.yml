@@ -10,6 +10,17 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  manifests:
+    name: skill manifests agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The skill ships through three vendor manifests that each repeat the
+      # version and plugin name. Without this they drift silently.
+      - name: Check skill manifests
+        run: python3 .github/scripts/check_manifests.py
+
   test:
     name: fmt · clippy · test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

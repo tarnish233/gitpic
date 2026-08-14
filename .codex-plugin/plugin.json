@@ -1,0 +1,35 @@
+{
+  "name": "gitpic",
+  "version": "0.1.6",
+  "description": "Upload a local or clipboard image to a GitHub repo (image host) and return a Markdown link.",
+  "author": {
+    "name": "tarnish233",
+    "url": "https://github.com/tarnish233"
+  },
+  "homepage": "https://github.com/tarnish233/gitpic-cli",
+  "repository": "https://github.com/tarnish233/gitpic-cli",
+  "license": "MIT",
+  "keywords": [
+    "github",
+    "image",
+    "markdown",
+    "upload"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Gitpic",
+    "shortDescription": "Upload images to a GitHub image host and get a Markdown link.",
+    "longDescription": "gitpic uploads a local or clipboard image to a GitHub repository used as an image host and returns a Markdown link. Requires the gitpic CLI and a GitHub token with Contents read/write on the target repo.",
+    "developerName": "tarnish233",
+    "category": "Productivity",
+    "capabilities": [
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Upload this screenshot and give me the Markdown link.",
+      "把这张图片上传图床并生成 Markdown 链接。",
+      "Host these two images and return both links."
+    ],
+    "websiteURL": "https://github.com/tarnish233/gitpic-cli"
+  }
+}

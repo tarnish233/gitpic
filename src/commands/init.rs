@@ -1,27 +1,8 @@
 //! Interactive configuration setup.
 
+use super::prompt;
 use crate::config::Config;
-use crate::error::{AppError, ErrorCode, Result};
-use std::io::{self, Write};
-
-fn prompt(label: &str, default: &str) -> Result<String> {
-    if default.is_empty() {
-        print!("{label}: ");
-    } else {
-        print!("{label} [{default}]: ");
-    }
-    io::stdout().flush().ok();
-    let mut line = String::new();
-    io::stdin()
-        .read_line(&mut line)
-        .map_err(|e| AppError::new(ErrorCode::General, format!("read input: {e}")))?;
-    let v = line.trim();
-    if v.is_empty() {
-        Ok(default.to_string())
-    } else {
-        Ok(v.to_string())
-    }
-}
+use crate::error::Result;
 
 pub fn run() -> Result<()> {
     let mut cfg = Config::load()?;

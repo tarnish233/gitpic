@@ -102,6 +102,7 @@ cat img.png | gitpic --stdin --name shot.png
 gitpic doctor                    # 检查访问令牌与仓库权限
 gitpic list                      # 查看最近上传（本地历史）
 gitpic completion zsh            # 打印命令行补全脚本
+gitpic skill install             # 安装 AI 助手技能（见下文）
 
 # 输出控制
 gitpic photo.jpg -q -f url       # 只打印 URL
@@ -144,7 +145,41 @@ gitpic completion fish > ~/.config/fish/completions/gitpic.fish
 
 ## AI 助手集成
 
-见 [`SKILL.md`](./SKILL.md)。调用时始终带上 `--json --no-copy`。
+`gitpic` 自带一份 [Agent Skill](./skills/gitpic/SKILL.md)，告诉 Claude Code、Codex
+等助手该怎么调用它。三种安装方式任选其一。
+
+**用 CLI 安装（适用于任意助手）**
+
+技能文档已编入二进制，所以装上的版本永远与你正在运行的 `gitpic` 一致；
+`brew upgrade gitpic` 之后重跑一次即可同步：
+
+```bash
+gitpic skill install                 # 从检测到的助手中选择
+gitpic skill install --agent codex   # 或指定某一家
+gitpic skill install --dir DIR       # 或指定任意 skills 目录
+gitpic skill path                    # 查看会写到哪里
+gitpic skill print                   # 把文档打到 stdout
+```
+
+会自动检测 `~/.claude/skills` 与 `~/.codex/skills`（同时尊重
+`CLAUDE_CONFIG_DIR` / `CODEX_HOME`），写入前先询问。脚本和 CI 里请加
+`--yes`、`--agent` 或 `--dir` —— 没有终端时它会报错而不是替你猜。
+
+**作为 Claude Code 插件**
+
+```
+/plugin marketplace add tarnish233/gitpic-cli
+/plugin install gitpic@gitpic
+```
+
+**作为 Codex 插件**
+
+```bash
+codex plugin marketplace add tarnish233/gitpic-cli
+codex plugin add gitpic@gitpic
+```
+
+助手调用 `gitpic` 时请始终带上 `--json --no-copy`。
 
 `gitpic doctor` 在任一检查失败时返回非零退出码；脚本仍应解析 JSON 中的
 `config_ok`、`token_valid` 和 `repo_writable`。参数解析错误在 `--json` 模式下

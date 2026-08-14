@@ -118,6 +118,43 @@ pub enum Command {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// Install or print the bundled AI agent skill
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillAction {
+    /// Install the skill into agent skill directories
+    Install {
+        /// Only install for this agent (default: pick from the detected ones)
+        #[arg(long, value_enum)]
+        agent: Option<AgentKind>,
+
+        /// Install into an explicit skills directory (e.g. ~/.agents/skills)
+        #[arg(long, conflicts_with = "agent")]
+        dir: Option<PathBuf>,
+
+        /// Skip the prompt and install into every detected directory
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Print the skill document to stdout
+    Print,
+    /// Print the skill paths that would be written
+    Path,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AgentKind {
+    /// Claude Code (`~/.claude/skills`)
+    Claude,
+    /// Codex CLI (`~/.codex/skills`)
+    Codex,
+    /// Every detected agent
+    All,
 }
 
 #[derive(Debug, Subcommand)]
@@ -172,6 +209,83 @@ mod tests {
     fn completion_parses_shell() {
         let cli = Cli::try_parse_from(["gitpic", "completion", "zsh"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Completion { .. })));
+    }
+
+    #[test]
+    fn skill_install_defaults_to_no_explicit_target() {
+        let cli = Cli::try_parse_from(["gitpic", "skill", "install"]).unwrap();
+        match cli.command {
+            Some(Command::Skill {
+                action: SkillAction::Install { agent, dir, yes },
+            }) => {
+                assert!(agent.is_none());
+                assert!(dir.is_none());
+                assert!(!yes);
+            }
+            other => panic!("expected skill install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skill_install_parses_agent_and_yes() {
+        let cli =
+            Cli::try_parse_from(["gitpic", "skill", "install", "--agent", "codex", "-y"]).unwrap();
+        match cli.command {
+            Some(Command::Skill {
+                action: SkillAction::Install { agent, yes, .. },
+            }) => {
+                assert_eq!(agent, Some(AgentKind::Codex));
+                assert!(yes);
+            }
+            other => panic!("expected skill install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skill_install_parses_dir() {
+        let cli =
+            Cli::try_parse_from(["gitpic", "skill", "install", "--dir", "/tmp/skills"]).unwrap();
+        match cli.command {
+            Some(Command::Skill {
+                action: SkillAction::Install { dir, .. },
+            }) => assert_eq!(dir, Some(PathBuf::from("/tmp/skills"))),
+            other => panic!("expected skill install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skill_install_rejects_dir_with_agent() {
+        // --dir names a target outright; combining it with --agent is ambiguous.
+        assert!(Cli::try_parse_from([
+            "gitpic",
+            "skill",
+            "install",
+            "--dir",
+            "/tmp/skills",
+            "--agent",
+            "claude",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn skill_print_and_path_parse() {
+        assert!(matches!(
+            Cli::try_parse_from(["gitpic", "skill", "print"])
+                .unwrap()
+                .command,
+            Some(Command::Skill {
+                action: SkillAction::Print
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["gitpic", "skill", "path"])
+                .unwrap()
+                .command,
+            Some(Command::Skill {
+                action: SkillAction::Path
+            })
+        ));
     }
 
     #[test]

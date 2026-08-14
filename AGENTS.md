@@ -7,12 +7,19 @@
 - `config.rs` — config model + XDG path resolution (`~/.config/gitpic/config.toml`).
 - `github.rs` — GitHub Contents API client (upload, dedup, health checks).
 - `naming.rs`, `link.rs`, `imageproc.rs`, `output.rs`, `error.rs` — path/hash, URL/markdown, compression, human/JSON output, error types.
-- `commands/` — one module per action (`upload`, `init`, `doctor`, `list`, `config_cmd`, `completion`).
+- `commands/` — one module per action (`upload`, `init`, `doctor`, `list`, `config_cmd`, `completion`, `skill`).
 
-Docs: `README.md` (中文, default), `README.en.md`, `SKILL.md` (agent usage),
-`CHANGELOG.zh-CN.md` (中文, Release source), and `CHANGELOG.md` (English). Keep
+Docs: `README.md` (中文, default), `README.en.md`, `skills/gitpic/SKILL.md` (agent
+usage), `CHANGELOG.zh-CN.md` (中文, Release source), and `CHANGELOG.md` (English). Keep
 both changelogs aligned for every release. CI lives in `.github/workflows/`.
 The Homebrew formula lives in the separate `tarnish233/homebrew-tap` repo.
+
+The skill at `skills/gitpic/SKILL.md` is the single source shipped three ways:
+embedded into the binary via `include_str!` for `gitpic skill install`, and
+referenced by the Claude Code marketplace (`.claude-plugin/marketplace.json`) and
+the Codex plugin (`.codex-plugin/plugin.json` + `.agents/plugins/marketplace.json`).
+Never copy it — `.github/scripts/check_manifests.py` (run in CI) asserts the
+manifests still agree with `Cargo.toml` and with the skill itself.
 
 ## Build, Test, and Development Commands
 - `cargo build` — debug build.
