@@ -393,8 +393,12 @@ mod tests {
     /// frontmatter breaks, this fails instead of shipping a broken skill.
     #[test]
     fn embedded_skill_frontmatter_matches_skill_name() {
-        assert!(
-            SKILL_MD.starts_with("---\n"),
+        // First line only, so a CRLF checkout is not mistaken for a missing
+        // frontmatter fence (.gitattributes pins this file to LF, but a local
+        // override should surface as a real failure, not a confusing one).
+        assert_eq!(
+            SKILL_MD.lines().next(),
+            Some("---"),
             "SKILL.md must open with YAML frontmatter"
         );
         let name = SKILL_MD
@@ -405,6 +409,16 @@ mod tests {
         assert_eq!(
             name, SKILL_NAME,
             "frontmatter name must match the skill directory name"
+        );
+    }
+
+    #[test]
+    fn embedded_skill_has_unix_line_endings() {
+        // The document is compared byte-for-byte against installed copies, so a
+        // CRLF build would disagree with a copy written anywhere else.
+        assert!(
+            !SKILL_MD.contains('\r'),
+            "SKILL.md must use LF endings; check .gitattributes and core.autocrlf"
         );
     }
 
