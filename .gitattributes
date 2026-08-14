@@ -1,0 +1,5 @@
+# The skill document is embedded into the binary with `include_str!` and then
+# compared byte-for-byte against installed copies, so it must not vary by
+# platform. Without this, a Windows checkout gets CRLF and the embedded copy
+# stops matching one written on any other OS.
+skills/**/SKILL.md text eol=lf
