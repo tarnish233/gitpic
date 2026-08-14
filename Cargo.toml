@@ -1,6 +1,6 @@
 [package]
 name = "gitpic"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Upload local/clipboard images to a GitHub repo (image host) and get a Markdown link"
 license = "MIT"
