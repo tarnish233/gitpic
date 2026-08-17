@@ -4,40 +4,33 @@
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ErrorCode {
-    /// 1 - generic / unexpected
-    General,
-    /// 2 - bad CLI usage / arguments
-    Usage,
-    /// 3 - configuration missing (no token / repo)
-    ConfigMissing,
-    /// 4 - GitHub authentication failed
-    AuthFailed,
-    /// 5 - network failure (retryable)
-    Network,
-    /// 6 - input file not found / unreadable
-    NotFound,
-    /// 7 - authenticated, but the token cannot perform the requested action
-    PermissionDenied,
-    /// 8 - GitHub repository, branch, or remote path not found
-    RemoteNotFound,
-    /// 9 - GitHub API rate limit reached
-    RateLimited,
+    /// generic / unexpected
+    General = 1,
+    /// bad CLI usage / arguments
+    Usage = 2,
+    /// configuration missing (no credential / repo)
+    ConfigMissing = 3,
+    /// GitHub authentication failed
+    AuthFailed = 4,
+    /// network failure (retryable)
+    Network = 5,
+    /// input file not found / unreadable
+    NotFound = 6,
+    /// authenticated, but the token cannot perform the requested action
+    PermissionDenied = 7,
+    /// GitHub repository, branch, or remote path not found
+    RemoteNotFound = 8,
+    /// GitHub API rate limit reached
+    RateLimited = 9,
 }
 
 impl ErrorCode {
+    /// Process exit status. The variant's discriminant *is* the exit code, so
+    /// the number lives in exactly one place.
     pub fn exit_code(self) -> u8 {
-        match self {
-            ErrorCode::General => 1,
-            ErrorCode::Usage => 2,
-            ErrorCode::ConfigMissing => 3,
-            ErrorCode::AuthFailed => 4,
-            ErrorCode::Network => 5,
-            ErrorCode::NotFound => 6,
-            ErrorCode::PermissionDenied => 7,
-            ErrorCode::RemoteNotFound => 8,
-            ErrorCode::RateLimited => 9,
-        }
+        self as u8
     }
 
     pub fn as_str(self) -> &'static str {
@@ -105,10 +98,31 @@ impl fmt::Display for AppError {
 
 impl std::error::Error for AppError {}
 
-impl From<anyhow::Error> for AppError {
-    fn from(e: anyhow::Error) -> Self {
-        AppError::new(ErrorCode::General, e.to_string())
+pub type Result<T> = std::result::Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Locks the documented contract (`skills/gitpic/SKILL.md` + both READMEs).
+    /// Agents key off both numbers and strings, so changing either is breaking —
+    /// and now that `exit_code()` returns the discriminant, merely reordering the
+    /// variants would do it silently.
+    #[test]
+    fn exit_codes_and_wire_strings_are_the_documented_contract() {
+        for (code, exit, s) in [
+            (ErrorCode::General, 1u8, "GENERAL"),
+            (ErrorCode::Usage, 2, "USAGE"),
+            (ErrorCode::ConfigMissing, 3, "CONFIG_MISSING"),
+            (ErrorCode::AuthFailed, 4, "AUTH_FAILED"),
+            (ErrorCode::Network, 5, "NETWORK"),
+            (ErrorCode::NotFound, 6, "NOT_FOUND"),
+            (ErrorCode::PermissionDenied, 7, "PERMISSION_DENIED"),
+            (ErrorCode::RemoteNotFound, 8, "REMOTE_NOT_FOUND"),
+            (ErrorCode::RateLimited, 9, "RATE_LIMITED"),
+        ] {
+            assert_eq!(code.exit_code(), exit, "exit code for {s}");
+            assert_eq!(code.as_str(), s, "wire string for {s}");
+        }
     }
 }
-
-pub type Result<T> = std::result::Result<T, AppError>;

@@ -6,6 +6,63 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Credentials no longer need to live in the config file
+
+`config.toml` stored the GitHub token in plaintext, which made the file unsafe to
+keep in a synced dotfiles repo — and a classic PAT with `repo` scope grants
+read/write on every repository the account can reach, with no expiry.
+
+### Changed
+- The credential is resolved from, in order: `GITPIC_TOKEN`, `github.token` in
+  the config file, then `gh auth token`. With `gh` logged in, `config.toml` needs
+  no secret at all and is safe to sync.
+- A `github.token` left in the config keeps working and still takes priority over
+  `gh`, so upgrading never silently switches which account uploads. Delete that
+  line to switch over.
+- `gitpic doctor` reports `token_source` (`env` / `config` / `gh`), so which
+  credential is actually in use can be confirmed.
+- The credential is resolved lazily, immediately before a request is made, so it
+  is never stored in `Config` — whose derived `Debug` could otherwise print it.
+  An unavailable credential now surfaces as `token_valid: false` rather than
+  `config_ok: false`.
+- `gitpic init` no longer asks for a token first; leaving the prompt blank uses
+  `gh`.
+
+Note: `gh`'s OAuth token typically carries `gist, read:org, repo, workflow` —
+*broader* than writing to one image repo requires. This change keeps the secret
+out of a syncable file; it does not narrow the token's scope. For least
+privilege, pass a fine-grained token limited to the one repo via `GITPIC_TOKEN`.
+
+### Fixed
+- `gitpic paste --name shot.jpg` no longer publishes PNG bytes at a `.jpg` path.
+  Clipboard captures are always encoded as PNG, so the extension is now derived
+  from that rather than taken from `--name`; GitHub and jsDelivr were serving
+  those uploads as `image/jpeg`.
+- `gitpic config set upload.link_kind` and the `gitpic init` prompt now reject
+  anything other than `cdn`/`raw`. A typo previously reported success and then
+  silently produced CDN links forever, because the reader falls back to `cdn`.
+- A blank `GITPIC_OWNER`, `GITPIC_BRANCH`, `GITPIC_LINK`, or `GITPIC_REPO` now
+  falls through to the config file instead of overriding it with whitespace.
+  `GITPIC_OWNER=" "` used to pass the config check and then produce a request
+  against `/repos/%20/repo` — a confusing 404 rather than an actionable error.
+- `gitpic list` now labels a deduplicated upload `(deduped)`, matching the word
+  the upload output already used.
+
+### Removed
+- Dropped the unused `anyhow` and `thiserror` dependencies, along with the
+  unreachable `image/webp` and the unused `tokio/fs`, `tokio/io-std`, and
+  `clap/env` cargo features. Three crates leave the build graph.
+
+### CI
+- The release workflow now uploads `gitpic-<target>.*` with
+  `fail_on_unmatched_files: true`. Listing four archive names of which two never
+  exist on any given platform forced that check off, which meant a release that
+  uploaded *nothing* still passed as green.
+- `cargo fmt --check` runs on Linux only, since rustfmt's verdict is
+  platform-independent, and the redundant `cargo build` step is gone —
+  `clippy --all-targets` type-checks the same cfg and `cargo test` links a real
+  executable, exercising every native dependency.
+
 ## [0.1.8] - 2026-08-14
 
 ### Fixed

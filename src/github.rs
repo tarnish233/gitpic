@@ -70,9 +70,6 @@ struct PutRequest<'a> {
 pub struct RepoInfo {
     #[serde(default)]
     pub permissions: Option<RepoPermissions>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub default_branch: Option<String>,
 }
 #[derive(Deserialize)]
 pub struct RepoPermissions {
@@ -131,11 +128,32 @@ impl GitHub {
             )),
             429 => AppError::rate_limited(format!("GitHub rate limit reached ({status}): {body}")),
             500..=599 => AppError::network(format!("GitHub server error ({status}): {body}")),
-            _ => AppError::new(
-                ErrorCode::General,
-                format!("GitHub error ({status}): {body}"),
-            ),
+            _ => AppError::general(format!("GitHub error ({status}): {body}")),
         }
+    }
+
+    /// Send a request and deserialize a successful JSON body.
+    ///
+    /// Every response funnels through `map_status`, so the stable error codes
+    /// agents key on cannot be bypassed by a new endpoint forgetting to
+    /// classify its failures.
+    async fn send_json<T: serde::de::DeserializeOwned>(
+        &self,
+        rb: reqwest::RequestBuilder,
+        what: &str,
+    ) -> Result<T> {
+        let resp = rb
+            .send()
+            .await
+            .map_err(|e| AppError::network(format!("network: {e}")))?;
+        if !resp.status().is_success() {
+            let st = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Self::map_status(st, &body));
+        }
+        resp.json()
+            .await
+            .map_err(|e| AppError::general(format!("parse {what}: {e}")))
     }
 
     /// GET the existing file sha, if present.
@@ -148,24 +166,18 @@ impl GitHub {
             encode_path(path),
             self.branch
         );
-        let resp = self
-            .req(reqwest::Method::GET, url)
-            .send()
+        match self
+            .send_json::<ContentsGet>(self.req(reqwest::Method::GET, url), "contents")
             .await
-            .map_err(|e| AppError::network(format!("network: {e}")))?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
+        {
+            Ok(c) => Ok(Some(c)),
+            // 404 is the only status `map_status` maps to RemoteNotFound, so this
+            // is the ordinary "nothing uploaded at that path yet" case. If a
+            // future arm maps another status here (e.g. 410), a *gone* path would
+            // read as *absent* and the PUT below would omit the sha.
+            Err(e) if e.code == ErrorCode::RemoteNotFound => Ok(None),
+            Err(e) => Err(e),
         }
-        if !resp.status().is_success() {
-            let st = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Self::map_status(st, &body));
-        }
-        let parsed: ContentsGet = resp
-            .json()
-            .await
-            .map_err(|e| AppError::new(ErrorCode::General, format!("parse contents: {e}")))?;
-        Ok(Some(parsed))
     }
 
     /// Upload (create or update) a file at `path` with `bytes`.
@@ -205,23 +217,12 @@ impl GitHub {
             self.repo,
             encode_path(path)
         );
-        let resp = self
-            .req(reqwest::Method::PUT, url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AppError::network(format!("network: {e}")))?;
-
-        if !resp.status().is_success() {
-            let st = resp.status();
-            let b = resp.text().await.unwrap_or_default();
-            return Err(Self::map_status(st, &b));
-        }
-
-        let parsed: PutResponse = resp
-            .json()
-            .await
-            .map_err(|e| AppError::new(ErrorCode::General, format!("parse put response: {e}")))?;
+        let parsed: PutResponse = self
+            .send_json(
+                self.req(reqwest::Method::PUT, url).json(&body),
+                "put response",
+            )
+            .await?;
 
         Ok(PutOutcome {
             path: path.to_string(),
@@ -237,41 +238,25 @@ impl GitHub {
         struct User {
             login: String,
         }
-        let resp = self
-            .req(reqwest::Method::GET, format!("{}/user", self.api))
-            .send()
-            .await
-            .map_err(|e| AppError::network(format!("network: {e}")))?;
-        if !resp.status().is_success() {
-            let st = resp.status();
-            let b = resp.text().await.unwrap_or_default();
-            return Err(Self::map_status(st, &b));
-        }
-        let user: User = resp
-            .json()
-            .await
-            .map_err(|e| AppError::new(ErrorCode::General, format!("parse user: {e}")))?;
+        let user: User = self
+            .send_json(
+                self.req(reqwest::Method::GET, format!("{}/user", self.api)),
+                "user",
+            )
+            .await?;
         Ok(user.login)
     }
 
-    /// Fetch repo info (permissions, default branch).
+    /// Fetch repo info (permissions).
     pub async fn repo_info(&self) -> Result<RepoInfo> {
-        let resp = self
-            .req(
+        self.send_json(
+            self.req(
                 reqwest::Method::GET,
                 format!("{}/repos/{}/{}", self.api, self.owner, self.repo),
-            )
-            .send()
-            .await
-            .map_err(|e| AppError::network(format!("network: {e}")))?;
-        if !resp.status().is_success() {
-            let st = resp.status();
-            let b = resp.text().await.unwrap_or_default();
-            return Err(Self::map_status(st, &b));
-        }
-        resp.json()
-            .await
-            .map_err(|e| AppError::new(ErrorCode::General, format!("parse repo: {e}")))
+            ),
+            "repo",
+        )
+        .await
     }
 }
 

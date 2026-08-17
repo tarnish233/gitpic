@@ -53,6 +53,15 @@ pub struct ErrorBody {
     pub message: String,
 }
 
+impl ErrorBody {
+    pub fn new(code: &str, message: &str) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ErrorEnvelope {
     pub ok: bool,
@@ -111,31 +120,17 @@ fn print_human_item(r: &ItemResult) {
 /// Print results that succeeded before a failure, followed by the error.
 /// Successful links are never dropped just because a later input failed.
 pub fn print_partial(mode: Mode, results: &[ItemResult], code: &str, message: &str) {
-    let error = ErrorBody {
-        code: code.to_string(),
-        message: message.to_string(),
-    };
-    match mode {
-        Mode::Json => {
-            let env = PartialEnvelope {
-                ok: false,
-                results,
-                error,
-            };
-            println!("{}", serde_json::to_string_pretty(&env).unwrap_or_default());
-        }
-        Mode::Quiet => {
-            for r in results {
-                println!("{}", r.output);
-            }
-            eprint_error_label(message);
-        }
-        Mode::Human => {
-            for r in results {
-                print_human_item(r);
-            }
-            eprint_error_label(message);
-        }
+    if mode.is_json() {
+        print_json(&PartialEnvelope {
+            ok: false,
+            results,
+            error: ErrorBody::new(code, message),
+        });
+    } else {
+        // Quiet and Human render the successful items exactly as a clean run
+        // does, then append the error on stderr.
+        print_results(mode, results);
+        eprint_error_label(message);
     }
 }
 
@@ -148,14 +143,10 @@ fn eprint_error_label(message: &str) {
 /// Print an error according to the mode (JSON to stdout, human to stderr).
 pub fn print_error(mode: Mode, code: &str, message: &str) {
     if mode.is_json() {
-        let env = ErrorEnvelope {
+        print_json(&ErrorEnvelope {
             ok: false,
-            error: ErrorBody {
-                code: code.to_string(),
-                message: message.to_string(),
-            },
-        };
-        println!("{}", serde_json::to_string_pretty(&env).unwrap_or_default());
+            error: ErrorBody::new(code, message),
+        });
     } else {
         eprint_error_label(message);
     }

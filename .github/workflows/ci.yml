@@ -40,13 +40,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Format check
+        # rustfmt's verdict is platform-independent, so once is enough.
+        if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Build
-        run: cargo build --verbose
-
+      # No separate `cargo build`: clippy --all-targets type-checks the same
+      # non-test cfg, and `cargo test` links a real executable, exercising every
+      # native dependency on this platform.
       - name: Test
-        run: cargo test --verbose
+        run: cargo test

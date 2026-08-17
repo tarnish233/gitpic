@@ -6,6 +6,52 @@
 
 ## [未发布]
 
+### 凭据不再需要存在配置文件里
+
+`config.toml` 里存着明文 GitHub token，这让它无法安全地纳入 dotfiles 同步 ——
+而 scope 为 `repo` 的 classic PAT 对账号可访问的**每一个仓库**都有读写权限，且默认永不过期。
+
+### 变更
+- 凭据按以下顺序解析：`GITPIC_TOKEN` 环境变量 → 配置文件里的 `github.token` →
+  `gh auth token`。只要 `gh` 已登录，`config.toml` 里就不需要任何密钥，可以安全同步。
+- 配置里已有的 `github.token` 继续可用，并且优先级高于 `gh` —— 升级不会静默换掉
+  你上传用的账号。想切到 `gh`，删掉那一行即可。
+- `gitpic doctor` 新增报告 `token_source`（`env` / `config` / `gh`），可以确认当前
+  实际使用的是哪一个凭据。
+- 凭据改为惰性解析，只在真要发请求前才取，因此不再存入 `Config`（后者 derive 了
+  `Debug`，此前 `{:?}` 能把 token 打出来）。取不到凭据现在表现为
+  `token_valid: false`，而不是 `config_ok: false`。
+- `gitpic init` 不再一上来就索要 token；该项留空即使用 `gh`。
+
+注意：`gh` 那枚 OAuth token 的 scope 通常是 `gist, read:org, repo, workflow`，
+比"只往一个图床仓库写文件"所需的权限**更宽**。本次改动解决的是「密钥不落盘到会被
+同步的文件里」，并不缩小权限范围。若需要最小权限，请通过 `GITPIC_TOKEN` 传入限定
+单仓库的细粒度令牌。
+
+### 修复
+- `gitpic paste --name shot.jpg` 不再把 PNG 字节发布到 `.jpg` 路径。剪贴板截图
+  一律编码为 PNG，所以扩展名现在由此推导，而不是照抄 `--name` —— 此前 GitHub 与
+  jsDelivr 会把这些上传按 `image/jpeg` 提供。
+- `gitpic config set upload.link_kind` 与 `gitpic init` 的提示现在拒绝除
+  `cdn`/`raw` 以外的值。此前写错会显示成功，然后因为读取端回落到 `cdn` 而永久
+  静默产出 CDN 链接。
+- `GITPIC_OWNER`、`GITPIC_BRANCH`、`GITPIC_LINK`、`GITPIC_REPO` 为空白时，现在
+  回落到配置文件，而不是用空白覆盖它。此前 `GITPIC_OWNER=" "` 能通过配置检查，
+  然后向 `/repos/%20/repo` 发请求 —— 得到一个莫名的 404 而非可操作的错误。
+- `gitpic list` 现在把去重的上传标记为 `(deduped)`，与上传输出里已用的措辞一致。
+
+### 移除
+- 删除未使用的 `anyhow` 与 `thiserror` 依赖，以及不可达的 `image/webp` 和未使用的
+  `tokio/fs`、`tokio/io-std`、`clap/env` 这几个 cargo feature。构建图少了三个 crate。
+
+### CI
+- 发布流程改为上传 `gitpic-<target>.*` 并设 `fail_on_unmatched_files: true`。
+  此前列了四个归档名、其中两个在任何平台上都不存在，这迫使该检查关闭 —— 于是一个
+  **什么产物都没上传**的 release 也会显示成功。
+- `cargo fmt --check` 只在 Linux 上跑（rustfmt 的判定与平台无关），并移除冗余的
+  `cargo build` —— `clippy --all-targets` 已类型检查同一份 cfg，`cargo test` 会链接
+  出真实可执行文件、跑通每个原生依赖。
+
 ## [0.1.8] - 2026-08-14
 
 ### 修复

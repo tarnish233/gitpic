@@ -123,37 +123,21 @@ impl Config {
         if !path.exists() {
             return Ok(Config::default());
         }
-        let text = std::fs::read_to_string(&path).map_err(|e| {
-            AppError::new(
-                crate::error::ErrorCode::General,
-                format!("read config: {e}"),
-            )
-        })?;
-        toml::from_str(&text).map_err(|e| {
-            AppError::new(
-                crate::error::ErrorCode::General,
-                format!("parse config: {e}"),
-            )
-        })
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| AppError::general(format!("read config: {e}")))?;
+        toml::from_str(&text).map_err(|e| AppError::general(format!("parse config: {e}")))
     }
 
     /// Persist config to disk (creating parent dirs).
     pub fn save(&self) -> Result<PathBuf> {
         let path = Self::path()?;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                AppError::new(crate::error::ErrorCode::General, format!("mkdir: {e}"))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| AppError::general(format!("mkdir: {e}")))?;
         }
-        let text = toml::to_string_pretty(self).map_err(|e| {
-            AppError::new(crate::error::ErrorCode::General, format!("serialize: {e}"))
-        })?;
-        std::fs::write(&path, text).map_err(|e| {
-            AppError::new(
-                crate::error::ErrorCode::General,
-                format!("write config: {e}"),
-            )
-        })?;
+        let text = toml::to_string_pretty(self)
+            .map_err(|e| AppError::general(format!("serialize: {e}")))?;
+        std::fs::write(&path, text).map_err(|e| AppError::general(format!("write config: {e}")))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

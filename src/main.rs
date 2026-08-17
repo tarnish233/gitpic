@@ -15,7 +15,7 @@ mod output;
 use clap::{error::ErrorKind, Parser};
 use cli::{Cli, Command};
 use config::Config;
-use error::Result;
+use error::{ErrorCode, Result};
 use output::Mode;
 use std::process::ExitCode;
 
@@ -31,11 +31,14 @@ async fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             if wants_json {
-                output::print_error(Mode::Json, "USAGE", &e.to_string());
+                output::print_error(Mode::Json, ErrorCode::Usage.as_str(), &e.to_string());
             } else {
                 let _ = e.print();
             }
-            return ExitCode::from(e.exit_code() as u8);
+            // help/version already returned above, so every remaining clap error
+            // is a usage error. Going through ErrorCode keeps the wire string and
+            // the exit code under the contract test in error.rs.
+            return ExitCode::from(ErrorCode::Usage.exit_code());
         }
     };
     let mode = Mode::from_flags(cli.json, cli.quiet);
@@ -50,32 +53,36 @@ async fn main() -> ExitCode {
 }
 
 async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
-    // Commands that do not need config resolution / network.
+    // One match, so adding a subcommand fails to compile here — on the arm you
+    // actually have to write — rather than at a catch-all that would compile and
+    // then panic (an abort exits 134, outside the documented 1-9 contract).
     match &cli.command {
-        Some(Command::Init) => return commands::init::run().map(|_| 0),
-        Some(Command::Config { action }) => return commands::config_cmd::run(action).map(|_| 0),
-        Some(Command::List { limit }) => return commands::list::run(*limit, mode).map(|_| 0),
-        Some(Command::Completion { shell }) => return commands::completion::run(*shell).map(|_| 0),
-        Some(Command::Skill { action }) => return commands::skill::run(action, mode).map(|_| 0),
-        _ => {}
-    }
+        // Config-free: these must work even when config.toml is missing or
+        // unparseable, so they never touch `resolve_config`.
+        Some(Command::Init) => commands::init::run().map(|_| 0),
+        Some(Command::Config { action }) => commands::config_cmd::run(action).map(|_| 0),
+        Some(Command::List { limit }) => commands::list::run(*limit, mode).map(|_| 0),
+        Some(Command::Completion { shell }) => commands::completion::run(*shell).map(|_| 0),
+        Some(Command::Skill { action }) => commands::skill::run(action, mode).map(|_| 0),
 
-    // Resolve config: file -> env -> CLI overrides.
+        Some(Command::Doctor) => {
+            let cfg = resolve_config(cli)?;
+            commands::doctor::run(&cfg, mode).await
+        }
+        // No subcommand means the default upload path.
+        Some(Command::Paste) | None => {
+            let cfg = resolve_config(cli)?;
+            commands::upload::run(cli, &cfg, mode).await
+        }
+    }
+}
+
+/// Resolve config: file -> env -> CLI overrides.
+fn resolve_config(cli: &Cli) -> Result<Config> {
     let mut cfg = Config::load()?;
     cfg.apply_env()?;
     if let Some(repo) = &cli.repo {
         cfg.set_repo_spec(repo)?;
     }
-
-    match &cli.command {
-        Some(Command::Doctor) => commands::doctor::run(&cfg, mode).await,
-        Some(Command::Paste) => commands::upload::run(cli, &cfg, mode).await,
-        None => commands::upload::run(cli, &cfg, mode).await,
-        // handled above
-        Some(Command::Init)
-        | Some(Command::Config { .. })
-        | Some(Command::List { .. })
-        | Some(Command::Completion { .. })
-        | Some(Command::Skill { .. }) => unreachable!(),
-    }
+    Ok(cfg)
 }

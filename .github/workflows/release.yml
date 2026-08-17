@@ -78,9 +78,8 @@ jobs:
         with:
           name: ${{ steps.release_notes.outputs.name }}
           body_path: RELEASE_NOTES.md
-          files: |
-            gitpic-${{ matrix.target }}.tar.gz
-            gitpic-${{ matrix.target }}.tar.gz.sha256
-            gitpic-${{ matrix.target }}.zip
-            gitpic-${{ matrix.target }}.zip.sha256
-          fail_on_unmatched_files: false
+          # One glob per platform, so an unmatched pattern is a real failure.
+          # Listing all four archive names forced fail_on_unmatched_files: false,
+          # which let a release that uploaded *nothing* pass as green.
+          files: gitpic-${{ matrix.target }}.*
+          fail_on_unmatched_files: true
