@@ -51,6 +51,13 @@ run `gh auth login` — gitpic takes its credential from `gh auth token` — or 
 set `GITPIC_TOKEN`; then stop. If `repo_writable` is false, ask them to check
 the target repository and grant Contents read/write permission, then stop.
 
+The two checks are probed independently, so read them together before acting. If
+`token_valid` is false **but `repo_writable` is true** and `error.code` is
+`NETWORK`, the credential is fine and GitHub's `/user` endpoint — which uploads
+never call — is simply unreachable. Retry; do not send the user to
+`gh auth login`, which cannot fix it. Treat `token_valid: false` as a credential
+problem only when `repo_writable` is also false.
+
 The report's `token_source` field (`env` / `config` / `gh`) says where the
 credential came from. Never ask the user to paste a token into the conversation;
 prefer `gh auth login`, which keeps it in the OS keyring.
