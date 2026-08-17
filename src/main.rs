@@ -61,11 +61,20 @@ async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
         // unparseable, so they never touch `resolve_config`.
         Some(Command::Init) => {
             reject_ignored_options(cli, false)?;
+            // `init` is a conversation: it writes prompts to stdout and waits. There
+            // is no JSON stream to produce, and pretending otherwise would interleave
+            // prompts with an envelope. Every other subcommand honours `--json`.
+            if mode.is_json() {
+                return Err(error::AppError::usage(
+                    "`init` is interactive and has no JSON output; set GITPIC_REPO \
+                     or use `gitpic config set` in scripts",
+                ));
+            }
             commands::init::run().map(|_| 0)
         }
         Some(Command::Config { action }) => {
             reject_ignored_options(cli, false)?;
-            commands::config_cmd::run(action).map(|_| 0)
+            commands::config_cmd::run(action, mode).map(|_| 0)
         }
         Some(Command::List { limit }) => {
             reject_ignored_options(cli, false)?;

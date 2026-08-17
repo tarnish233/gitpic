@@ -15,18 +15,18 @@ use crate::github::PutOutcome;
 use crate::imageproc::CompressOpts;
 use crate::link;
 use crate::output::ItemResult;
-use std::io::{self, Write};
+use std::io;
 
 /// Prompt on stdout and read a line from stdin. Returns `None` on EOF
 /// (Ctrl-D / closed stdin), which callers must not confuse with an empty
 /// reply — for a write action EOF means "abort", not "take the default".
 pub(crate) fn prompt_opt(label: &str, default: &str) -> Result<Option<String>> {
     if default.is_empty() {
-        print!("{label}: ");
+        crate::output::raw(&format!("{label}: "));
     } else {
-        print!("{label} [{default}]: ");
+        crate::output::raw(&format!("{label} [{default}]: "));
     }
-    io::stdout().flush().ok();
+    crate::output::finish();
     let mut line = String::new();
     let read = io::stdin()
         .read_line(&mut line)

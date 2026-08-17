@@ -127,7 +127,84 @@ fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     f.sync_all()
 }
 
+/// Check that a value destined for a URL path segment cannot change the URL's
+/// shape or arrive padded. Empty is the caller's business — `owner` and `repo` are
+/// legitimately empty before anything is configured.
+fn check_segment(what: &str, value: &str) -> std::result::Result<(), String> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    if value != value.trim() {
+        return Err(format!(
+            "{what} {value:?} has leading or trailing whitespace"
+        ));
+    }
+    if value.contains('/') {
+        return Err(format!("{what} {value:?} must not contain '/'"));
+    }
+    if value == "." || value == ".." {
+        return Err(format!("{what} cannot be {value:?}"));
+    }
+    if value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!(
+            "{what} {value:?} must not contain whitespace or control characters"
+        ));
+    }
+    Ok(())
+}
+
 impl Config {
+    /// [`Config::validate`] for callers outside this module — `config set`, which
+    /// has to apply exactly the same rules as the file and the environment.
+    pub(crate) fn validate_public(&self) -> std::result::Result<(), String> {
+        self.validate()
+    }
+
+    /// Check every value, whatever produced it.
+    ///
+    /// `deny_unknown_fields` guards key *names*; nothing guarded the values. A
+    /// hand-edited `link_kind = "raw2"` or a `GITPIC_LINK=raw2` loaded fine and the
+    /// lenient reader then served cdn links forever, and `config set
+    /// github.owner "  me  "` produced a request against
+    /// `/repos/%20%20me%20%20/repo` — the exact failure the env-var trimming was
+    /// added to prevent, on the entry point it did not cover. One function, called
+    /// from every entry point, is what keeps those from drifting apart again.
+    ///
+    /// Returns a bare message so each caller can attach the code that fits where
+    /// the value came from: a file is `CONFIG_INVALID`, a flag or variable is a
+    /// usage error.
+    fn validate(&self) -> std::result::Result<(), String> {
+        check_segment("github.owner", &self.github.owner)?;
+        check_segment("github.repo", &self.github.repo)?;
+        if self.github.branch.trim().is_empty() {
+            return Err("github.branch must not be empty".to_string());
+        }
+        check_segment("github.branch", &self.github.branch)?;
+        if crate::link::parse_link_kind_strict(&self.upload.link_kind).is_none() {
+            return Err(format!(
+                "upload.link_kind must be \"cdn\" or \"raw\", not {:?}",
+                self.upload.link_kind
+            ));
+        }
+        if !(1..=100).contains(&self.upload.quality) {
+            return Err(format!(
+                "upload.quality must be 1-100, not {}",
+                self.upload.quality
+            ));
+        }
+        // Rendered, because that is what an upload actually uses and what
+        // `is_safe_remote_path` is written against.
+        let sample =
+            crate::naming::render_path(&self.upload.path_template, "sample.png", &"0".repeat(64));
+        if !crate::naming::is_safe_remote_path(&sample) {
+            return Err(format!(
+                "upload.path_template {:?} must be repo-relative with no empty or `..` segments (renders to {sample:?})",
+                self.upload.path_template
+            ));
+        }
+        Ok(())
+    }
+
     /// Locate the config file: `$XDG_CONFIG_HOME/gitpic/config.toml`
     /// (falls back to `~/.config/gitpic/config.toml`). Does not require it to exist.
     pub fn path() -> Result<PathBuf> {
@@ -168,12 +245,18 @@ impl Config {
     /// mutating `XDG_CONFIG_HOME` (unsound across the parallel test runner) —
     /// the same seam as `history::parse_recent` and `auth::resolve_with`.
     fn parse(text: &str, shown: &str) -> Result<Self> {
-        toml::from_str(text).map_err(|e| {
+        let cfg: Self = toml::from_str(text).map_err(|e| {
             AppError::config_invalid(format!(
                 "cannot use config file {shown}: {}\nfix it with `gitpic config edit`",
                 e.to_string().trim_end()
             ))
-        })
+        })?;
+        cfg.validate().map_err(|msg| {
+            AppError::config_invalid(format!(
+                "cannot use config file {shown}: {msg}\nfix it with `gitpic config edit`"
+            ))
+        })?;
+        Ok(cfg)
     }
 
     /// Persist config to disk (creating parent dirs).
@@ -256,6 +339,9 @@ impl Config {
         if let Some(v) = value("GITPIC_REPO") {
             self.set_repo_spec(&v)?;
         }
+        // Checked after the overrides, not per-variable: `GITPIC_LINK=raw2` used to
+        // be accepted here and then read back leniently as cdn.
+        self.validate().map_err(AppError::usage)?;
         Ok(())
     }
 
@@ -466,5 +552,82 @@ mod tests {
             .apply_env_with(env_of(&[("GITPIC_REPO", " a/b/c ")]))
             .expect_err("must be rejected");
         assert_eq!(err.code, ErrorCode::Usage);
+    }
+
+    #[test]
+    fn the_default_config_passes_its_own_validation() {
+        // If it did not, every fresh install would refuse to start.
+        Config::default()
+            .validate()
+            .expect("defaults must be valid");
+    }
+
+    #[test]
+    fn a_bad_link_kind_is_rejected_from_the_file_and_the_environment() {
+        // Regression: `config set upload.link_kind raw2` was refused, but the same
+        // value reached the same field unchecked through a hand-edited file or
+        // GITPIC_LINK — and the lenient reader then served cdn links forever.
+        let err = Config::parse("[upload]\nlink_kind = \"raw2\"\n", "/tmp/c.toml")
+            .expect_err("the file must be rejected too");
+        assert_eq!(err.code, ErrorCode::ConfigInvalid);
+        assert!(err.message.contains("link_kind"), "{}", err.message);
+
+        let mut cfg = Config::default();
+        let err = cfg
+            .apply_env_with(env_of(&[("GITPIC_LINK", "raw2")]))
+            .expect_err("the variable must be rejected too");
+        assert_eq!(err.code, ErrorCode::Usage);
+    }
+
+    #[test]
+    fn an_owner_that_would_deform_the_url_is_rejected() {
+        // Regression: only the env path trimmed, so `config set github.owner
+        // "  me  "` still produced `/repos/%20%20me%20%20/repo`, and `..` silently
+        // removed a path segment from the request.
+        for bad in ["  me  ", "..", ".", "a/b", "me\tx"] {
+            let toml = format!("[github]\nowner = {bad:?}\n");
+            let err = Config::parse(&toml, "/tmp/c.toml")
+                .err()
+                .unwrap_or_else(|| panic!("owner {bad:?} must be rejected"));
+            assert_eq!(err.code, ErrorCode::ConfigInvalid, "for {bad:?}");
+            assert!(err.message.contains("owner"), "{}", err.message);
+        }
+        // An ordinary owner, and the unconfigured empty one, both stay valid.
+        Config::parse("[github]\nowner = \"tarnish233\"\n", "/tmp/c.toml").expect("valid");
+        Config::parse("[github]\nowner = \"\"\n", "/tmp/c.toml").expect("empty is unconfigured");
+    }
+
+    #[test]
+    fn an_empty_branch_is_rejected() {
+        // It reached `?ref=` and `"branch":""`, which GitHub answers with a 422 that
+        // maps to the GENERAL catch-all an agent cannot act on.
+        let err = Config::parse("[github]\nbranch = \"\"\n", "/tmp/c.toml")
+            .expect_err("must be rejected");
+        assert_eq!(err.code, ErrorCode::ConfigInvalid);
+        assert!(err.message.contains("branch"), "{}", err.message);
+    }
+
+    #[test]
+    fn an_out_of_range_quality_in_the_file_is_rejected_not_clamped() {
+        // `config set upload.quality 0` errored while the file silently reached
+        // `clamp(1, 100)` — the same silent clamp `--quality 0` was fixed for.
+        for bad in ["0", "200"] {
+            let toml = format!("[upload]\nquality = {bad}\n");
+            let err = Config::parse(&toml, "/tmp/c.toml")
+                .expect_err(&format!("quality {bad} must be rejected"));
+            assert_eq!(err.code, ErrorCode::ConfigInvalid);
+        }
+        Config::parse("[upload]\nquality = 1\n", "/tmp/c.toml").expect("1 is valid");
+        Config::parse("[upload]\nquality = 100\n", "/tmp/c.toml").expect("100 is valid");
+    }
+
+    #[test]
+    fn a_traversing_path_template_in_the_file_is_rejected() {
+        let err = Config::parse(
+            "[upload]\npath_template = \"../../etc/{name}.{ext}\"\n",
+            "/tmp/c.toml",
+        )
+        .expect_err("must be rejected");
+        assert_eq!(err.code, ErrorCode::ConfigInvalid);
     }
 }

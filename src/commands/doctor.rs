@@ -251,8 +251,8 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
                     .to_string()
             }
         };
-        println!("{} config present", mark(report.config_ok));
-        println!(
+        crate::output::line(&format!("{} config present", mark(report.config_ok)));
+        crate::output::line(&format!(
             "{} token valid{}{}",
             mark(report.token_valid),
             report
@@ -264,8 +264,8 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
                 .token_source
                 .map(|s| format!(" via {s}"))
                 .unwrap_or_default()
-        );
-        println!(
+        ));
+        crate::output::line(&format!(
             "{} repo writable{}",
             mark(report.repo_writable),
             if report.branch_protected {
@@ -273,10 +273,10 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
             } else {
                 ""
             }
-        );
+        ));
         if let Some(d) = &report.detail {
             let note = "note:".if_supports_color(Stream::Stdout, |t| t.yellow().to_string());
-            println!("  {note} {d}");
+            crate::output::line(&format!("  {note} {d}"));
         }
     }
     Ok(exit)

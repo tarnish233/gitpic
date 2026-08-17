@@ -22,8 +22,18 @@ pub fn run(limit: usize, mode: Mode) -> Result<()> {
         crate::output::print_json(&env);
         return Ok(());
     }
+    // `--quiet` is documented as "only print the resulting link/URL (script
+    // friendly)", which is what the upload path already does with it. It used to
+    // print the full human listing, and on an empty history even printed the "no
+    // uploads recorded yet" prose — output a script would have to filter out.
+    if matches!(mode, Mode::Quiet) {
+        for r in &recs {
+            crate::output::line(&r.url);
+        }
+        return Ok(());
+    }
     if recs.is_empty() {
-        println!("no uploads recorded yet");
+        crate::output::line("no uploads recorded yet");
         return Ok(());
     }
     for r in &recs {
@@ -41,8 +51,8 @@ pub fn run(limit: usize, mode: Mode) -> Result<()> {
         } else {
             String::new()
         };
-        println!("{date}  {name}{tag}");
-        println!("  {}", r.url);
+        crate::output::line(&format!("{date}  {name}{tag}"));
+        crate::output::line(&format!("  {}", r.url));
     }
     Ok(())
 }

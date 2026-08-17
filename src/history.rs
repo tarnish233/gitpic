@@ -38,7 +38,18 @@ pub fn append(rec: &Record) -> Result<()> {
         .append(true)
         .open(&path)
         .map_err(|e| AppError::general(format!("open history: {e}")))?;
-    writeln!(f, "{line}").map_err(|e| AppError::general(format!("write history: {e}")))?;
+    // One `write_all` of record-plus-newline, not `writeln!`. `writeln!` goes
+    // through `write_fmt`, which emits the body and the newline as two separate
+    // `write` calls: `O_APPEND` makes each one atomic but not the pair, so a second
+    // process appending concurrently can land its record between them. The result
+    // is two records merged onto one line, which `parse_recent` then skips without
+    // a word — records silently missing from `gitpic list`. Two `gitpic` processes
+    // is not exotic: an agent batching uploads, or `xargs -P`, does it.
+    let mut buf = Vec::with_capacity(line.len() + 1);
+    buf.extend_from_slice(line.as_bytes());
+    buf.push(b'\n');
+    f.write_all(&buf)
+        .map_err(|e| AppError::general(format!("write history: {e}")))?;
     drop(f);
 
     // Only the cheap metadata call happens on a normal append; the file is read
@@ -56,7 +67,10 @@ pub fn append(rec: &Record) -> Result<()> {
 /// Best-effort by design: this runs after the record is already safely on disk,
 /// and losing the *trim* must never turn into losing the *upload*. Written to a
 /// sibling temp file and renamed, so an interrupted trim cannot leave a
-/// half-written history behind.
+/// half-written history behind. The temp name carries the pid, so two processes
+/// trimming at once cannot write the same file — they still race on the rename and
+/// one snapshot wins, which is acceptable for a best-effort trim, but neither ends
+/// up reading the other's half-written bytes.
 ///
 /// `max_bytes` is a parameter rather than a direct read of `MAX_BYTES` so the
 /// rename-and-replace can be tested against a small file.
@@ -67,7 +81,7 @@ fn trim_file(path: &std::path::Path, max_bytes: usize) {
     let Some(kept) = trimmed(&text, max_bytes) else {
         return;
     };
-    let tmp = path.with_extension("jsonl.tmp");
+    let tmp = path.with_extension(format!("jsonl.{}.tmp", std::process::id()));
     if std::fs::write(&tmp, kept).is_ok() {
         let _ = std::fs::rename(&tmp, path);
     } else {
@@ -276,9 +290,18 @@ mod tests {
             .collect();
         assert_eq!(names.first().map(String::as_str), Some("39"), "newest kept");
         assert!(!names.contains(&"0".to_string()), "oldest dropped");
+        // No temp file of any name may survive: a stray `history.jsonl.<pid>.tmp`
+        // would be litter in the user's data dir on every trim. Checked by listing
+        // rather than by one expected name, so the pid in it cannot hide a leak.
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
         assert!(
-            !path.with_extension("jsonl.tmp").exists(),
-            "temp file must not survive"
+            leftovers.is_empty(),
+            "temp files must not survive: {leftovers:?}"
         );
 
         // A file already under the ceiling must be left byte-identical.

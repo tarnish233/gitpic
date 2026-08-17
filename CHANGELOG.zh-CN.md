@@ -32,10 +32,42 @@
   空字符串，调用方把它写盘 —— 为了执行一个体积上限而删掉全部已记录的链接。现在无条件
   保留最新一条。在 0.2.0–0.2.2 中可通过一个病态的 `--name` 触发（其控制字符经 JSON
   转义后膨胀六倍）。
+- 读取端关闭管道不再让进程崩溃。`gitpic list | head`、`gitpic completion zsh | true`、
+  `gitpic skill print | head` —— 任何提前停止读取的消费者 —— 都会让 `println!` panic，
+  而 release profile 的 `panic = "abort"` 意味着 SIGABRT：退出码 134，落在文档承诺的
+  1-10 之外，还在 stderr 上吐一段裸 Rust panic。管道被关闭不是错误（读取方已经拿到了
+  它要的），所以现在退出 0，这也是 `head` 之类期待的行为。crate 里所有 stdout 写入都
+  收敛到一处守卫，包括 `completion` —— 它此前经由 `clap_complete` 自己的 `.expect()`
+  写出，本 crate 拦不住。
+- 并发上传不再损坏历史。`writeln!` 会把记录正文和换行分成**两次** `write`；`O_APPEND`
+  保证单次原子但不保证这一对原子，所以另一个进程同时追加时，它的记录会插进这两者之间。
+  合并成一行的记录随后被读取端静默跳过 —— `gitpic list` 里凭空少几条且毫无提示。现在
+  改成一次 `write_all`；裁剪用的临时文件名带上 pid，两个进程也不会写同一个路径。
+- 配置**值**现在无论从哪里进来都会被校验，而不只是 `config set` 那一条路。
+  `deny_unknown_fields` 守的是键名；手改的 `link_kind = "raw2"` 或 `GITPIC_LINK=raw2`
+  仍然能加载，而宽松的读取端随后永久给出 cdn 链接。`github.owner` 此前完全没有校验，
+  于是 `config set github.owner "  me  "` 会产出 `/repos/%20%20me%20%20/repo` ——
+  正是环境变量去空格所要防的那个问题，只是发生在它没覆盖的入口上 —— 而 `..` 会让 URL
+  静默少一段。文件里空的 `github.branch` 和越界的 `upload.quality` 同样会被拒绝，而不是
+  撞上 422 或被静默钳制。现在文件、环境变量、`config set` 三者跑同一个 `validate`。
+- `gitpic --stdin` 按字节内容命名，而不再一律叫 `image.png`。此前
+  `cat photo.jpg | gitpic --stdin` 会把 JPEG 数据发布到 `.png` 路径，GitHub 与 jsDelivr
+  随后按 `image/png` 提供。这与 0.2.0 修的 `paste --name shot.jpg` 是同一个缺陷，只是
+  发生在那次修复漏掉的来源上：扩展名由内容决定，`--name` 只提供文件名主干。无法识别
+  且没给 `--name` 时报 USAGE，而不是猜一个错的 `.png`。
+- 每个产出输出的子命令都真正支持 `--json`。此前 `config path` 出纯文本、`config get`
+  出 TOML、`skill print` 出裸 Markdown，于是遵循技能文档"总是传 `--json`"的 agent 拿到
+  的是解析错误。`init` 是交互式的，现在直接拒绝 `--json`，而不是把提示和信封混在一起。
+- `--quiet` 只输出机器可用的行。此前 `gitpic list --quiet` 打的是完整人类列表，空历史
+  时还会打"no uploads recorded yet" —— 脚本得自己过滤掉的散文。现在是一行一个 URL，
+  与上传路径的既有行为一致。
 
 ### 新增
 - `gitpic doctor` 报告 `branch_protected`。分支受保护并不意味着当前账号不能写，所以
   它不会让报告变成不健康；但当所有预检都通过、上传却仍被拒绝时，它通常就是原因。
+- `tests/json_contract.rs`：会启动构建出的二进制。`--json` 与断管契约存在于
+  `dispatch` 和各渲染器之间的接线里，任何单元测试都够不到 —— 我先写的一个源码扫描式
+  检查在 bug 仍然存在时就通过了，所以换成了这个。
 
 ## [0.2.2] - 2026-08-17
 

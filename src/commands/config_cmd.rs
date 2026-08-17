@@ -3,27 +3,106 @@
 use crate::cli::ConfigAction;
 use crate::config::Config;
 use crate::error::{AppError, Result};
+use crate::output::Mode;
+use serde::Serialize;
 
-pub fn run(action: &ConfigAction) -> Result<()> {
+/// `config path` / `config edit`.
+#[derive(Serialize)]
+struct PathEnvelope<'a> {
+    ok: bool,
+    path: &'a str,
+}
+
+/// `config get <key>`.
+#[derive(Serialize)]
+struct ValueEnvelope<'a> {
+    ok: bool,
+    key: &'a str,
+    value: &'a str,
+}
+
+/// `config get` with no key. The token is redacted, exactly as in the human view.
+#[derive(Serialize)]
+struct ConfigEnvelope<'a> {
+    ok: bool,
+    config: &'a Config,
+}
+
+/// `config set`.
+#[derive(Serialize)]
+struct SetEnvelope<'a> {
+    ok: bool,
+    key: &'a str,
+    value: &'a str,
+    path: &'a str,
+}
+
+pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
     match action {
         ConfigAction::Path => {
-            println!("{}", Config::path()?.display());
+            let path = Config::path()?;
+            let shown = path.display().to_string();
+            if mode.is_json() {
+                crate::output::print_json(&PathEnvelope {
+                    ok: true,
+                    path: &shown,
+                });
+            } else {
+                crate::output::line(&shown);
+            }
         }
         ConfigAction::Get { key } => {
             let cfg = Config::load()?;
             match key.as_deref() {
                 None => {
                     let safe = redacted_config(&cfg);
-                    println!("{}", toml::to_string_pretty(&safe).unwrap_or_default());
+                    if mode.is_json() {
+                        crate::output::print_json(&ConfigEnvelope {
+                            ok: true,
+                            config: &safe,
+                        });
+                    } else {
+                        crate::output::line(&toml::to_string_pretty(&safe).unwrap_or_default());
+                    }
                 }
-                Some(k) => println!("{}", get_key(&cfg, k)?),
+                Some(k) => {
+                    let v = get_key(&cfg, k)?;
+                    if mode.is_json() {
+                        crate::output::print_json(&ValueEnvelope {
+                            ok: true,
+                            key: k,
+                            value: &v,
+                        });
+                    } else {
+                        crate::output::line(&v);
+                    }
+                }
             }
         }
         ConfigAction::Set { key, value } => {
             let mut cfg = Config::load()?;
             set_key(&mut cfg, key, value)?;
+            // The same check the file and the environment go through, so no entry
+            // point can accept a value the others refuse. `set_key` still parses
+            // per-key (a bool is not a number), but the *semantic* rules live in
+            // one place.
+            cfg.validate_public().map_err(AppError::usage)?;
             let path = cfg.save()?;
-            println!("\u{2713} set {key} in {}", path.display());
+            let shown = path.display().to_string();
+            if mode.is_json() {
+                // The stored value, not the raw argument: `link_kind` is
+                // lowercased and `repo` may have been split, so echoing the input
+                // would misreport what is now on disk.
+                let stored = get_key(&cfg, key)?;
+                crate::output::print_json(&SetEnvelope {
+                    ok: true,
+                    key,
+                    value: &stored,
+                    path: &shown,
+                });
+            } else {
+                crate::output::line(&format!("\u{2713} set {key} in {shown}"));
+            }
         }
         ConfigAction::Edit => {
             let path = Config::path()?;
@@ -37,6 +116,13 @@ pub fn run(action: &ConfigAction) -> Result<()> {
                 .map_err(|e| AppError::general(format!("launch editor: {e}")))?;
             if !status.success() {
                 return Err(AppError::general("editor exited with error"));
+            }
+            if mode.is_json() {
+                let shown = path.display().to_string();
+                crate::output::print_json(&PathEnvelope {
+                    ok: true,
+                    path: &shown,
+                });
             }
         }
     }
