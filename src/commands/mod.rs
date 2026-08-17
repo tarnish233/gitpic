@@ -10,8 +10,9 @@ pub mod upload;
 
 use crate::cli::{Cli, LinkKind, OutputFormat};
 use crate::config::Config;
-use crate::error::{AppError, ErrorCode, Result};
+use crate::error::{AppError, Result};
 use crate::github::PutOutcome;
+use crate::imageproc::CompressOpts;
 use crate::link;
 use crate::output::ItemResult;
 use std::io::{self, Write};
@@ -29,7 +30,7 @@ pub(crate) fn prompt_opt(label: &str, default: &str) -> Result<Option<String>> {
     let mut line = String::new();
     let read = io::stdin()
         .read_line(&mut line)
-        .map_err(|e| AppError::new(ErrorCode::General, format!("read input: {e}")))?;
+        .map_err(|e| AppError::general(format!("read input: {e}")))?;
     if read == 0 {
         return Ok(None);
     }
@@ -64,6 +65,21 @@ pub fn resolve_template<'a>(cli: &'a Cli, cfg: &'a Config) -> &'a str {
     cli.path.as_deref().unwrap_or(&cfg.upload.path_template)
 }
 
+/// Resolve the effective compression settings.
+///
+/// The one resolver with a non-trivial precedence rule: `--no-compress` wins over
+/// both `--compress` and `upload.compress`, so the flag can disable compression
+/// that the config enables. A flipped operator here would silently turn
+/// compression off for everyone, which is why it lives next to its siblings with
+/// a test rather than inline in `upload::run`.
+pub fn resolve_compress(cli: &Cli, cfg: &Config) -> CompressOpts {
+    CompressOpts {
+        enabled: (cfg.upload.compress || cli.compress) && !cli.no_compress,
+        max_width: cli.max_width.unwrap_or(cfg.upload.max_width),
+        quality: cli.quality.unwrap_or(cfg.upload.quality),
+    }
+}
+
 /// Build the JSON/human result record from an upload outcome.
 pub fn build_item(
     outcome: &PutOutcome,
@@ -91,5 +107,52 @@ pub fn build_item(
         size: outcome.size,
         deduped: outcome.deduped,
         output,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("valid args")
+    }
+
+    #[test]
+    fn no_compress_overrides_the_compress_flag() {
+        let cli = parse(&["gitpic", "a.png", "--compress", "--no-compress"]);
+        assert!(!resolve_compress(&cli, &Config::default()).enabled);
+    }
+
+    #[test]
+    fn no_compress_overrides_the_config() {
+        // The documented rule: the flag can disable what the config enables.
+        let mut cfg = Config::default();
+        cfg.upload.compress = true;
+        let cli = parse(&["gitpic", "a.png", "--no-compress"]);
+        assert!(!resolve_compress(&cli, &cfg).enabled);
+    }
+
+    #[test]
+    fn either_the_flag_or_the_config_enables_compression() {
+        let mut cfg = Config::default();
+        assert!(resolve_compress(&parse(&["gitpic", "a.png", "--compress"]), &cfg).enabled);
+        cfg.upload.compress = true;
+        assert!(resolve_compress(&parse(&["gitpic", "a.png"]), &cfg).enabled);
+    }
+
+    #[test]
+    fn cli_sizing_overrides_the_config_but_falls_back_to_it() {
+        let mut cfg = Config::default();
+        cfg.upload.max_width = 100;
+        cfg.upload.quality = 50;
+        let overridden = resolve_compress(
+            &parse(&["gitpic", "a.png", "--max-width", "800", "--quality", "90"]),
+            &cfg,
+        );
+        assert_eq!((overridden.max_width, overridden.quality), (800, 90));
+        let inherited = resolve_compress(&parse(&["gitpic", "a.png"]), &cfg);
+        assert_eq!((inherited.max_width, inherited.quality), (100, 50));
     }
 }
