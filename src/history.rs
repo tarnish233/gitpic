@@ -89,8 +89,12 @@ fn trimmed(text: &str, max_bytes: usize) -> Option<String> {
     let mut kept: Vec<&str> = Vec::new();
     let mut total = 0usize;
     for line in text.lines().rev().filter(|l| !l.trim().is_empty()) {
-        // +1 for the newline each retained line gets back.
-        if total + line.len() + 1 > target {
+        // +1 for the newline each retained line gets back. The newest record is
+        // kept unconditionally: without that, a single record longer than the
+        // budget would fit nothing, and returning an empty string here means the
+        // caller writes an empty file — wiping the whole history to enforce a
+        // size limit. Bounding the file at "one record" is the honest floor.
+        if !kept.is_empty() && total + line.len() + 1 > target {
             break;
         }
         total += line.len() + 1;
@@ -216,9 +220,37 @@ mod tests {
 
     #[test]
     fn blank_lines_do_not_survive_a_trim() {
-        let text = format!("{}\n\n\n{}\n\n{}\n", line("a"), line("b"), line("c"));
-        let kept = trimmed(&text, 10).expect("must trim");
+        // The budget has to be small enough to force a trim yet large enough to
+        // keep more than one record, which needs more than a handful of records to
+        // arrange. Passing `10` here made `trimmed` keep nothing, so the assertion
+        // below held trivially of an empty string and proved nothing.
+        let one = line("x").len() + 1;
+        let mut text = String::new();
+        for i in 0..10 {
+            text.push_str(&format!("{}\n", line(&i.to_string())));
+            text.push('\n'); // a blank line after every record
+        }
+        let kept = trimmed(&text, one * 6).expect("must trim");
+        assert!(!kept.is_empty(), "a real trim must keep something");
+        assert!(kept.lines().count() >= 2, "budget fits several: {kept:?}");
         assert!(!kept.contains("\n\n"), "{kept:?}");
+        // Every retained line is a whole record, not a fragment.
+        assert_eq!(parse_recent(&kept, 100).len(), kept.lines().count());
+    }
+
+    #[test]
+    fn a_trim_never_empties_the_history() {
+        // Guard on the data-loss path: when not even the newest record fits the
+        // budget, keeping nothing would wipe every link the user ever uploaded in
+        // order to enforce a size limit. The newest record is kept regardless.
+        let text = format!("{}\n{}\n", line("a"), line("b"));
+        let kept = trimmed(&text, 4).expect("must trim");
+        assert!(!kept.is_empty(), "must never write an empty history");
+        let names: Vec<String> = parse_recent(&kept, 10)
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(names, ["b"], "and it must be the newest one");
     }
 
     #[test]

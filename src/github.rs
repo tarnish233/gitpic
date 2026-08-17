@@ -79,6 +79,17 @@ pub struct RepoPermissions {
     pub admin: bool,
 }
 
+/// The target branch, as GitHub describes it.
+#[derive(Deserialize)]
+pub struct BranchInfo {
+    /// Branch protection is reported but does not by itself mean "cannot write":
+    /// the rules may well permit this account. It is surfaced as a caveat because
+    /// it is a common cause of an upload failing with 409/422 after every
+    /// permission check passed.
+    #[serde(default)]
+    pub protected: bool,
+}
+
 impl GitHub {
     pub fn new(token: &str, owner: &str, repo: &str, branch: &str) -> Result<Self> {
         Self::with_api(API, token, owner, repo, branch)
@@ -266,6 +277,28 @@ impl GitHub {
     pub async fn repo_info(&self) -> Result<RepoInfo> {
         self.send_json(self.req(reqwest::Method::GET, self.repo_base()), "repo")
             .await
+    }
+
+    /// Look up the target branch.
+    ///
+    /// `Ok(None)` means GitHub answered 404: the branch is genuinely absent, which
+    /// is a distinct and actionable state rather than a failure — repo-level push
+    /// permission says nothing about whether the ref an upload targets exists.
+    /// Any other error propagates.
+    pub async fn branch_info(&self) -> Result<Option<BranchInfo>> {
+        let url = format!(
+            "{}/branches/{}",
+            self.repo_base(),
+            encode_path(&self.branch)
+        );
+        match self
+            .send_json::<BranchInfo>(self.req(reqwest::Method::GET, url), "branch")
+            .await
+        {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.code == ErrorCode::RemoteNotFound => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 

@@ -4,6 +4,51 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- `gitpic init` no longer asks for a token. `prompt` reads through a plain
+  `stdin.read_line()`, so a typed token echoed to the terminal and stayed in the
+  scrollback, in `script`/asciinema recordings, and in any terminal logger — and
+  answering it then wrote that token to disk in plaintext, the exact thing the
+  credential chain was reworked to avoid. `init` now points at `gh auth login` and
+  `GITPIC_TOKEN`. An existing `github.token` keeps working and still wins over
+  `gh`, so nobody is cut off.
+- The config file is created `0600` by `open` rather than written and then
+  chmod'd. `fs::write` uses `0666 & !umask`, so under a typical `umask 022` the
+  file — which may still hold a legacy token — was world-readable for the window
+  between the write and the chmod, and stayed that way if the process died in
+  between. The permission error is no longer discarded either: swallowing it left
+  a readable token behind with nothing said. The write also goes through a temp
+  file, `sync_all`, and a rename, and the containing directory is tightened to
+  `0700`.
+
+### Fixed
+- `gitpic doctor` no longer reports `repo_writable: true` on repository push
+  permission alone. Repo-level `push` says nothing about whether the ref an upload
+  targets exists, so a push-capable token against a missing branch passed every
+  preflight check and then failed the Contents API with a bare 404. The target
+  branch is now probed too (concurrently, like the other two), and `repo_writable`
+  requires both. A missing branch reports `REMOTE_NOT_FOUND` with a message naming
+  the fix.
+- `gitpic init` no longer erases a configured repository when you press Enter. The
+  "Target repo" default was derived from `owner` alone, so with an empty owner —
+  which happens when `repo` was set by itself, or the owner comes from
+  `GITPIC_OWNER` — no default was offered, Enter returned `""`, and
+  `set_repo_spec("")` cleared it. An empty answer with nothing configured is now a
+  usage error rather than a "✓ saved config" that leaves the tool unusable.
+- Trimming the history can no longer empty it. When a single record exceeded the
+  trim budget, nothing fit, `trimmed` returned an empty string, and the caller
+  wrote that over the file — deleting every recorded link to enforce a size limit.
+  The newest record is now kept unconditionally. Reachable in 0.2.0–0.2.2 with a
+  pathological `--name`, whose control characters JSON-escape to six times their
+  length.
+
+### Added
+- `gitpic doctor` reports `branch_protected`. Protection does not mean this
+  account cannot write, so it does not make a report unhealthy, but it is the
+  usual explanation when an upload is refused after every preflight check passed.
+
 ## [0.2.2] - 2026-08-17
 
 ### Input that cannot take effect is now refused

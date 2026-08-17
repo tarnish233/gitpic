@@ -14,7 +14,9 @@ agents. Single static binary, no runtime required.
 $ gitpic init
 gitpic init — configure your GitHub image host
 
-GitHub token (leave blank to use `gh auth token`):
+Credentials come from `gh auth token`, or from GITPIC_TOKEN.
+Run `gh auth login` once if you have not already.
+
 Target repo (owner/name): your-name/img
 Branch [main]:
 Link kind (cdn|raw) [cdn]:
@@ -66,7 +68,7 @@ Credentials come from the [GitHub CLI](https://cli.github.com) by default, so
 
 ```bash
 gh auth login          # once; the token lives in your system keyring
-gitpic init            # leave the token prompt blank
+gitpic init            # asks for repo/branch/link kind only, never a token
 ```
 
 `gitpic` takes the first credential it can get, in this order:
