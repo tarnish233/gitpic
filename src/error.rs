@@ -24,6 +24,14 @@ pub enum ErrorCode {
     RemoteNotFound = 8,
     /// GitHub API rate limit reached
     RateLimited = 9,
+    /// the config file exists but cannot be used (bad syntax, unknown key)
+    ///
+    /// Distinct from `ConfigMissing`: that one means "nothing is configured yet"
+    /// and its remedy is `gitpic init` / `gh auth login`, which would be the
+    /// wrong advice — and for an agent, a loop — when the real problem is a typo
+    /// in a file that is already there. The remedy here is to edit that file, so
+    /// the message carries its path.
+    ConfigInvalid = 10,
 }
 
 impl ErrorCode {
@@ -44,6 +52,7 @@ impl ErrorCode {
             ErrorCode::PermissionDenied => "PERMISSION_DENIED",
             ErrorCode::RemoteNotFound => "REMOTE_NOT_FOUND",
             ErrorCode::RateLimited => "RATE_LIMITED",
+            ErrorCode::ConfigInvalid => "CONFIG_INVALID",
         }
     }
 }
@@ -88,6 +97,9 @@ impl AppError {
     pub fn rate_limited(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::RateLimited, msg)
     }
+    pub fn config_invalid(msg: impl Into<String>) -> Self {
+        Self::new(ErrorCode::ConfigInvalid, msg)
+    }
 }
 
 impl fmt::Display for AppError {
@@ -120,6 +132,7 @@ mod tests {
             (ErrorCode::PermissionDenied, 7, "PERMISSION_DENIED"),
             (ErrorCode::RemoteNotFound, 8, "REMOTE_NOT_FOUND"),
             (ErrorCode::RateLimited, 9, "RATE_LIMITED"),
+            (ErrorCode::ConfigInvalid, 10, "CONFIG_INVALID"),
         ] {
             assert_eq!(code.exit_code(), exit, "exit code for {s}");
             assert_eq!(code.as_str(), s, "wire string for {s}");

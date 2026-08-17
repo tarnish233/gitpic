@@ -3,16 +3,34 @@
 use crate::cli::{LinkKind, OutputFormat};
 use crate::naming::encode_path;
 
+/// Build the public URLs.
+///
+/// Every interpolated value is encoded, not just the path. A branch is the one
+/// that can realistically carry trouble — git allows `&`, `#`, `+`, `%` and even
+/// a space is only forbidden by convention in some tools — and an unencoded one
+/// produces a link that breaks the surrounding Markdown or resolves elsewhere.
+/// GitHub constrains owner and repo to `[A-Za-z0-9._-]`, so for those this is an
+/// identity, kept for uniformity.
+///
+/// `/` is preserved by `encode_path`, which is what `raw` needs: the branch there
+/// legitimately spans several path segments. For `cdn` that same `/` is what makes
+/// the ref ambiguous — see [`cdn_branch_is_ambiguous`], which warns about it.
 pub fn raw_url(owner: &str, repo: &str, branch: &str, path: &str) -> String {
     format!(
-        "https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{}",
+        "https://raw.githubusercontent.com/{}/{}/{}/{}",
+        encode_path(owner),
+        encode_path(repo),
+        encode_path(branch),
         encode_path(path)
     )
 }
 
 pub fn cdn_url(owner: &str, repo: &str, branch: &str, path: &str) -> String {
     format!(
-        "https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/{}",
+        "https://cdn.jsdelivr.net/gh/{}/{}@{}/{}",
+        encode_path(owner),
+        encode_path(repo),
+        encode_path(branch),
         encode_path(path)
     )
 }
@@ -199,5 +217,32 @@ mod tests {
         assert_eq!(parse_link_kind(" RAW "), LinkKind::Raw);
         assert_eq!(parse_link_kind("cdn"), LinkKind::Cdn);
         assert_eq!(parse_link_kind("nonsense"), LinkKind::Cdn);
+    }
+
+    #[test]
+    fn a_branch_name_cannot_break_out_of_the_url() {
+        // Regression: the branch was interpolated raw, so a space or `)` in it
+        // produced a link that terminated the Markdown label early.
+        assert_eq!(
+            raw_url("o", "r", "feat x", "a.png"),
+            "https://raw.githubusercontent.com/o/r/feat%20x/a.png"
+        );
+        assert_eq!(
+            cdn_url("o", "r", "a&b", "a.png"),
+            "https://cdn.jsdelivr.net/gh/o/r@a%26b/a.png"
+        );
+        // Markdown built from it therefore carries no unescaped paren.
+        let md = markdown("alt", &raw_url("o", "r", "we(ird", "a.png"));
+        assert!(!md.contains("we(ird"), "{md}");
+        assert!(md.ends_with(')') && md.matches(')').count() == 1, "{md}");
+    }
+
+    #[test]
+    fn a_branch_with_a_slash_keeps_its_segments() {
+        // `raw` needs the branch to span several path segments, so `/` survives.
+        assert_eq!(
+            raw_url("o", "r", "feat/x", "a.png"),
+            "https://raw.githubusercontent.com/o/r/feat/x/a.png"
+        );
     }
 }

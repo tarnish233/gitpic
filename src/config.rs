@@ -16,15 +16,21 @@ use std::path::PathBuf;
 /// missing key falls back to that type's `Default` impl — which is therefore the
 /// single source of truth for defaults. Declaring them per-field as well would
 /// let a generated config and a parsed one drift apart silently.
+///
+/// `deny_unknown_fields` is the other half of that: `config.toml` is meant to be
+/// hand-edited (`gitpic config edit` opens it in `$EDITOR`), and without this a
+/// misspelled key or section — `dedupe`, `[uplaod]` — parsed fine and did
+/// nothing, with `config get` then showing the default as if the file had never
+/// been touched. A typo is now a `CONFIG_INVALID` error naming the file.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub github: GithubConfig,
     pub upload: UploadConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct GithubConfig {
     /// Legacy inline token. Still honoured, and still takes priority over `gh`,
     /// but omitted when empty so a generated config carries no secret at all.
@@ -47,7 +53,7 @@ impl Default for GithubConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct UploadConfig {
     pub path_template: String,
     pub link_kind: String,
@@ -74,11 +80,10 @@ impl Default for UploadConfig {
 
 /// Read an env var, treating unset and blank alike.
 ///
-/// An exported-but-empty variable must fall through to the config file rather
-/// than override it with whitespace: `GITPIC_OWNER=" "` used to pass
-/// `require_target()` and then produce a request against `/repos/%20/repo` — a
-/// confusing 404 instead of an actionable "missing target repo". `crate::auth`
-/// already applies this rule to `GITPIC_TOKEN`.
+/// Used for directory paths, where the value is passed through verbatim: a
+/// leading or trailing space is legal in a filename, and silently reinterpreting
+/// a path would be worse than honouring an odd one. Values bound for a request
+/// URL go through `apply_env_with`, which additionally trims.
 fn env_var(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
@@ -118,14 +123,35 @@ impl Config {
     }
 
     /// Load config from disk, or return defaults if the file is missing.
+    ///
+    /// # Errors
+    /// Returns `CONFIG_INVALID` when the file exists but cannot be read or
+    /// parsed. A missing file is not an error — it means "nothing configured
+    /// yet", which `require_target` reports as `CONFIG_MISSING` instead.
     pub fn load() -> Result<Self> {
         let path = Self::path()?;
         if !path.exists() {
             return Ok(Config::default());
         }
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| AppError::general(format!("read config: {e}")))?;
-        toml::from_str(&text).map_err(|e| AppError::general(format!("parse config: {e}")))
+        let shown = path.display().to_string();
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            AppError::config_invalid(format!("cannot read config file {shown}: {e}"))
+        })?;
+        Self::parse(&text, &shown)
+    }
+
+    /// Parse config text, naming the offending file in any error.
+    ///
+    /// Split from the file read so the strictness rules are testable without
+    /// mutating `XDG_CONFIG_HOME` (unsound across the parallel test runner) —
+    /// the same seam as `history::parse_recent` and `auth::resolve_with`.
+    fn parse(text: &str, shown: &str) -> Result<Self> {
+        toml::from_str(text).map_err(|e| {
+            AppError::config_invalid(format!(
+                "cannot use config file {shown}: {}\nfix it with `gitpic config edit`",
+                e.to_string().trim_end()
+            ))
+        })
     }
 
     /// Persist config to disk (creating parent dirs).
@@ -154,16 +180,37 @@ impl Config {
     /// # Errors
     /// Returns a usage error if `GITPIC_REPO` is malformed.
     pub fn apply_env(&mut self) -> Result<()> {
-        if let Some(v) = env_var("GITPIC_OWNER") {
+        self.apply_env_with(|key| std::env::var(key).ok())
+    }
+
+    /// Apply overrides from an arbitrary variable lookup.
+    ///
+    /// Split from `std::env` so the normalization rules are testable without
+    /// mutating the environment (unsound across parallel test threads) — the same
+    /// seam as `auth::resolve_with`.
+    ///
+    /// Every variable here ends up inside a request URL, so each is trimmed and
+    /// then dropped if nothing is left. Both halves are load-bearing:
+    /// `GITPIC_OWNER=" "` used to pass `require_target()` and then request
+    /// `/repos/%20/repo`, and a padded `GITPIC_OWNER=" me "` requested
+    /// `/repos/%20me%20/repo` — each a confusing 404 rather than an actionable
+    /// error, and each falling through to the config file is what the user meant.
+    fn apply_env_with(&mut self, get: impl Fn(&str) -> Option<String>) -> Result<()> {
+        let value = |key: &str| {
+            get(key)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        if let Some(v) = value("GITPIC_OWNER") {
             self.github.owner = v;
         }
-        if let Some(v) = env_var("GITPIC_BRANCH") {
+        if let Some(v) = value("GITPIC_BRANCH") {
             self.github.branch = v;
         }
-        if let Some(v) = env_var("GITPIC_LINK") {
+        if let Some(v) = value("GITPIC_LINK") {
             self.upload.link_kind = v;
         }
-        if let Some(v) = env_var("GITPIC_REPO") {
+        if let Some(v) = value("GITPIC_REPO") {
             self.set_repo_spec(&v)?;
         }
         Ok(())
@@ -278,5 +325,103 @@ mod tests {
             toml::to_string_pretty(&parsed).unwrap(),
             toml::to_string_pretty(&Config::default()).unwrap()
         );
+    }
+
+    #[test]
+    fn a_misspelled_key_is_rejected_instead_of_ignored() {
+        // Regression: `dedupe = false` parsed fine and did nothing, and
+        // `config get` then printed `dedup = true` as if the file were untouched.
+        // config.toml is hand-edited (`config edit`), so a typo must be loud.
+        let err = Config::parse("[upload]\ndedupe = false\n", "/tmp/config.toml")
+            .expect_err("an unknown key must be rejected");
+        assert_eq!(err.code, ErrorCode::ConfigInvalid);
+        assert!(err.message.contains("dedupe"), "{}", err.message);
+        // Naming the file and the way out is the whole point of a distinct code:
+        // `gitpic config edit` still works when `load()` refuses the file.
+        assert!(err.message.contains("/tmp/config.toml"), "{}", err.message);
+        assert!(err.message.contains("config edit"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_misspelled_section_is_rejected_too() {
+        // `[uplaod]` used to be dropped whole, silently discarding every key in
+        // it — the same failure as a bad key, one level up.
+        let err = Config::parse("[uplaod]\nlink_kind = \"raw\"\n", "/tmp/config.toml")
+            .expect_err("an unknown section must be rejected");
+        assert_eq!(err.code, ErrorCode::ConfigInvalid);
+        assert!(err.message.contains("uplaod"), "{}", err.message);
+    }
+
+    #[test]
+    fn bad_toml_syntax_is_config_invalid_not_general() {
+        // Exit 1 / GENERAL is the catch-all that also covers clipboard and
+        // encoding failures, so an agent cannot act on it. A broken config file
+        // has one specific remedy and therefore its own code.
+        let err = Config::parse("[github", "/tmp/config.toml").expect_err("must be rejected");
+        assert_eq!(err.code, ErrorCode::ConfigInvalid);
+    }
+
+    #[test]
+    fn a_config_gitpic_itself_wrote_is_accepted_by_the_strict_parser() {
+        // deny_unknown_fields must not reject our own output — that would brick
+        // every existing install on upgrade.
+        let generated = toml::to_string_pretty(&Config::default()).unwrap();
+        Config::parse(&generated, "/tmp/config.toml").expect("round-trip must parse");
+
+        // And with the optional token key present, which Default omits.
+        let mut with_token = Config::default();
+        with_token.github.token = "t".to_string();
+        let rendered = toml::to_string_pretty(&with_token).unwrap();
+        Config::parse(&rendered, "/tmp/config.toml").expect("a token key must parse");
+    }
+
+    /// Build a lookup over a fixed table, standing in for the environment.
+    fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn env_overrides_are_trimmed_before_reaching_a_url() {
+        // Regression: the blank filter looked at the trimmed value but stored the
+        // untrimmed one, so `GITPIC_OWNER=" me "` became owner=" me " and
+        // requested `/repos/%20me%20/repo`.
+        let mut cfg = Config::default();
+        cfg.apply_env_with(env_of(&[
+            ("GITPIC_OWNER", "  me  "),
+            ("GITPIC_BRANCH", "\tdev\n"),
+            ("GITPIC_LINK", " raw "),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.github.owner, "me");
+        assert_eq!(cfg.github.branch, "dev");
+        assert_eq!(cfg.upload.link_kind, "raw");
+    }
+
+    #[test]
+    fn a_blank_env_override_falls_through_to_the_config() {
+        // An exported-but-empty variable must not wipe a configured value.
+        let mut cfg = Config::default();
+        cfg.github.owner = "from-config".to_string();
+        cfg.apply_env_with(env_of(&[("GITPIC_OWNER", "   ")]))
+            .unwrap();
+        assert_eq!(cfg.github.owner, "from-config");
+        assert_eq!(
+            cfg.github.branch, "main",
+            "an unset variable changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_malformed_env_repo_spec_is_still_rejected() {
+        let mut cfg = Config::default();
+        let err = cfg
+            .apply_env_with(env_of(&[("GITPIC_REPO", " a/b/c ")]))
+            .expect_err("must be rejected");
+        assert_eq!(err.code, ErrorCode::Usage);
     }
 }
