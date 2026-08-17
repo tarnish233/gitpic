@@ -23,10 +23,6 @@ $ gitpic list
   https://cdn.jsdelivr.net/gh/your-name/img@main/images/2026/07/a1b2c3d4-shot.png
 ```
 
-> Tip: record a cast with [asciinema](https://asciinema.org/): run
-> `asciinema rec demo.cast`, execute a few commands above, press `Ctrl-D`, then
-> upload it and drop the share link here.
-
 ## Install
 
 ```bash
@@ -37,27 +33,39 @@ cargo build --release && cp target/release/gitpic ~/.local/bin/
 
 ## Setup
 
-Interactive:
+Credentials come from the [GitHub CLI](https://cli.github.com) by default, so
+**no secret is stored in the config file**:
 
 ```bash
-gitpic init
+gh auth login          # once; the token lives in your system keyring
+gitpic init            # leave the token prompt blank
 ```
 
-Or via environment variables (nothing written to disk):
+`gitpic` takes the first credential it can get, in this order:
 
-```bash
-export GITPIC_TOKEN="github_pat_xxx"   # fine-grained token, Contents: Read/Write
-export GITPIC_REPO="your-name/img"     # owner/name
-export GITPIC_BRANCH="main"            # optional (default: main)
-export GITPIC_LINK="cdn"               # optional: cdn (jsDelivr) | raw
-```
+| Order | Source | For |
+|---|---|---|
+| 1 | `GITPIC_TOKEN` env var | CI, containers, machines without `gh` |
+| 2 | `github.token` in the config file | Legacy; still supported |
+| 3 | `gh auth token` | Default; keeps the config file secret-free |
+
+A `token` in the config wins over `gh`: explicit configuration beats
+auto-detection, so upgrading gitpic never silently changes which account
+uploads. To switch to `gh`, delete that line — `gitpic doctor` reports which
+source is actually in use.
+
+> **Scope caveat**: `gh`'s OAuth token typically carries
+> `gist, read:org, repo, workflow` — *broader* than what writing to one image
+> repo needs. This keeps the secret out of a syncable file; it does not narrow
+> the token's scope. For least privilege, use a fine-grained token limited to the
+> one repo with `Contents: Read/Write` and pass it via `GITPIC_TOKEN`.
 
 Config lives at `~/.config/gitpic/config.toml` (honors `$XDG_CONFIG_HOME`).
-You can hand-write it or generate it with `gitpic init`. Example:
+You can hand-write it or generate it with `gitpic init`. Note there is no `token`
+key, so this file is safe to keep in a synced dotfiles repo:
 
 ```toml
 [github]
-token  = "github_pat_xxx"
 owner  = "your-name"
 repo   = "img"
 branch = "main"
@@ -70,6 +78,15 @@ auto_copy     = true
 compress      = false
 max_width     = 0        # 0 = keep original
 quality       = 82       # JPEG quality when compressing (1-100)
+```
+
+Or via environment variables (nothing written to disk, highest priority):
+
+```bash
+export GITPIC_TOKEN="github_pat_xxx"   # fine-grained token, Contents: Read/Write
+export GITPIC_REPO="your-name/img"     # owner/name
+export GITPIC_BRANCH="main"            # optional (default: main)
+export GITPIC_LINK="cdn"               # optional: cdn (jsDelivr) | raw
 ```
 
 Upload history is stored at `~/.local/share/gitpic/history.jsonl`

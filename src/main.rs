@@ -1,5 +1,6 @@
 //! gitpic — upload images to a GitHub repo (image host) and get a Markdown link.
 
+mod auth;
 mod cli;
 mod commands;
 mod config;

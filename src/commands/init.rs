@@ -10,7 +10,7 @@ pub fn run() -> Result<()> {
     println!("gitpic init — configure your GitHub image host\n");
 
     let token_label = if cfg.github.token.is_empty() {
-        "GitHub token (fine-grained, Contents R/W)"
+        "GitHub token (leave blank to use `gh auth token`)"
     } else {
         "GitHub token (leave blank to keep the configured token)"
     };

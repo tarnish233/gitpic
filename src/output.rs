@@ -68,13 +68,19 @@ pub struct PartialEnvelope<'a> {
     pub error: ErrorBody,
 }
 
+/// Print a value as pretty JSON on stdout. Every `--json` envelope in the crate
+/// goes through here, so the shape and the formatting stay in one place.
+pub fn print_json<T: Serialize>(value: &T) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).unwrap_or_default()
+    );
+}
+
 /// Print successful upload results according to the mode.
 pub fn print_results(mode: Mode, results: &[ItemResult]) {
     match mode {
-        Mode::Json => {
-            let env = SuccessEnvelope { ok: true, results };
-            println!("{}", serde_json::to_string_pretty(&env).unwrap_or_default());
-        }
+        Mode::Json => print_json(&SuccessEnvelope { ok: true, results }),
         Mode::Quiet => {
             for r in results {
                 println!("{}", r.output);

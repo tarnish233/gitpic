@@ -13,6 +13,10 @@ struct DoctorReport {
     config_ok: bool,
     token_valid: bool,
     repo_writable: bool,
+    /// Where the credential came from: `env`, `config`, or `gh`; `null` when none
+    /// could be obtained. Lets a migration away from a plaintext token be
+    /// verified. Always present, so an agent can read it on a failing report too.
+    token_source: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     login: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -20,7 +24,7 @@ struct DoctorReport {
 }
 
 pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
-    let config_ok = cfg.require_ready().is_ok();
+    let config_ok = cfg.require_target().is_ok();
 
     let mut token_valid = false;
     let mut repo_writable = false;
@@ -28,9 +32,23 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
     let mut detail = None;
     let mut failure_code = None;
 
-    if config_ok {
+    // Resolved before the target check so the source is reported even when the
+    // repo is unconfigured — that is what tells you whether `gh` is being used.
+    let cred = match crate::auth::resolve(cfg) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            failure_code = Some(e.code);
+            detail = Some(e.message);
+            None
+        }
+    };
+
+    if !config_ok {
+        failure_code = Some(ErrorCode::ConfigMissing);
+        detail = Some("run `gitpic init` or set GITPIC_REPO=owner/name".into());
+    } else if let Some(cred) = &cred {
         match GitHub::new(
-            &cfg.github.token,
+            &cred.token,
             &cfg.github.owner,
             &cfg.github.repo,
             &cfg.github.branch,
@@ -64,9 +82,6 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
                 detail = Some(e.message);
             }
         }
-    } else {
-        failure_code = Some(ErrorCode::ConfigMissing);
-        detail = Some("run `gitpic init` or set GITPIC_TOKEN and GITPIC_REPO".into());
     }
 
     let ok = config_ok && token_valid && repo_writable;
@@ -75,15 +90,13 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
         config_ok,
         token_valid,
         repo_writable,
+        token_source: cred.as_ref().map(|c| c.source.as_str()),
         login,
         detail,
     };
 
     if mode.is_json() {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&report).unwrap_or_default()
-        );
+        crate::output::print_json(&report);
     } else {
         let mark = |b: bool| {
             if b {
@@ -98,12 +111,16 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
         };
         println!("{} config present", mark(report.config_ok));
         println!(
-            "{} token valid{}",
+            "{} token valid{}{}",
             mark(report.token_valid),
             report
                 .login
                 .as_ref()
                 .map(|l| format!(" ({l})"))
+                .unwrap_or_default(),
+            report
+                .token_source
+                .map(|s| format!(" via {s}"))
                 .unwrap_or_default()
         );
         println!("{} repo writable", mark(report.repo_writable));

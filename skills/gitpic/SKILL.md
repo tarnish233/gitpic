@@ -44,11 +44,16 @@ gitpic doctor --json
 
 Parse stdout JSON. Require `config_ok`, `token_valid`, and `repo_writable` to be
 `true`; an unhealthy report also has a non-zero exit status. If `config_ok` is
-false, tell the user to either run `gitpic init` or
-set env vars `GITPIC_TOKEN` and `GITPIC_REPO=owner/name` (and optionally
-`GITPIC_BRANCH`, `GITPIC_LINK=cdn|raw`), then stop. If `token_valid` is false,
-ask the user to update the token. If `repo_writable` is false, ask them to check
+false, tell the user to either run `gitpic init` or set
+`GITPIC_REPO=owner/name` (and optionally `GITPIC_BRANCH`,
+`GITPIC_LINK=cdn|raw`), then stop. If `token_valid` is false, tell the user to
+run `gh auth login` — gitpic takes its credential from `gh auth token` — or to
+set `GITPIC_TOKEN`; then stop. If `repo_writable` is false, ask them to check
 the target repository and grant Contents read/write permission, then stop.
+
+The report's `token_source` field (`env` / `config` / `gh`) says where the
+credential came from. Never ask the user to paste a token into the conversation;
+prefer `gh auth login`, which keeps it in the OS keyring.
 
 ## 1. Upload a local image
 
@@ -110,8 +115,8 @@ gitpic list --json                                            # recent uploads (
 | exit | error.code          | agent action                                      |
 |------|---------------------|---------------------------------------------------|
 | 2    | USAGE               | fix the invocation                                |
-| 3    | CONFIG_MISSING      | ask user to configure token/repo                  |
-| 4    | AUTH_FAILED         | token invalid/expired — ask to update             |
+| 3    | CONFIG_MISSING      | no credential or repo — `gh auth login` / configure |
+| 4    | AUTH_FAILED         | credential invalid/expired — `gh auth login`      |
 | 5    | NETWORK             | retry once, then report                           |
 | 6    | NOT_FOUND           | check the local input file path                   |
 | 7    | PERMISSION_DENIED   | check token Contents permission/repo access       |
