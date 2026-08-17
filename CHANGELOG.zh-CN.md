@@ -4,12 +4,21 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.2.0] - 2026-08-17
 
 ### 凭据不再需要存在配置文件里
 
 `config.toml` 里存着明文 GitHub token，这让它无法安全地纳入 dotfiles 同步 ——
 而 scope 为 `repo` 的 classic PAT 对账号可访问的**每一个仓库**都有读写权限，且默认永不过期。
+
+### 破坏性变更
+- 配置文件的键名现在严格校验。此前写错的键或段（比如 `dedupe`、`[uplaod]`）能正常
+  加载并静默忽略；现在它会让每个读取配置的命令以 `CONFIG_INVALID`（exit `10`）失败，
+  直到文件被改对。**升级后突然看到这个错，说明你的配置里一直有一个从未生效的拼写
+  错误** —— 报错会指出文件和出错的行，`gitpic config path` 与 `gitpic config edit`
+  在这种状态下仍然可用，用来修它。
+- 新增退出码 `10`，公开的退出码契约从 `1-9` 变为 `1-10`。这是纯增量，原有的码含义
+  不变，但按"只有 1-9"来穷举的脚本需要补一个分支。
 
 ### 变更
 - 凭据按以下顺序解析：`GITPIC_TOKEN` 环境变量 → 配置文件里的 `github.token` →

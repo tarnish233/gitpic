@@ -4,13 +4,25 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-08-17
 
 ### Credentials no longer need to live in the config file
 
 `config.toml` stored the GitHub token in plaintext, which made the file unsafe to
 keep in a synced dotfiles repo — and a classic PAT with `repo` scope grants
 read/write on every repository the account can reach, with no expiry.
+
+### Breaking
+- Config file keys are now validated strictly. A misspelled key or section
+  (`dedupe`, `[uplaod]`) previously loaded fine and was silently ignored; it now
+  makes every command that reads the config fail with `CONFIG_INVALID` (exit `10`)
+  until the file is corrected. **If this error appears right after upgrading, the
+  config has been carrying a typo that never took effect** — the message names the
+  file and the offending line, and `gitpic config path` / `gitpic config edit`
+  keep working so it can be repaired.
+- Exit code `10` is new, so the published exit-code contract widens from `1-9` to
+  `1-10`. It is purely additive and no existing code changed meaning, but a script
+  that exhaustively matches `1-9` needs one more arm.
 
 ### Changed
 - The credential is resolved from, in order: `GITPIC_TOKEN`, `github.token` in
