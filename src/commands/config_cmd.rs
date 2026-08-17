@@ -2,7 +2,7 @@
 
 use crate::cli::ConfigAction;
 use crate::config::Config;
-use crate::error::{AppError, ErrorCode, Result};
+use crate::error::{AppError, Result};
 
 pub fn run(action: &ConfigAction) -> Result<()> {
     match action {
@@ -34,12 +34,9 @@ pub fn run(action: &ConfigAction) -> Result<()> {
             let status = std::process::Command::new(editor)
                 .arg(&path)
                 .status()
-                .map_err(|e| AppError::new(ErrorCode::General, format!("launch editor: {e}")))?;
+                .map_err(|e| AppError::general(format!("launch editor: {e}")))?;
             if !status.success() {
-                return Err(AppError::new(
-                    ErrorCode::General,
-                    "editor exited with error",
-                ));
+                return Err(AppError::general("editor exited with error"));
             }
         }
     }
@@ -141,5 +138,37 @@ mod tests {
     #[test]
     fn empty_token_stays_empty_when_redacted() {
         assert_eq!(redact_token(""), "");
+    }
+
+    #[test]
+    fn every_config_field_is_reachable_by_get_and_set() {
+        // One drift direction is already compile-checked: every match arm
+        // dereferences a real field. The open hole is adding a `Config` field and
+        // forgetting the arms, which silently 404s for the user. Deriving the key
+        // list from `Config` itself turns that into a test failure instead.
+        let mut cfg = Config::default();
+        // Needs a non-empty token, or `skip_serializing_if` hides the key.
+        cfg.github.token = "t".to_string();
+        let value = toml::Value::try_from(&cfg).expect("Config serializes");
+        for (section, body) in value.as_table().expect("Config is a table") {
+            for field in body.as_table().expect("each section is a table").keys() {
+                let key = format!("{section}.{field}");
+                assert!(
+                    get_key(&cfg, &key).is_ok(),
+                    "`config get {key}` is unreachable"
+                );
+                // link_kind is validated, so it needs a real value; "1" parses
+                // for every other key (u32, u8 in 1..=100, bools, strings, repo).
+                let v = if key == "upload.link_kind" {
+                    "raw"
+                } else {
+                    "1"
+                };
+                assert!(
+                    set_key(&mut cfg.clone(), &key, v).is_ok(),
+                    "`config set {key} {v}` is unreachable"
+                );
+            }
+        }
     }
 }

@@ -19,7 +19,7 @@ pub fn run(limit: usize, mode: Mode) -> Result<()> {
             ok: true,
             results: &recs,
         };
-        println!("{}", serde_json::to_string_pretty(&env).unwrap_or_default());
+        crate::output::print_json(&env);
         return Ok(());
     }
     if recs.is_empty() {
@@ -32,12 +32,16 @@ pub fn run(limit: usize, mode: Mode) -> Result<()> {
         let name = r
             .name
             .if_supports_color(Stream::Stdout, |t| t.bold().to_string());
-        if r.deduped {
-            let tag = " (dedup)".if_supports_color(Stream::Stdout, |t| t.yellow().to_string());
-            println!("{date}  {name}{tag}");
+        // Build the tag as a (possibly empty) suffix so there is one layout
+        // string to keep correct instead of two.
+        let tag = if r.deduped {
+            " (deduped)"
+                .if_supports_color(Stream::Stdout, |t| t.yellow().to_string())
+                .to_string()
         } else {
-            println!("{date}  {name}");
-        }
+            String::new()
+        };
+        println!("{date}  {name}{tag}");
         println!("  {}", r.url);
     }
     Ok(())

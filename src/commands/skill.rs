@@ -3,7 +3,7 @@
 use super::prompt_opt;
 use crate::cli::{AgentKind, SkillAction};
 use crate::config;
-use crate::error::{AppError, ErrorCode, Result};
+use crate::error::{AppError, Result};
 use crate::output::Mode;
 use serde::Serialize;
 use std::io::IsTerminal;
@@ -76,9 +76,19 @@ fn resolve(skills_dir: &Path) -> PathBuf {
     skill_dir.join("SKILL.md")
 }
 
-/// The skills directory for one agent, whether or not it exists.
-fn skills_dir(env_var: &str, fallback: &str) -> Result<PathBuf> {
-    Ok(config::base_dir(env_var, fallback)?.join("skills"))
+/// The `AGENTS` entry for one named agent.
+///
+/// `None` for `--agent all`, which means "every detected target" rather than one
+/// named directory. Returning `Option` instead of panicking discharges the
+/// hand-sync between `AgentKind` and `AGENTS` — and this binary is built with
+/// `panic = "abort"`, where a panic exits 134, outside the documented 1-9 codes.
+fn agent_entry(kind: AgentKind) -> Option<(&'static str, &'static str, &'static str)> {
+    let want = match kind {
+        AgentKind::Claude => "claude",
+        AgentKind::Codex => "codex",
+        AgentKind::All => return None,
+    };
+    AGENTS.iter().copied().find(|(name, _, _)| *name == want)
 }
 
 /// Installed agents, merged by real path.
@@ -117,11 +127,9 @@ fn classify(path: &Path) -> Action {
 
 fn write_skill(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| AppError::new(ErrorCode::General, format!("mkdir: {e}")))?;
+        std::fs::create_dir_all(parent).map_err(|e| AppError::general(format!("mkdir: {e}")))?;
     }
-    std::fs::write(path, SKILL_MD)
-        .map_err(|e| AppError::new(ErrorCode::General, format!("write skill: {e}")))
+    std::fs::write(path, SKILL_MD).map_err(|e| AppError::general(format!("write skill: {e}")))
 }
 
 pub fn run(action: &SkillAction, mode: Mode) -> Result<()> {
@@ -164,7 +172,7 @@ fn run_path(mode: Mode) -> Result<()> {
                 })
                 .collect(),
         };
-        println!("{}", serde_json::to_string_pretty(&env).unwrap_or_default());
+        crate::output::print_json(&env);
         return Ok(());
     }
     if targets.is_empty() {
@@ -219,15 +227,17 @@ fn run_install(agent: Option<AgentKind>, dir: Option<&Path>, yes: bool, mode: Mo
             version: env!("CARGO_PKG_VERSION"),
             installed,
         };
-        println!("{}", serde_json::to_string_pretty(&env).unwrap_or_default());
+        crate::output::print_json(&env);
         return Ok(());
     }
 
-    for (item, t) in installed.iter().zip(&targets) {
-        let suffix = if t.agents.is_empty() {
+    for item in &installed {
+        // `item` already carries its own agents, so there is no index
+        // correspondence with `targets` to keep in step.
+        let suffix = if item.agents.is_empty() {
             String::new()
         } else {
-            format!("  ({})", t.agent_list())
+            format!("  ({})", item.agents.join(", "))
         };
         println!(
             "\u{2713} {} {SKILL_NAME} skill v{} \u{2192} {}{suffix}",
@@ -258,23 +268,11 @@ fn choose_targets(
 
     // A named agent is explicit too, so honour it even if the directory does
     // not exist yet (it gets created on write).
-    if let Some(kind) = agent {
-        if kind != AgentKind::All {
-            let want = match kind {
-                AgentKind::Claude => "claude",
-                AgentKind::Codex => "codex",
-                AgentKind::All => unreachable!(),
-            };
-            let (name, env_var, fallback) = AGENTS
-                .iter()
-                .find(|(n, _, _)| *n == want)
-                .copied()
-                .expect("every AgentKind has an AGENTS entry");
-            return Ok(vec![Target {
-                agents: vec![name],
-                path: resolve(&skills_dir(env_var, fallback)?),
-            }]);
-        }
+    if let Some((name, env_var, fallback)) = agent.and_then(agent_entry) {
+        return Ok(vec![Target {
+            agents: vec![name],
+            path: resolve(&config::base_dir(env_var, fallback)?.join("skills")),
+        }]);
     }
 
     let detected = detect()?;
@@ -387,6 +385,16 @@ fn parse_selection(reply: &str, n: usize) -> Result<Selection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_named_agent_resolves_to_an_agents_entry() {
+        // Discharges the hand-sync between AgentKind and AGENTS that the old
+        // `expect("every AgentKind has an AGENTS entry")` merely asserted.
+        assert!(agent_entry(AgentKind::Claude).is_some());
+        assert!(agent_entry(AgentKind::Codex).is_some());
+        assert!(agent_entry(AgentKind::All).is_none());
+    }
+    use crate::error::ErrorCode;
 
     /// Guards the contract between the embedded document and the directory
     /// agents discover it under: if SKILL.md moves, is renamed, or its
