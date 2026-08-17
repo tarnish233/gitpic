@@ -4,6 +4,39 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 安全
+- `gitpic init` 不再询问 token。`prompt` 走的是裸 `stdin.read_line()`，输入的 token
+  会明文回显到终端，并留在 scrollback、`script`/asciinema 录像以及任何终端日志里 ——
+  而回答它又会把这枚 token 明文写进磁盘，恰恰是凭据链改造要消除的那件事。现在 `init`
+  改为引导 `gh auth login` 与 `GITPIC_TOKEN`。配置里已有的 `github.token` 继续可用、
+  且仍优先于 `gh`，没有人被断掉。
+- 配置文件改为由 `open` 直接以 `0600` 创建，而不是先写再 chmod。`fs::write` 用的是
+  `0666 & !umask`，所以在常见的 `umask 022` 下，这个**可能存着遗留 token** 的文件在
+  写入与 chmod 之间是世界可读的；若进程恰好在此期间死掉，它就一直是。权限错误也不再
+  被丢弃 —— 此前 `let _ =` 会让 chmod 失败时留下一个可读的 token 而一声不响。写入还
+  改为经临时文件 + `sync_all` + rename，所在目录收紧为 `0700`。
+
+### 修复
+- `gitpic doctor` 不再仅凭仓库级 push 权限就报 `repo_writable: true`。仓库级 `push`
+  完全没有回答"上传要写的那个 ref 是否存在"，于是一个有 push 权限、但分支不存在的组合
+  能通过所有预检，然后在 Contents API 上收到一个光秃秃的 404。现在会并发探测目标分支，
+  `repo_writable` 要求两者同时成立。分支缺失会报 `REMOTE_NOT_FOUND`，并在消息里写明
+  该怎么修。
+- `gitpic init` 按回车不再抹掉已配置的仓库。"Target repo" 的默认值原来只从 `owner`
+  推导，所以当 owner 为空 —— 单独设过 `repo`、或 owner 来自 `GITPIC_OWNER` 时都会
+  发生 —— 就不给默认值，回车返回 `""`，`set_repo_spec("")` 把它清掉。现在什么都没配
+  时的空回答直接报 USAGE，而不是打个"✓ saved config"却留下一个不可用的配置。
+- 裁剪历史不会再把历史清空。此前单条记录超过裁剪预算时一行都放不进，`trimmed` 返回
+  空字符串，调用方把它写盘 —— 为了执行一个体积上限而删掉全部已记录的链接。现在无条件
+  保留最新一条。在 0.2.0–0.2.2 中可通过一个病态的 `--name` 触发（其控制字符经 JSON
+  转义后膨胀六倍）。
+
+### 新增
+- `gitpic doctor` 报告 `branch_protected`。分支受保护并不意味着当前账号不能写，所以
+  它不会让报告变成不健康；但当所有预检都通过、上传却仍被拒绝时，它通常就是原因。
+
 ## [0.2.2] - 2026-08-17
 
 ### 拒绝那些原本会被静默忽略的输入

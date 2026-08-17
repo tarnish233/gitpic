@@ -48,19 +48,31 @@ false, tell the user to either run `gitpic init` or set
 `GITPIC_REPO=owner/name` (and optionally `GITPIC_BRANCH`,
 `GITPIC_LINK=cdn|raw`), then stop. If `token_valid` is false, tell the user to
 run `gh auth login` — gitpic takes its credential from `gh auth token` — or to
-set `GITPIC_TOKEN`; then stop. If `repo_writable` is false, ask them to check
-the target repository and grant Contents read/write permission, then stop.
+set `GITPIC_TOKEN`; then stop.
 
-The two checks are probed independently, so read them together before acting. If
+`repo_writable` means **both** that the token may push to the repository **and**
+that the target branch exists. When it is false, read `error.code` to tell the two
+apart: `REMOTE_NOT_FOUND` (8) means the branch is missing — the user should create
+it or change `github.branch` — while `PERMISSION_DENIED` (7) means the token lacks
+Contents read/write on the repository. `detail` says which.
+
+The three checks are probed independently, so read them together before acting. If
 `token_valid` is false **but `repo_writable` is true** and `error.code` is
 `NETWORK`, the credential is fine and GitHub's `/user` endpoint — which uploads
 never call — is simply unreachable. Retry; do not send the user to
 `gh auth login`, which cannot fix it. Treat `token_valid: false` as a credential
 problem only when `repo_writable` is also false.
 
+`branch_protected: true` is a caveat, not a failure: the branch has protection
+rules, which may still permit this account, so a report can be `ok: true` with it
+set. It is the usual explanation when an upload is nevertheless refused with
+`PERMISSION_DENIED` or a 409/422 after every preflight check passed — if that
+happens, say so rather than retrying.
+
 The report's `token_source` field (`env` / `config` / `gh`) says where the
 credential came from. Never ask the user to paste a token into the conversation;
-prefer `gh auth login`, which keeps it in the OS keyring.
+prefer `gh auth login`, which keeps it in the OS keyring. `gitpic init` no longer
+accepts a token interactively, precisely so one is never typed into a terminal.
 
 ## 1. Upload a local image
 

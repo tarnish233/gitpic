@@ -12,7 +12,13 @@ struct DoctorReport {
     ok: bool,
     config_ok: bool,
     token_valid: bool,
+    /// Repo push permission **and** the target branch existing. Both are needed:
+    /// a push-capable token still cannot write to a ref that is not there.
     repo_writable: bool,
+    /// Whether GitHub reports the target branch protected. `true` does not mean an
+    /// upload will fail — the rules may permit this account — but it is the usual
+    /// explanation when one does after every other check passed.
+    branch_protected: bool,
     /// Where the credential came from: `env`, `config`, or `gh`; `null` when none
     /// could be obtained. Lets a migration away from a plaintext token be
     /// verified. Always present, so an agent can read it on a failing report too.
@@ -43,6 +49,16 @@ fn more_actionable<'a>(
     }
 }
 
+/// What the branch probe found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Branch {
+    /// GitHub answered 404 for the target ref.
+    Missing,
+    Present {
+        protected: bool,
+    },
+}
+
 /// The facts a run gathered, independent of how they were obtained.
 ///
 /// This is the seam that makes `doctor`'s reporting testable. The alternative was
@@ -56,8 +72,10 @@ struct Probed {
     /// `/user`: `Ok(login)` when the credential is accepted. `None` when the probe
     /// never ran — no credential, or nothing configured to probe against.
     user: Option<Result<String>>,
-    /// `/repos/{owner}/{repo}`: `Ok(writable)`. `None` as above.
+    /// `/repos/{owner}/{repo}`: `Ok(push_or_admin)`. `None` as above.
     repo: Option<Result<bool>>,
+    /// `/repos/{owner}/{repo}/branches/{branch}`. `None` as above.
+    branch: Option<Result<Branch>>,
     /// A failure that prevented probing at all: no credential, or no client.
     setup_err: Option<AppError>,
 }
@@ -65,7 +83,7 @@ struct Probed {
 /// Reduce gathered facts to the report body and the process exit code.
 fn summarize(p: Probed) -> (DoctorReport, u8) {
     let mut token_valid = false;
-    let mut repo_writable = false;
+    let mut push_ok = false;
     let mut login = None;
     let mut detail = None;
     let mut failure_code = None;
@@ -74,6 +92,16 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
         failure_code = Some(e.code);
         detail = Some(e.message.clone());
     }
+
+    // Synthesised up front so a missing branch can compete with the probe errors
+    // on equal footing: it is a definite, actionable answer, not a "could not
+    // tell". Building it unconditionally costs one small String and keeps the
+    // borrow simple.
+    let branch_missing = AppError::remote_not_found(
+        "target branch does not exist on the remote; create it or set github.branch",
+    );
+    let mut protected = false;
+    let mut branch_present = false;
 
     if !p.config_ok {
         // An unconfigured target outranks everything else: it is the first thing
@@ -91,18 +119,41 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
             None => None,
         };
         let repo_err = match &p.repo {
-            Some(Ok(writable)) => {
-                repo_writable = *writable;
+            Some(Ok(allowed)) => {
+                push_ok = *allowed;
                 None
             }
             Some(Err(e)) => Some(e),
             None => None,
         };
-        if let Some(e) = more_actionable(user_err, repo_err) {
+        let branch_err = match &p.branch {
+            Some(Ok(Branch::Present { protected: prot })) => {
+                branch_present = true;
+                protected = *prot;
+                None
+            }
+            Some(Ok(Branch::Missing)) => Some(&branch_missing),
+            Some(Err(e)) => Some(e),
+            None => None,
+        };
+        let worst = more_actionable(more_actionable(user_err, repo_err), branch_err);
+        if let Some(e) = worst {
             failure_code = Some(e.code);
             detail = Some(e.message.clone());
+        } else if protected {
+            // Not a failure: the rules may well permit this account. Worth saying,
+            // because it is the usual reason an upload 409/422s after every check
+            // above came back clean.
+            detail = Some(
+                "target branch is protected; an upload may still be refused by its rules".into(),
+            );
         }
     }
+
+    // Repo-level push permission is not the same claim as "the ref an upload
+    // targets can be written". A push-capable token against a branch that does not
+    // exist still fails the Contents API, so both have to hold.
+    let repo_writable = push_ok && branch_present;
 
     let ok = p.config_ok && token_valid && repo_writable;
     let exit = if ok {
@@ -119,6 +170,7 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
             config_ok: p.config_ok,
             token_valid,
             repo_writable,
+            branch_protected: protected,
             token_source: p.source,
             login,
             detail,
@@ -140,6 +192,7 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
 
     let mut user = None;
     let mut repo = None;
+    let mut branch = None;
     if config_ok {
         if let Some(cred) = &cred {
             match GitHub::new(
@@ -149,18 +202,26 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
                 &cfg.github.branch,
             ) {
                 Ok(gh) => {
-                    // Both probes always run, and neither gates the other. `/user`
+                    // All three probes always run, and none gates another. `/user`
                     // answers "is this credential accepted", the repo endpoint
-                    // answers "can it write here" — and an upload only ever calls
-                    // the second kind. Gating them meant a 503 on `/user`, an
-                    // endpoint uploads never touch, reported `repo_writable:
+                    // answers "may it push here", the branch endpoint answers "does
+                    // the ref an upload targets exist" — and an upload only ever
+                    // calls the last two kinds. Gating them meant a 503 on `/user`,
+                    // an endpoint uploads never touch, reported `repo_writable:
                     // false`, indistinguishable from a bad credential. Concurrent
                     // because they are independent.
-                    let (who, info) = tokio::join!(gh.whoami(), gh.repo_info());
+                    let (who, info, br) =
+                        tokio::join!(gh.whoami(), gh.repo_info(), gh.branch_info());
                     user = Some(who);
                     repo = Some(
                         info.map(|i| i.permissions.map(|p| p.push || p.admin).unwrap_or(false)),
                     );
+                    branch = Some(br.map(|b| match b {
+                        Some(b) => Branch::Present {
+                            protected: b.protected,
+                        },
+                        None => Branch::Missing,
+                    }));
                 }
                 Err(e) => setup_err = Some(e),
             }
@@ -172,6 +233,7 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
         source,
         user,
         repo,
+        branch,
         setup_err,
     });
 
@@ -203,7 +265,15 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
                 .map(|s| format!(" via {s}"))
                 .unwrap_or_default()
         );
-        println!("{} repo writable", mark(report.repo_writable));
+        println!(
+            "{} repo writable{}",
+            mark(report.repo_writable),
+            if report.branch_protected {
+                " (branch protected)"
+            } else {
+                ""
+            }
+        );
         if let Some(d) = &report.detail {
             let note = "note:".if_supports_color(Stream::Stdout, |t| t.yellow().to_string());
             println!("  {note} {d}");
@@ -277,13 +347,14 @@ mod tests {
         assert!(more_actionable(None, None).is_none());
     }
 
-    /// A run where both probes were attempted.
+    /// A run where all three probes were attempted and the branch exists.
     fn probed(user: Result<String>, repo: Result<bool>) -> Probed {
         Probed {
             config_ok: true,
             source: Some("gh"),
             user: Some(user),
             repo: Some(repo),
+            branch: Some(Ok(Branch::Present { protected: false })),
             setup_err: None,
         }
     }
@@ -345,6 +416,7 @@ mod tests {
             source: None,
             user: None,
             repo: None,
+            branch: None,
             setup_err: Some(AppError::config_missing("no GitHub credential")),
         });
         assert!(!r.config_ok && !r.token_valid && !r.repo_writable && !r.ok);
@@ -369,10 +441,84 @@ mod tests {
             source: None,
             user: None,
             repo: None,
+            branch: None,
             setup_err: Some(AppError::config_missing("run `gh auth login`")),
         });
         assert!(r.config_ok && !r.token_valid);
         assert_eq!(exit, ErrorCode::ConfigMissing.exit_code());
         assert_eq!(r.detail.as_deref(), Some("run `gh auth login`"));
+    }
+
+    #[test]
+    fn push_permission_alone_is_not_reported_as_writable() {
+        // The semantic fix: repo-level `push` says nothing about whether the ref an
+        // upload targets exists. A push-capable token against a branch that is not
+        // there still fails the Contents API, so claiming `repo_writable: true`
+        // sent the user looking in the wrong place.
+        let (r, exit) = summarize(Probed {
+            config_ok: true,
+            source: Some("gh"),
+            user: Some(Ok("me".into())),
+            repo: Some(Ok(true)),
+            branch: Some(Ok(Branch::Missing)),
+            setup_err: None,
+        });
+        assert!(!r.repo_writable, "a missing branch is not writable");
+        assert!(r.token_valid, "the credential itself is fine");
+        assert!(!r.ok);
+        assert_eq!(exit, ErrorCode::RemoteNotFound.exit_code());
+        assert!(
+            r.detail.as_deref().unwrap_or_default().contains("branch"),
+            "{:?}",
+            r.detail
+        );
+    }
+
+    #[test]
+    fn a_missing_branch_outranks_a_transient_user_fault() {
+        // Definite answers beat "could not tell", and that has to keep holding now
+        // that a third probe can produce one.
+        let (_, exit) = summarize(Probed {
+            config_ok: true,
+            source: Some("gh"),
+            user: Some(Err(AppError::network("503"))),
+            repo: Some(Ok(true)),
+            branch: Some(Ok(Branch::Missing)),
+            setup_err: None,
+        });
+        assert_eq!(exit, ErrorCode::RemoteNotFound.exit_code());
+    }
+
+    #[test]
+    fn a_protected_branch_is_a_caveat_not_a_failure() {
+        // Protection does not mean this account cannot write — the rules may permit
+        // it — so the run stays ok. It is reported because it is the usual reason an
+        // upload 409/422s after every check above came back clean.
+        let (r, exit) = summarize(Probed {
+            config_ok: true,
+            source: Some("gh"),
+            user: Some(Ok("me".into())),
+            repo: Some(Ok(true)),
+            branch: Some(Ok(Branch::Present { protected: true })),
+            setup_err: None,
+        });
+        assert!(r.ok && r.repo_writable, "still a healthy run");
+        assert_eq!(exit, 0);
+        assert!(r.branch_protected);
+        assert!(
+            r.detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("protected"),
+            "{:?}",
+            r.detail
+        );
+    }
+
+    #[test]
+    fn an_unprotected_healthy_run_says_nothing_extra() {
+        let (r, _) = summarize(probed(Ok("me".into()), Ok(true)));
+        assert!(!r.branch_protected);
+        assert!(r.detail.is_none());
     }
 }

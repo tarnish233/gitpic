@@ -105,6 +105,28 @@ pub(crate) fn base_dir(key: &str, fallback: &str) -> Result<PathBuf> {
     Ok(p)
 }
 
+/// Create (or truncate) `path` with owner-only permissions and write `data`.
+///
+/// The mode is applied by `open`, not afterwards, so the file is never readable
+/// by anyone else — not even for the instant between creation and a chmod. On
+/// Windows there is no mode to set; the file inherits the directory's ACL, which
+/// is the platform's own answer to this.
+fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(data)?;
+    // Durability: the rename that follows only guarantees atomicity of the
+    // *name*, not that the bytes reached disk first.
+    f.sync_all()
+}
+
 impl Config {
     /// Locate the config file: `$XDG_CONFIG_HOME/gitpic/config.toml`
     /// (falls back to `~/.config/gitpic/config.toml`). Does not require it to exist.
@@ -155,19 +177,40 @@ impl Config {
     }
 
     /// Persist config to disk (creating parent dirs).
+    ///
+    /// The file may still hold a legacy `github.token`, so it is created `0600`
+    /// from its first byte rather than written and then chmod'd: `fs::write` uses
+    /// the default `0666 & !umask`, which under a typical `umask 022` means the
+    /// file is world-readable for the window between the write and the chmod, and
+    /// stays that way if the process dies in between. The permission error is
+    /// propagated for the same reason — swallowing it left a readable token behind
+    /// with no indication anything was wrong.
+    ///
+    /// Written to a temp file and renamed so a crash mid-write cannot truncate a
+    /// working config, and the temp file carries the same mode so the secret is
+    /// never briefly exposed under a different name either.
     pub fn save(&self) -> Result<PathBuf> {
         let path = Self::path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| AppError::general(format!("mkdir: {e}")))?;
+            // The directory is created 0755 by `create_dir_all`; tighten it so the
+            // config cannot be found by listing, not just by reading.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
         }
         let text = toml::to_string_pretty(self)
             .map_err(|e| AppError::general(format!("serialize: {e}")))?;
-        std::fs::write(&path, text).map_err(|e| AppError::general(format!("write config: {e}")))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+
+        let tmp = path.with_extension("toml.tmp");
+        write_private(&tmp, text.as_bytes())
+            .map_err(|e| AppError::general(format!("write config: {e}")))?;
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(AppError::general(format!("write config: {e}")));
         }
         Ok(path)
     }

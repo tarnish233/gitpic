@@ -12,7 +12,9 @@
 $ gitpic init
 gitpic init — configure your GitHub image host
 
-GitHub token (leave blank to use `gh auth token`):
+Credentials come from `gh auth token`, or from GITPIC_TOKEN.
+Run `gh auth login` once if you have not already.
+
 Target repo (owner/name): your-name/img
 Branch [main]:
 Link kind (cdn|raw) [cdn]:
@@ -62,7 +64,7 @@ cargo install --path .
 
 ```bash
 gh auth login          # 一次即可，token 存在系统 keyring 里
-gitpic init            # token 一项留空
+gitpic init            # 只问仓库/分支/链接类型，不问 token
 ```
 
 `gitpic` 按以下顺序取凭据，第一个可用的生效：
