@@ -25,8 +25,8 @@ read/write on every repository the account can reach, with no expiry.
   is never stored in `Config` — whose derived `Debug` could otherwise print it.
   An unavailable credential now surfaces as `token_valid: false` rather than
   `config_ok: false`.
-- `gitpic init` no longer asks for a token first; leaving the prompt blank uses
-  `gh`.
+- The `gitpic init` token prompt can be left blank to use `gh`, and its label says
+  so. (It is still the first field.)
 
 Note: `gh`'s OAuth token typically carries `gist, read:org, repo, workflow` —
 *broader* than writing to one image repo requires. This change keeps the secret
@@ -45,13 +45,52 @@ privilege, pass a fine-grained token limited to the one repo via `GITPIC_TOKEN`.
   falls through to the config file instead of overriding it with whitespace.
   `GITPIC_OWNER=" "` used to pass the config check and then produce a request
   against `/repos/%20/repo` — a confusing 404 rather than an actionable error.
+  Surrounding whitespace is now trimmed too: the blank check looked at the
+  trimmed value but stored the untrimmed one, so `GITPIC_OWNER=" me "` requested
+  `/repos/%20me%20/repo`.
+- A misspelled key or section in `config.toml` is now rejected instead of being
+  silently ignored. `dedupe = false` or `[uplaod]` parsed fine and did nothing,
+  with `gitpic config get` then showing the default as if the file had never been
+  edited — the same class of failure as the two above, on the one input that is
+  meant to be hand-edited (`gitpic config edit`). The error names the file and the
+  offending line; `gitpic config path` and `gitpic config edit` keep working so the
+  file can be repaired.
+- A branch name is percent-encoded before it goes into a URL. Git allows `&`, `#`,
+  `+`, `%` and `=` in a ref, and each one silently changed what the request meant:
+  `#` made the rest of the URL a fragment, `&` started another parameter, `+`
+  decoded to a space. The lookup then read the *wrong* ref, which looks like
+  "nothing uploaded here yet" — losing deduplication and omitting the sha from the
+  upload, so overwriting an existing file failed with a 409. The generated
+  Markdown links were affected the same way.
 - `gitpic list` now labels a deduplicated upload `(deduped)`, matching the word
   the upload output already used.
+
+### Added
+- Exit code `10` / `CONFIG_INVALID`, for a config file that exists but cannot be
+  read or parsed. It was previously exit `1` / `GENERAL`, the catch-all that also
+  covers clipboard and encoding failures, so nothing could act on it. `3` /
+  `CONFIG_MISSING` still means "nothing configured yet" (`gitpic init`); `10` means
+  "configured, but the file is broken" (`gitpic config edit`).
+- Exit code `1` / `GENERAL` is now documented in both READMEs and the agent skill.
+  It was always reachable — clipboard init, PNG encoding, launching `$EDITOR` — but
+  the tables started at `2`, so a script built from them mis-classified it.
 
 ### Removed
 - Dropped the unused `anyhow` and `thiserror` dependencies, along with the
   unreachable `image/webp` and the unused `tokio/fs`, `tokio/io-std`, and
   `clap/env` cargo features. Three crates leave the build graph.
+
+### Docs
+- Both READMEs claimed environment variables had the "highest priority". CLI flags
+  override them — `GITPIC_LINK=raw gitpic a.png --link cdn` produces a cdn link —
+  which is what `src/config.rs` documented all along.
+- `GITPIC_OWNER` is documented (it was implemented but appeared in neither README).
+- The English README's Install section only offered `cargo install --path .`, which
+  cannot work outside a clone, while later sections referred to Homebrew and release
+  archives it never mentioned. It now mirrors the Chinese one.
+- The demo transcripts showed a `📋 copied to clipboard` line the binary never
+  prints (a successful copy is silent; only failure is reported), and abbreviated
+  `gitpic init` down to its final line.
 
 ### CI
 - The release workflow now uploads `gitpic-<target>.*` with

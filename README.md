@@ -10,10 +10,17 @@
 
 ```console
 $ gitpic init
-✓ saved config to ~/.config/gitpic/config.toml
+gitpic init — configure your GitHub image host
+
+GitHub token (leave blank to use `gh auth token`):
+Target repo (owner/name): your-name/img
+Branch [main]:
+Link kind (cdn|raw) [cdn]:
+
+✓ saved config to /Users/you/.config/gitpic/config.toml
 
 $ gitpic ~/Desktop/shot.png
-✓ uploaded shot  📋 已复制到剪贴板
+✓ uploaded shot
 ![shot](https://cdn.jsdelivr.net/gh/your-name/img@main/images/2026/07/a1b2c3d4-shot.png)
 
 $ pbpaste                       # 剪贴板里已是上面的 Markdown
@@ -88,14 +95,18 @@ max_width     = 0        # 0 = 不缩放
 quality       = 82       # 压缩时的 JPEG 质量（1-100）
 ```
 
-或用环境变量（不落盘，优先级最高）：
+或用环境变量（不落盘，优先级高于配置文件，但低于命令行参数）：
 
 ```bash
 export GITPIC_TOKEN="github_pat_xxx"   # 细粒度令牌，Contents: Read/Write
-export GITPIC_REPO="your-name/img"     # owner/name
+export GITPIC_REPO="your-name/img"     # owner/name（也可只写 name，沿用现有 owner）
+export GITPIC_OWNER="your-name"        # 可选：只覆盖 owner
 export GITPIC_BRANCH="main"            # 可选
 export GITPIC_LINK="cdn"               # 可选：cdn | raw
 ```
+
+优先级为**命令行参数 > 环境变量 > 配置文件**，例如 `GITPIC_LINK=raw gitpic a.png --link cdn`
+生成的是 cdn 链接。值为空白的环境变量会被忽略（回落到配置文件），前后空格会被去掉。
 
 上传历史保存在 `~/.local/share/gitpic/history.jsonl`（遵循 `$XDG_DATA_HOME`）。
 
@@ -131,10 +142,15 @@ gitpic config set github.repo owner/name # 修改某项
 gitpic config set upload.link_kind raw
 gitpic config set upload.compress true
 gitpic config set upload.max_width 1600
+gitpic config set upload.quality 82
 gitpic config edit                       # 用 $EDITOR 打开配置文件
 ```
 
 `path_template` 占位符：`{year} {month} {day} {hash} {hash8} {name} {ext}`
+
+配置文件里的键名是严格校验的：写错的键或段（比如 `dedupe`、`[uplaod]`）会报
+`CONFIG_INVALID` 并指出出错的行，而不是被静默忽略。这种情况下 `gitpic config path`
+和 `gitpic config edit` 仍然可用，用来把文件改回来。
 
 ## 命令行补全
 
@@ -148,7 +164,10 @@ gitpic completion fish > ~/.config/fish/completions/gitpic.fish
 
 ## 退出码
 
-`0` 成功 · `2` 参数错误 · `3` 缺少设置 · `4` 认证失败 · `5` 网络错误 · `6` 本地文件不存在 · `7` 权限不足 · `8` 远端资源不存在 · `9` 请求过于频繁
+`0` 成功 · `1` 其他错误 · `2` 参数错误 · `3` 缺少设置 · `4` 认证失败 · `5` 网络错误 · `6` 本地文件不存在 · `7` 权限不足 · `8` 远端资源不存在 · `9` 请求过于频繁 · `10` 配置文件无法使用
+
+`3` 是"还没配"（跑 `gitpic init`），`10` 是"配了但文件有问题"（跑 `gitpic config edit`）——
+两者的处理方式不同，所以用了不同的码。
 
 ## AI 助手集成
 
