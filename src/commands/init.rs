@@ -2,7 +2,7 @@
 
 use super::prompt;
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{AppError, Result};
 
 pub fn run() -> Result<()> {
     let mut cfg = Config::load()?;
@@ -35,7 +35,15 @@ pub fn run() -> Result<()> {
     } else {
         branch
     };
-    cfg.upload.link_kind = if link.is_empty() { "cdn".into() } else { link };
+    cfg.upload.link_kind = if link.is_empty() {
+        "cdn".into()
+    } else {
+        // Same reason as `config set`: an unvalidated typo here would silently
+        // pin the user to cdn links forever.
+        crate::link::parse_link_kind_strict(&link)
+            .ok_or_else(|| AppError::usage(format!("invalid link kind (cdn|raw): {link}")))?;
+        link.trim().to_ascii_lowercase()
+    };
 
     let path = cfg.save()?;
     println!("\n\u{2713} saved config to {}", path.display());

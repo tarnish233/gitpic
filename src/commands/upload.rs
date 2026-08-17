@@ -1,12 +1,12 @@
 //! Upload orchestration for files, stdin, and clipboard sources.
 
-use super::{build_item, resolve_link_kind, resolve_template, InputImage};
+use super::{build_item, resolve_compress, resolve_link_kind, resolve_template, InputImage};
 use crate::cli::{Cli, Command};
 use crate::config::Config;
 use crate::error::{AppError, Result};
 use crate::github::GitHub;
 use crate::history::{self, Record};
-use crate::imageproc::{self, CompressOpts};
+use crate::imageproc;
 use crate::naming;
 use crate::output::{self, ItemResult, Mode};
 use std::io::Read;
@@ -71,11 +71,7 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
         );
     }
 
-    let compress = CompressOpts {
-        enabled: (cfg.upload.compress || cli.compress) && !cli.no_compress,
-        max_width: cli.max_width.unwrap_or(cfg.upload.max_width),
-        quality: cli.quality.unwrap_or(cfg.upload.quality),
-    };
+    let compress = resolve_compress(cli, cfg);
 
     if cli.verbose > 0 {
         eprintln!(
@@ -158,34 +154,53 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
     // Copy to clipboard only for interactive/human use.
     let want_copy = cfg.upload.auto_copy && !cli.no_copy && matches!(mode, Mode::Human);
     if want_copy && !results.is_empty() {
-        let mut joined = String::new();
-        for (i, r) in results.iter().enumerate() {
-            if i > 0 {
-                joined.push('\n');
-            }
-            joined.push_str(&r.output);
-        }
+        let joined = results
+            .iter()
+            .map(|r| r.output.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         if let Err(e) = copy_to_clipboard(&joined) {
             eprintln!("warning: could not copy to clipboard: {e}");
         }
     }
 
-    match failure {
-        None => {
+    match classify(failure, results.len()) {
+        Report::Success => {
             output::print_results(mode, &results);
             Ok(0)
         }
-        // Nothing uploaded: an ordinary failure, so use the standard error
-        // envelope. The partial shape means "some of these links are live" and
-        // agents key off that distinction (see SKILL.md), so an empty `results`
-        // must never be reported that way.
-        Some(e) if results.is_empty() => Err(e),
-        Some(e) => {
+        Report::Total(e) => Err(e),
+        Report::Partial(e) => {
             // Some inputs did upload. Report their links alongside the error so
             // the caller never loses a link that is already live.
             output::print_partial(mode, &results, e.code.as_str(), &e.message);
             Ok(e.code.exit_code())
         }
+    }
+}
+
+/// Which envelope a finished run gets.
+#[derive(Debug)]
+enum Report {
+    Success,
+    /// Some inputs uploaded before a later one failed; their links are live.
+    Partial(AppError),
+    /// Nothing uploaded, so the ordinary error envelope applies.
+    Total(AppError),
+}
+
+/// Decide how a run is reported.
+///
+/// Split out of `run` because the rule it encodes is an agent-facing contract
+/// that was previously only stated in a comment: the partial shape means "some
+/// of these links are live", and agents key off `results` being present to tell
+/// partial from total (see `skills/gitpic/SKILL.md`), so an empty `results` must
+/// never be reported that way.
+fn classify(failure: Option<AppError>, uploaded: usize) -> Report {
+    match failure {
+        None => Report::Success,
+        Some(e) if uploaded == 0 => Report::Total(e),
+        Some(e) => Report::Partial(e),
     }
 }
 
@@ -224,8 +239,8 @@ fn read_stdin(cli: &Cli) -> Result<InputImage> {
 
 fn read_clipboard(cli: &Cli) -> Result<InputImage> {
     use image::ImageEncoder;
-    let mut clip = arboard::Clipboard::new()
-        .map_err(|e| AppError::new(crate::error::ErrorCode::General, format!("clipboard: {e}")))?;
+    let mut clip =
+        arboard::Clipboard::new().map_err(|e| AppError::general(format!("clipboard: {e}")))?;
     let img = clip
         .get_image()
         .map_err(|e| AppError::usage(format!("no image in clipboard: {e}")))?;
@@ -240,22 +255,85 @@ fn read_clipboard(cli: &Cli) -> Result<InputImage> {
             img.height as u32,
             image::ExtendedColorType::Rgba8,
         )
-        .map_err(|e| AppError::new(crate::error::ErrorCode::General, format!("encode png: {e}")))?;
+        .map_err(|e| AppError::general(format!("encode png: {e}")))?;
 
-    let raw_name = cli
-        .name
-        .clone()
-        .unwrap_or_else(|| "clipboard.png".to_string());
-    // ensure .png extension for clipboard captures
-    let name = if Path::new(&raw_name).extension().is_some() {
-        raw_name
-    } else {
-        format!("{raw_name}.png")
-    };
-    Ok(InputImage { name, bytes: png })
+    Ok(InputImage {
+        name: clipboard_name(cli.name.as_deref()),
+        bytes: png,
+    })
+}
+
+/// Name a clipboard capture.
+///
+/// The bytes are always PNG (encoded above), so the extension has to say so.
+/// Honouring a user-supplied `--name shot.jpg` would publish PNG bytes at a
+/// `.jpg` path, which GitHub and jsDelivr then serve as `image/jpeg`.
+fn clipboard_name(explicit: Option<&str>) -> String {
+    let stem = explicit
+        .map(Path::new)
+        .and_then(|p| p.file_stem())
+        .and_then(|s| s.to_str())
+        // A leading dot makes the whole name the "stem" (`.png` -> `.png`), so
+        // reject those rather than emitting `.png.png`.
+        .filter(|s| !s.is_empty() && !s.starts_with('.'))
+        .unwrap_or("clipboard");
+    format!("{stem}.png")
 }
 
 fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
     let mut clip = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     clip.set_text(text.to_string()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_name_defaults_when_unnamed() {
+        assert_eq!(clipboard_name(None), "clipboard.png");
+    }
+
+    #[test]
+    fn clipboard_name_keeps_an_explicit_stem() {
+        assert_eq!(clipboard_name(Some("shot")), "shot.png");
+        assert_eq!(clipboard_name(Some("shot.png")), "shot.png");
+    }
+
+    #[test]
+    fn clipboard_name_rewrites_a_mismatched_extension() {
+        // Regression: the bytes are always PNG, so honouring ".jpg" published
+        // PNG data at a .jpg path, which GitHub serves as image/jpeg.
+        assert_eq!(clipboard_name(Some("shot.jpg")), "shot.png");
+        assert_eq!(clipboard_name(Some("shot.webp")), "shot.png");
+    }
+
+    #[test]
+    fn clipboard_name_falls_back_on_an_unusable_name() {
+        assert_eq!(clipboard_name(Some("")), "clipboard.png");
+        assert_eq!(clipboard_name(Some(".png")), "clipboard.png");
+    }
+
+    #[test]
+    fn a_clean_run_is_reported_as_success() {
+        assert!(matches!(classify(None, 3), Report::Success));
+    }
+
+    #[test]
+    fn links_already_live_survive_a_later_failure() {
+        assert!(matches!(
+            classify(Some(AppError::network("boom")), 2),
+            Report::Partial(_)
+        ));
+    }
+
+    #[test]
+    fn nothing_uploaded_never_uses_the_partial_envelope() {
+        // Agents tell partial from total by whether `results` is present, so a
+        // run that uploaded nothing must take the plain error envelope.
+        assert!(matches!(
+            classify(Some(AppError::network("boom")), 0),
+            Report::Total(_)
+        ));
+    }
 }

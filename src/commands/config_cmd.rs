@@ -85,7 +85,13 @@ fn set_key(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
         "github.repo" => cfg.set_repo_spec(value)?,
         "github.branch" => cfg.github.branch = value.to_string(),
         "upload.path_template" => cfg.upload.path_template = value.to_string(),
-        "upload.link_kind" => cfg.upload.link_kind = value.to_string(),
+        "upload.link_kind" => {
+            // Validate on the way in. `parse_link_kind` silently falls back to
+            // cdn, so an unchecked typo here is permanent and invisible.
+            crate::link::parse_link_kind_strict(value)
+                .ok_or_else(|| AppError::usage(format!("invalid link kind (cdn|raw): {value}")))?;
+            cfg.upload.link_kind = value.trim().to_ascii_lowercase();
+        }
         "upload.dedup" => cfg.upload.dedup = parse_bool(value)?,
         "upload.auto_copy" => cfg.upload.auto_copy = parse_bool(value)?,
         "upload.compress" => cfg.upload.compress = parse_bool(value)?,

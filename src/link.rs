@@ -88,6 +88,20 @@ pub fn parse_link_kind(s: &str) -> LinkKind {
     }
 }
 
+/// Parse a link kind, rejecting anything unrecognized.
+///
+/// `parse_link_kind` is deliberately lenient because it reads an already-stored
+/// value at upload time. Wherever a value is *accepted* from the user, use this
+/// instead: otherwise `config set upload.link_kind raw2` reports success and
+/// then silently serves CDN links forever.
+pub fn parse_link_kind_strict(s: &str) -> Option<LinkKind> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "cdn" => Some(LinkKind::Cdn),
+        "raw" => Some(LinkKind::Raw),
+        _ => None,
+    }
+}
+
 /// jsDelivr encodes the ref as `repo@branch/path`, so a branch containing `/`
 /// makes the boundary between branch and path ambiguous. Raw GitHub URLs are
 /// unaffected.
@@ -98,6 +112,21 @@ pub fn cdn_branch_is_ambiguous(kind: LinkKind, branch: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_parse_rejects_what_the_lenient_one_swallows() {
+        // Regression: `config set upload.link_kind raw2` used to report success
+        // and then serve cdn links forever.
+        assert!(parse_link_kind_strict("raw2").is_none());
+        assert!(parse_link_kind_strict("").is_none());
+        assert!(parse_link_kind_strict("CDN ").is_some());
+        assert!(matches!(
+            parse_link_kind_strict(" Raw "),
+            Some(LinkKind::Raw)
+        ));
+        // The lenient reader still defaults, which is why the strict one exists.
+        assert!(matches!(parse_link_kind("raw2"), LinkKind::Cdn));
+    }
 
     #[test]
     fn cdn_and_raw_urls() {
