@@ -4,8 +4,10 @@ on:
   push:
     tags: ["v*"]
 
+# Only the publishing job writes to the repository; the four build jobs get
+# read-only tokens.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,21 +30,6 @@ jobs:
             target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v5
-
-      - name: Prepare release title and changelog
-        id: release_notes
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          awk -v version="$version" '
-            $0 ~ "^## \\[" version "\\]" { found = 1; next }
-            found && /^## \[/ { exit }
-            found { print }
-          ' CHANGELOG.zh-CN.md > RELEASE_NOTES.md
-          test -s RELEASE_NOTES.md
-          subtitle="$(awk '/^### / { sub(/^### /, ""); print; exit }' RELEASE_NOTES.md)"
-          if [[ -z "$subtitle" ]]; then subtitle="Release"; fi
-          echo "name=gitpic ${GITHUB_REF_NAME} — ${subtitle}" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -70,16 +57,98 @@ jobs:
         shell: pwsh
         run: |
           $bin = "target/${{ matrix.target }}/release/gitpic.exe"
-          Compress-Archive -Path $bin -DestinationPath "gitpic-${{ matrix.target }}.zip"
-          (Get-FileHash "gitpic-${{ matrix.target }}.zip" -Algorithm SHA256).Hash | Out-File "gitpic-${{ matrix.target }}.zip.sha256"
+          $zip = "gitpic-${{ matrix.target }}.zip"
+          Compress-Archive -Path $bin -DestinationPath $zip
+          # Match `shasum -a 256` byte for byte, so this sidecar is verifiable with
+          # the same command as the unix ones: lowercase hash, two spaces, bare
+          # filename, LF, no BOM. `(Get-FileHash).Hash | Out-File` produced an
+          # uppercase hash with no filename, which `shasum -c` cannot read at all.
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          [System.IO.File]::WriteAllText("$zip.sha256", "$hash  $zip`n")
 
-      - name: Upload to release
+      # A checksum sidecar is only worth publishing if it actually verifies.
+      # Runs on every platform through bash (Git Bash on the Windows runner), so
+      # the Windows sidecar's format is checked by the same tool that consumes it
+      # — which is not something a maintainer on macOS can test locally.
+      - name: Verify checksum sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=( gitpic-${{ matrix.target }}.*.sha256 )
+          echo "sidecars: ${files[*]}"
+          for f in "${files[@]}"; do
+            if command -v shasum >/dev/null 2>&1; then shasum -a 256 -c "$f"
+            else sha256sum -c "$f"; fi
+          done
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: gitpic-${{ matrix.target }}.*
+          if-no-files-found: error
+          retention-days: 1
+
+  # A single job creates the Release and uploads every archive at once.
+  #
+  # Previously each of the four matrix jobs called action-gh-release itself, so
+  # four jobs raced to create the same tag's Release: whichever lost could fail
+  # with "already_exists", and the release body was written four times over. One
+  # publisher also means the Release either has all four platforms or does not
+  # exist — it can no longer appear half-populated while other builds are still
+  # running.
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Prepare release title and changelog
+        id: release_notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v version="$version" '
+            $0 ~ "^## \\[" version "\\]" { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.zh-CN.md > RELEASE_NOTES.md
+          test -s RELEASE_NOTES.md
+          subtitle="$(awk '/^### / { sub(/^### /, ""); print; exit }' RELEASE_NOTES.md)"
+          if [[ -z "$subtitle" ]]; then subtitle="Release"; fi
+          echo "name=gitpic ${GITHUB_REF_NAME} — ${subtitle}" >> "$GITHUB_OUTPUT"
+
+      - name: Download every build artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      # Guards against publishing a partial set: four archives, four sidecars.
+      # Each sidecar is re-verified here, against the bytes that will actually be
+      # uploaded rather than the ones the build job happened to have on disk.
+      - name: Verify the full artifact set
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -l
+          archives=$(ls gitpic-*.tar.gz gitpic-*.zip 2>/dev/null | wc -l | tr -d ' ')
+          sidecars=$(ls gitpic-*.sha256 2>/dev/null | wc -l | tr -d ' ')
+          echo "archives=$archives sidecars=$sidecars"
+          test "$archives" -eq 4
+          test "$sidecars" -eq 4
+          for f in gitpic-*.sha256; do shasum -a 256 -c "$f"; done
+
+      - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ steps.release_notes.outputs.name }}
           body_path: RELEASE_NOTES.md
-          # One glob per platform, so an unmatched pattern is a real failure.
-          # Listing all four archive names forced fail_on_unmatched_files: false,
-          # which let a release that uploaded *nothing* pass as green.
-          files: gitpic-${{ matrix.target }}.*
+          files: dist/gitpic-*
           fail_on_unmatched_files: true

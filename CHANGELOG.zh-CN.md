@@ -4,6 +4,39 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 修复
+- 会逃出仓库的路径模板现在被拒绝，而不是产出一个光秃秃的 404。此前
+  `upload.path_template = "../../../etc/{name}.{ext}"` 会被接受并发给 Contents
+  API，只换回一句没头没尾的 "Not Found"。校验做在**渲染后**的路径上 —— 那是三个
+  模板来源（`config set`、`--path`、手改配置文件）唯一的汇合点；`config set` 另外
+  会先渲染一个样本，让坏模板在设置的那一刻就报错。
+- 上传专用选项现在会被那些原本忽略它们的子命令拒绝。此前
+  `gitpic list --compress --max-width 99` 能解析、exit 0、然后什么都不做，
+  `completion`、`config`、`skill`、`init` 同样如此。它们仍然是 `global = true`
+  （否则 `gitpic paste --no-copy` 会坏掉），但 `dispatch` 现在会把当前子命令无法
+  生效的那些报出来。`--json`、`--quiet`、`--verbose` 到处都有意义，不受影响；
+  `--repo` 仍被 `doctor` 接受，因为它确实要解析目标。
+- `history.jsonl` 不再无上限增长。超过 2 MB 时裁剪到最新的一半，先写临时文件再
+  rename，所以中断的裁剪不会留下半个历史。裁剪只在一次廉价的 metadata 检查发现
+  超限时才发生，普通的追加根本不读这个文件。**这会丢掉最旧的记录**，其中含有早期
+  上传的链接。
+
+### CI
+- 发布流程不再有四个 job 抢着创建同一个 Release。现在每个构建上传 artifact，由
+  单独一个 `publish` job 全部下载、校验四个归档与四个 sidecar 齐全、只调用一次
+  `action-gh-release`。Release 不会再在其他平台还在构建时就先露出半份产物；四个
+  构建 job 拿到的是只读 token，只有 `publish` 能写。
+- Windows 的校验和 sidecar 现在与 `shasum -a 256` 逐字节一致（小写哈希、两个空格、
+  文件名、LF、无 BOM）。此前 `(Get-FileHash).Hash | Out-File` 写出的是大写哈希且
+  没有文件名，`shasum -c` 完全读不了。现在每个 sidecar 都会在 CI 里验证 —— 在生成
+  它的平台上验一次、发布前再验一次；Windows 的格式不是 macOS 上的维护者能本地检查
+  的东西。
+- `check_manifests.py` 现在要求两个 changelog 都带有 `Cargo.toml` 里那个版本的
+  章节。`release.yml` 从来只读中文那份，所以一个把 `CHANGELOG.md` 留在
+  `## [Unreleased]` 的发布也能让 CI 全绿 —— 而 AGENTS.md 明确要求两份保持对齐。
+
 ## [0.2.1] - 2026-08-17
 
 ### `doctor` 现在能区分"凭据坏了"和"GitHub 在抖"

@@ -15,6 +15,13 @@ pub struct Record {
     pub deduped: bool,
 }
 
+/// Ceiling for the history file. Past this it is trimmed, oldest first.
+///
+/// The file is append-only and `read_recent` parses all of it, so without a
+/// ceiling every `gitpic list` eventually pays for years of uploads. At a few
+/// hundred bytes per record this holds several thousand of them.
+const MAX_BYTES: usize = 2 * 1024 * 1024;
+
 /// Append a record; failures here must never break an upload, so errors are
 /// swallowed by the caller when desired.
 pub fn append(rec: &Record) -> Result<()> {
@@ -32,7 +39,70 @@ pub fn append(rec: &Record) -> Result<()> {
         .open(&path)
         .map_err(|e| AppError::general(format!("open history: {e}")))?;
     writeln!(f, "{line}").map_err(|e| AppError::general(format!("write history: {e}")))?;
+    drop(f);
+
+    // Only the cheap metadata call happens on a normal append; the file is read
+    // and rewritten just on the rare occasion it has grown past the ceiling.
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() as usize > MAX_BYTES {
+            trim_file(&path, MAX_BYTES);
+        }
+    }
     Ok(())
+}
+
+/// Rewrite the history down to its retained tail.
+///
+/// Best-effort by design: this runs after the record is already safely on disk,
+/// and losing the *trim* must never turn into losing the *upload*. Written to a
+/// sibling temp file and renamed, so an interrupted trim cannot leave a
+/// half-written history behind.
+///
+/// `max_bytes` is a parameter rather than a direct read of `MAX_BYTES` so the
+/// rename-and-replace can be tested against a small file.
+fn trim_file(path: &std::path::Path, max_bytes: usize) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Some(kept) = trimmed(&text, max_bytes) else {
+        return;
+    };
+    let tmp = path.with_extension("jsonl.tmp");
+    if std::fs::write(&tmp, kept).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// The retained tail of `text`, or `None` when it is small enough to leave alone.
+///
+/// Keeps the **newest** records: `read_recent` reports newest-first, so those are
+/// the ones anyone actually looks at. Cuts back to half the ceiling rather than
+/// exactly to it, so the rewrite is amortised over many later appends instead of
+/// running again on the very next one.
+fn trimmed(text: &str, max_bytes: usize) -> Option<String> {
+    if text.len() <= max_bytes {
+        return None;
+    }
+    let target = max_bytes / 2;
+    let mut kept: Vec<&str> = Vec::new();
+    let mut total = 0usize;
+    for line in text.lines().rev().filter(|l| !l.trim().is_empty()) {
+        // +1 for the newline each retained line gets back.
+        if total + line.len() + 1 > target {
+            break;
+        }
+        total += line.len() + 1;
+        kept.push(line);
+    }
+    kept.reverse();
+    let mut out = String::with_capacity(total);
+    for l in kept {
+        out.push_str(l);
+        out.push('\n');
+    }
+    Some(out)
 }
 
 /// Read up to the last `limit` records (newest first).
@@ -100,5 +170,90 @@ mod tests {
     fn unparseable_and_blank_lines_are_skipped() {
         let text = format!("{}\n\n   \nnot json\n{}\n", line("a"), line("b"));
         assert_eq!(parse_recent(&text, 10).len(), 2);
+    }
+
+    #[test]
+    fn a_small_history_is_left_completely_alone() {
+        let text = format!("{}\n{}\n", line("a"), line("b"));
+        assert!(trimmed(&text, 1024).is_none(), "no trim is due");
+        // Exactly at the ceiling is still not over it.
+        assert!(trimmed(&text, text.len()).is_none());
+    }
+
+    #[test]
+    fn trimming_keeps_the_newest_records_and_drops_the_oldest() {
+        // 20 records, ceiling small enough to force a trim.
+        let text: String = (0..20)
+            .map(|i| format!("{}\n", line(&i.to_string())))
+            .collect();
+        let one = text.len() / 20;
+        let kept = trimmed(&text, one * 10).expect("must trim");
+        let names: Vec<String> = parse_recent(&kept, 100)
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        // newest-first, so the highest indices survive and "0" is gone
+        assert_eq!(names.first().map(String::as_str), Some("19"));
+        assert!(!names.contains(&"0".to_string()), "oldest must be dropped");
+        // Cut back to about half the ceiling, not to the ceiling itself, so the
+        // next append does not immediately trigger another rewrite.
+        assert!(kept.len() <= one * 5, "kept {} bytes", kept.len());
+        assert!(!kept.is_empty());
+    }
+
+    #[test]
+    fn the_trimmed_result_is_still_valid_jsonl() {
+        let text: String = (0..30)
+            .map(|i| format!("{}\n", line(&i.to_string())))
+            .collect();
+        let kept = trimmed(&text, text.len() / 3).expect("must trim");
+        assert!(kept.ends_with('\n'), "must stay line-oriented");
+        // Every retained line must parse — a trim that sliced mid-record would
+        // silently corrupt the history.
+        let n = kept.lines().count();
+        assert_eq!(parse_recent(&kept, 1000).len(), n, "every line must parse");
+    }
+
+    #[test]
+    fn blank_lines_do_not_survive_a_trim() {
+        let text = format!("{}\n\n\n{}\n\n{}\n", line("a"), line("b"), line("c"));
+        let kept = trimmed(&text, 10).expect("must trim");
+        assert!(!kept.contains("\n\n"), "{kept:?}");
+    }
+
+    #[test]
+    fn trim_file_replaces_the_file_in_place_and_leaves_no_temp() {
+        // Covers the file half: the rename-and-replace, and that the temp file
+        // does not survive. A stray `history.jsonl.tmp` would be litter in the
+        // user's data dir on every trim.
+        let dir = std::env::temp_dir().join(format!("gitpic-trim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.jsonl");
+        let text: String = (0..40)
+            .map(|i| format!("{}\n", line(&i.to_string())))
+            .collect();
+        std::fs::write(&path, &text).unwrap();
+
+        trim_file(&path, text.len() / 4);
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.len() < text.len(), "file must shrink");
+        let names: Vec<String> = parse_recent(&after, 1000)
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(names.first().map(String::as_str), Some("39"), "newest kept");
+        assert!(!names.contains(&"0".to_string()), "oldest dropped");
+        assert!(
+            !path.with_extension("jsonl.tmp").exists(),
+            "temp file must not survive"
+        );
+
+        // A file already under the ceiling must be left byte-identical.
+        std::fs::write(&path, &text).unwrap();
+        trim_file(&path, text.len() * 10);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

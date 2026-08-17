@@ -26,6 +26,7 @@ SKILL_MD = ROOT / "skills" / SKILL_NAME / "SKILL.md"
 CLAUDE_MARKET = ROOT / ".claude-plugin" / "marketplace.json"
 CODEX_PLUGIN = ROOT / ".codex-plugin" / "plugin.json"
 CODEX_MARKET = ROOT / ".agents" / "plugins" / "marketplace.json"
+CHANGELOGS = (ROOT / "CHANGELOG.md", ROOT / "CHANGELOG.zh-CN.md")
 
 errors: list[str] = []
 
@@ -117,18 +118,42 @@ def check_versions(version: str) -> None:
                 fail(f"{CODEX_MARKET}: plugins[].name {p.get('name')!r} != {SKILL_NAME!r}")
 
 
+def check_changelogs(version: str) -> None:
+    """Both changelogs must carry a section for the version in Cargo.toml.
+
+    ``release.yml`` extracts release notes from ``CHANGELOG.zh-CN.md`` only, and
+    aborts on an empty result — so the Chinese one is already guarded at tag time.
+    Nothing checked the English one, which meant a release could ship with it left
+    at ``## [Unreleased]`` and CI would stay green, even though AGENTS.md requires
+    the two to stay aligned for every release.
+    """
+    heading = re.compile(r"^## \[" + re.escape(version) + r"\]", flags=re.M)
+    for path in CHANGELOGS:
+        try:
+            text = path.read_text()
+        except FileNotFoundError:
+            fail(f"{path.relative_to(ROOT)} is missing")
+            continue
+        if not heading.search(text):
+            fail(
+                f"{path.name} has no `## [{version}]` section, but Cargo.toml says "
+                f"{version} — rename the unreleased heading before tagging"
+            )
+
+
 def main() -> int:
     version = cargo_version()
     check_skill_source()
     if version:
         check_versions(version)
+        check_changelogs(version)
 
     if errors:
         print("Manifest check failed:", file=sys.stderr)
         for e in errors:
             print(f"  - {e}", file=sys.stderr)
         return 1
-    print(f"Manifest check passed: gitpic {version}, skill + 3 manifests agree")
+    print(f"Manifest check passed: gitpic {version}, skill + 3 manifests + 2 changelogs agree")
     return 0
 
 

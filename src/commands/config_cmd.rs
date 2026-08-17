@@ -81,7 +81,19 @@ fn set_key(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
         "github.owner" => cfg.github.owner = value.to_string(),
         "github.repo" => cfg.set_repo_spec(value)?,
         "github.branch" => cfg.github.branch = value.to_string(),
-        "upload.path_template" => cfg.upload.path_template = value.to_string(),
+        "upload.path_template" => {
+            // Rendered here with stand-in values so a bad template fails at the
+            // moment it is set, not on the next upload. `upload::run` re-checks
+            // the rendered path, which is what also covers a hand-edited file.
+            let sample = crate::naming::render_path(value, "sample.png", &"0".repeat(64));
+            if !crate::naming::is_safe_remote_path(&sample) {
+                return Err(AppError::usage(format!(
+                    "invalid path template {value:?}: it must be repo-relative \
+                     with no empty or `..` segments (renders to {sample:?})"
+                )));
+            }
+            cfg.upload.path_template = value.to_string()
+        }
         "upload.link_kind" => {
             // Validate on the way in. `parse_link_kind` silently falls back to
             // cdn, so an unchecked typo here is permanent and invisible.

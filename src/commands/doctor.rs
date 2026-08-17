@@ -43,86 +43,137 @@ fn more_actionable<'a>(
     }
 }
 
-pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
-    let config_ok = cfg.require_target().is_ok();
+/// The facts a run gathered, independent of how they were obtained.
+///
+/// This is the seam that makes `doctor`'s reporting testable. The alternative was
+/// injecting an API base into `GitHub`, but `with_api` is deliberately private —
+/// every request carries the token in an `Authorization` header, so the base must
+/// never be influenced from outside. Splitting *after* the I/O keeps that intact
+/// and still covers the part that had the bug.
+struct Probed {
+    config_ok: bool,
+    source: Option<&'static str>,
+    /// `/user`: `Ok(login)` when the credential is accepted. `None` when the probe
+    /// never ran — no credential, or nothing configured to probe against.
+    user: Option<Result<String>>,
+    /// `/repos/{owner}/{repo}`: `Ok(writable)`. `None` as above.
+    repo: Option<Result<bool>>,
+    /// A failure that prevented probing at all: no credential, or no client.
+    setup_err: Option<AppError>,
+}
 
+/// Reduce gathered facts to the report body and the process exit code.
+fn summarize(p: Probed) -> (DoctorReport, u8) {
     let mut token_valid = false;
     let mut repo_writable = false;
     let mut login = None;
     let mut detail = None;
     let mut failure_code = None;
 
-    // Resolved before the target check so the source is reported even when the
-    // repo is unconfigured — that is what tells you whether `gh` is being used.
-    let cred = match crate::auth::resolve(cfg) {
-        Ok(c) => Some(c),
-        Err(e) => {
-            failure_code = Some(e.code);
-            detail = Some(e.message);
-            None
-        }
-    };
+    if let Some(e) = &p.setup_err {
+        failure_code = Some(e.code);
+        detail = Some(e.message.clone());
+    }
 
-    if !config_ok {
+    if !p.config_ok {
+        // An unconfigured target outranks everything else: it is the first thing
+        // the user has to fix, and its remedy is the one they can act on.
         failure_code = Some(ErrorCode::ConfigMissing);
         detail = Some("run `gitpic init` or set GITPIC_REPO=owner/name".into());
-    } else if let Some(cred) = &cred {
-        match GitHub::new(
-            &cred.token,
-            &cfg.github.owner,
-            &cfg.github.repo,
-            &cfg.github.branch,
-        ) {
-            Ok(gh) => {
-                // Both probes always run, and neither gates the other. `/user`
-                // answers "is this credential accepted", the repo endpoint answers
-                // "can it write here" — and an upload only ever calls the second
-                // kind. Gating them meant a 503 on `/user`, an endpoint uploads
-                // never touch, reported `repo_writable: false`, which is
-                // indistinguishable from a bad credential and sends an agent to
-                // `gh auth login` for a fault that has nothing to do with auth.
-                // Concurrent because they are independent.
-                let (who, repo) = tokio::join!(gh.whoami(), gh.repo_info());
-
-                let user_err = match who {
-                    Ok(name) => {
-                        token_valid = true;
-                        login = Some(name);
-                        None
-                    }
-                    Err(e) => Some(e),
-                };
-                let repo_err = match repo {
-                    Ok(info) => {
-                        repo_writable =
-                            info.permissions.map(|p| p.push || p.admin).unwrap_or(false);
-                        None
-                    }
-                    Err(e) => Some(e),
-                };
-
-                if let Some(e) = more_actionable(user_err.as_ref(), repo_err.as_ref()) {
-                    failure_code = Some(e.code);
-                    detail = Some(e.message.clone());
-                }
+    } else {
+        let user_err = match &p.user {
+            Some(Ok(name)) => {
+                token_valid = true;
+                login = Some(name.clone());
+                None
             }
-            Err(e) => {
-                failure_code = Some(e.code);
-                detail = Some(e.message);
+            Some(Err(e)) => Some(e),
+            None => None,
+        };
+        let repo_err = match &p.repo {
+            Some(Ok(writable)) => {
+                repo_writable = *writable;
+                None
+            }
+            Some(Err(e)) => Some(e),
+            None => None,
+        };
+        if let Some(e) = more_actionable(user_err, repo_err) {
+            failure_code = Some(e.code);
+            detail = Some(e.message.clone());
+        }
+    }
+
+    let ok = p.config_ok && token_valid && repo_writable;
+    let exit = if ok {
+        0
+    } else if let Some(code) = failure_code {
+        code.exit_code()
+    } else {
+        // Everything answered, but GitHub reports no push/admin permission.
+        ErrorCode::PermissionDenied.exit_code()
+    };
+    (
+        DoctorReport {
+            ok,
+            config_ok: p.config_ok,
+            token_valid,
+            repo_writable,
+            token_source: p.source,
+            login,
+            detail,
+        },
+        exit,
+    )
+}
+
+pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
+    let config_ok = cfg.require_target().is_ok();
+
+    // Resolved before the target check so the source is reported even when the
+    // repo is unconfigured — that is what tells you whether `gh` is being used.
+    let (cred, mut setup_err) = match crate::auth::resolve(cfg) {
+        Ok(c) => (Some(c), None),
+        Err(e) => (None, Some(e)),
+    };
+    let source = cred.as_ref().map(|c| c.source.as_str());
+
+    let mut user = None;
+    let mut repo = None;
+    if config_ok {
+        if let Some(cred) = &cred {
+            match GitHub::new(
+                &cred.token,
+                &cfg.github.owner,
+                &cfg.github.repo,
+                &cfg.github.branch,
+            ) {
+                Ok(gh) => {
+                    // Both probes always run, and neither gates the other. `/user`
+                    // answers "is this credential accepted", the repo endpoint
+                    // answers "can it write here" — and an upload only ever calls
+                    // the second kind. Gating them meant a 503 on `/user`, an
+                    // endpoint uploads never touch, reported `repo_writable:
+                    // false`, indistinguishable from a bad credential. Concurrent
+                    // because they are independent.
+                    let (who, info) = tokio::join!(gh.whoami(), gh.repo_info());
+                    user = Some(who);
+                    repo = Some(
+                        info.map(|i| i.permissions.map(|p| p.push || p.admin).unwrap_or(false)),
+                    );
+                }
+                Err(e) => setup_err = Some(e),
             }
         }
     }
 
-    let ok = config_ok && token_valid && repo_writable;
-    let report = DoctorReport {
-        ok,
+    let (report, exit) = summarize(Probed {
         config_ok,
-        token_valid,
-        repo_writable,
-        token_source: cred.as_ref().map(|c| c.source.as_str()),
-        login,
-        detail,
-    };
+        source,
+        user,
+        repo,
+        setup_err,
+    });
 
     if mode.is_json() {
         crate::output::print_json(&report);
@@ -158,15 +209,7 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
             println!("  {note} {d}");
         }
     }
-    if ok {
-        Ok(0)
-    } else if let Some(code) = failure_code {
-        Ok(code.exit_code())
-    } else {
-        // The token is valid and the repository exists, but GitHub reports no
-        // push/admin permission for it.
-        Ok(ErrorCode::PermissionDenied.exit_code())
-    }
+    Ok(exit)
 }
 
 #[cfg(test)]
@@ -232,5 +275,104 @@ mod tests {
     #[test]
     fn a_clean_run_has_nothing_to_report() {
         assert!(more_actionable(None, None).is_none());
+    }
+
+    /// A run where both probes were attempted.
+    fn probed(user: Result<String>, repo: Result<bool>) -> Probed {
+        Probed {
+            config_ok: true,
+            source: Some("gh"),
+            user: Some(user),
+            repo: Some(repo),
+            setup_err: None,
+        }
+    }
+
+    #[test]
+    fn a_user_outage_no_longer_hides_that_the_repo_is_writable() {
+        // THE regression this release exists for. Observed live: `/user` 503 while
+        // the repository endpoint answered `push: true`. Before the probes were
+        // split, `repo_writable` came back false and was indistinguishable from a
+        // dead credential.
+        let (r, exit) = summarize(probed(Err(AppError::network("503")), Ok(true)));
+        assert!(r.repo_writable, "the repo answered, so say so");
+        assert!(
+            !r.token_valid,
+            "/user did not answer, so do not claim it did"
+        );
+        assert!(!r.ok);
+        assert_eq!(exit, ErrorCode::Network.exit_code(), "retryable");
+        assert_eq!(r.token_source, Some("gh"));
+    }
+
+    #[test]
+    fn a_healthy_run_is_ok_and_exits_zero() {
+        let (r, exit) = summarize(probed(Ok("tarnish233".into()), Ok(true)));
+        assert!(r.ok && r.config_ok && r.token_valid && r.repo_writable);
+        assert_eq!(r.login.as_deref(), Some("tarnish233"));
+        assert_eq!(exit, 0);
+        assert!(r.detail.is_none(), "nothing to note on a clean run");
+    }
+
+    #[test]
+    fn a_dead_credential_is_still_reported_as_auth_failed() {
+        // Both probes fail: the definite 401 must win over a 503, or an agent
+        // retries a credential that will never work.
+        let (r, exit) = summarize(probed(
+            Err(AppError::network("503")),
+            Err(AppError::auth("bad credentials")),
+        ));
+        assert!(!r.token_valid && !r.repo_writable);
+        assert_eq!(exit, ErrorCode::AuthFailed.exit_code());
+    }
+
+    #[test]
+    fn a_valid_token_without_push_is_permission_denied() {
+        // Everything answered; GitHub just says no. There is no error to report,
+        // so the exit code has to be synthesised.
+        let (r, exit) = summarize(probed(Ok("someone".into()), Ok(false)));
+        assert!(r.token_valid && !r.repo_writable && !r.ok);
+        assert_eq!(exit, ErrorCode::PermissionDenied.exit_code());
+        assert!(r.detail.is_none());
+    }
+
+    #[test]
+    fn an_unconfigured_target_outranks_a_missing_credential() {
+        // Neither probe ran. The report still carries `token_source: null` so an
+        // agent can read it, and the detail names the fix the user can act on.
+        let (r, exit) = summarize(Probed {
+            config_ok: false,
+            source: None,
+            user: None,
+            repo: None,
+            setup_err: Some(AppError::config_missing("no GitHub credential")),
+        });
+        assert!(!r.config_ok && !r.token_valid && !r.repo_writable && !r.ok);
+        assert_eq!(exit, ErrorCode::ConfigMissing.exit_code());
+        assert_eq!(r.token_source, None);
+        assert!(
+            r.detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("gitpic init"),
+            "{:?}",
+            r.detail
+        );
+    }
+
+    #[test]
+    fn a_missing_credential_with_a_configured_target_keeps_its_own_message() {
+        // config_ok is true, so the ConfigMissing override must not fire and
+        // overwrite the credential error's wording.
+        let (r, exit) = summarize(Probed {
+            config_ok: true,
+            source: None,
+            user: None,
+            repo: None,
+            setup_err: Some(AppError::config_missing("run `gh auth login`")),
+        });
+        assert!(r.config_ok && !r.token_valid);
+        assert_eq!(exit, ErrorCode::ConfigMissing.exit_code());
+        assert_eq!(r.detail.as_deref(), Some("run `gh auth login`"));
     }
 }
