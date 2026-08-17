@@ -68,6 +68,9 @@ impl AppError {
             message: message.into(),
         }
     }
+    pub fn general(msg: impl Into<String>) -> Self {
+        Self::new(ErrorCode::General, msg)
+    }
     pub fn config_missing(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::ConfigMissing, msg)
     }

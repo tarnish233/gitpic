@@ -23,9 +23,6 @@ $ gitpic list
   https://cdn.jsdelivr.net/gh/your-name/img@main/images/2026/07/a1b2c3d4-shot.png
 ```
 
-> 提示：录制动图可用 [asciinema](https://asciinema.org/)：`asciinema rec demo.cast`，
-> 跑几条上面的命令后 `Ctrl-D` 结束，再上传获取分享链接放到这里。
-
 ## 安装
 
 **Homebrew（推荐，自动加入 PATH 并安装命令行补全）**
@@ -54,19 +51,29 @@ cargo install --path .
 
 ## 初始化与设置
 
-需要一个 GitHub 细粒度访问令牌（对图床仓库有 `Contents: Read/Write` 权限）。
-
-交互式：
+凭据默认取自 [GitHub CLI](https://cli.github.com)，配置文件里**不保存任何密钥**：
 
 ```bash
-gitpic init
+gh auth login          # 一次即可，token 存在系统 keyring 里
+gitpic init            # token 一项留空
 ```
 
-或直接手写 `~/.config/gitpic/config.toml`（遵循 `$XDG_CONFIG_HOME`）：
+`gitpic` 按以下顺序取凭据，第一个可用的生效：
+
+| 顺序 | 来源 | 用途 |
+|---|---|---|
+| 1 | `GITPIC_TOKEN` 环境变量 | CI / 容器 / 没装 `gh` 的机器 |
+| 2 | 配置文件里的 `github.token` | 遗留方式，仍然可用 |
+| 3 | `gh auth token` | 默认，配置文件零密钥 |
+
+配置里写了 `token` 时它会压过 `gh` —— 显式配置优先于自动探测，升级 gitpic 不会静默换掉你上传用的账号。想改用 `gh`，删掉那一行即可；`gitpic doctor` 会显示当前实际用的是哪一个。
+
+> **权限范围提醒**：`gh` 那枚 OAuth token 的 scope 通常是 `gist, read:org, repo, workflow`，比"只往图床仓库写文件"所需的权限**更宽**。这个方案解决的是「密钥不落盘到会被同步的文件里」，并不缩小权限范围。若你要的是最小权限，请改用限定单仓库 `Contents: Read/Write` 的细粒度令牌，通过 `GITPIC_TOKEN` 传入。
+
+`~/.config/gitpic/config.toml`（遵循 `$XDG_CONFIG_HOME`）也可以手写 —— 注意其中没有 `token` 项，所以这个文件可以安全地纳入 dotfiles 同步：
 
 ```toml
 [github]
-token  = "github_pat_xxx"
 owner  = "your-name"
 repo   = "img"
 branch = "main"
@@ -81,10 +88,10 @@ max_width     = 0        # 0 = 不缩放
 quality       = 82       # 压缩时的 JPEG 质量（1-100）
 ```
 
-或用环境变量（不落盘，优先级高于配置文件）：
+或用环境变量（不落盘，优先级最高）：
 
 ```bash
-export GITPIC_TOKEN="github_pat_xxx"
+export GITPIC_TOKEN="github_pat_xxx"   # 细粒度令牌，Contents: Read/Write
 export GITPIC_REPO="your-name/img"     # owner/name
 export GITPIC_BRANCH="main"            # 可选
 export GITPIC_LINK="cdn"               # 可选：cdn | raw

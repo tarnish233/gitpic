@@ -1,30 +1,37 @@
 //! Configuration model + resolution.
 //!
 //! Priority (highest first): CLI flags > environment variables > config.toml
-//!   Env vars: GITPIC_TOKEN, GITPIC_OWNER, GITPIC_REPO ("owner/name" or "name"),
+//!   Env vars: GITPIC_OWNER, GITPIC_REPO ("owner/name" or "name"),
 //!             GITPIC_BRANCH, GITPIC_LINK (cdn|raw)
+//!
+//! The credential is deliberately absent from that list. `GITPIC_TOKEN` is read
+//! by `crate::auth`, which owns the whole credential chain — so no token is ever
+//! stored in this struct, which derives `Debug`.
 
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Every struct here carries `#[serde(default)]` at the container level, so a
+/// missing key falls back to that type's `Default` impl — which is therefore the
+/// single source of truth for defaults. Declaring them per-field as well would
+/// let a generated config and a parsed one drift apart silently.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct Config {
-    #[serde(default)]
     pub github: GithubConfig,
-    #[serde(default)]
     pub upload: UploadConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GithubConfig {
-    #[serde(default)]
+    /// Legacy inline token. Still honoured, and still takes priority over `gh`,
+    /// but omitted when empty so a generated config carries no secret at all.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub token: String,
-    #[serde(default)]
     pub owner: String,
-    #[serde(default)]
     pub repo: String,
-    #[serde(default = "default_branch")]
     pub branch: String,
 }
 
@@ -34,76 +41,58 @@ impl Default for GithubConfig {
             token: String::new(),
             owner: String::new(),
             repo: String::new(),
-            branch: default_branch(),
+            branch: "main".to_string(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UploadConfig {
-    #[serde(default = "default_path_template")]
     pub path_template: String,
-    #[serde(default = "default_link_kind")]
     pub link_kind: String,
-    #[serde(default = "default_true")]
     pub dedup: bool,
-    #[serde(default = "default_true")]
     pub auto_copy: bool,
-    #[serde(default)]
     pub compress: bool,
-    #[serde(default)]
     pub max_width: u32,
-    #[serde(default = "default_quality")]
     pub quality: u8,
 }
 
 impl Default for UploadConfig {
     fn default() -> Self {
         Self {
-            path_template: default_path_template(),
-            link_kind: default_link_kind(),
+            path_template: "images/{year}/{month}/{hash8}-{name}.{ext}".to_string(),
+            link_kind: "cdn".to_string(),
             dedup: true,
             auto_copy: true,
             compress: false,
             max_width: 0,
-            quality: default_quality(),
+            quality: 82,
         }
     }
 }
 
-fn default_branch() -> String {
-    "main".to_string()
-}
-fn default_path_template() -> String {
-    "images/{year}/{month}/{hash8}-{name}.{ext}".to_string()
-}
-fn default_link_kind() -> String {
-    "cdn".to_string()
-}
-fn default_true() -> bool {
-    true
-}
-fn default_quality() -> u8 {
-    82
+/// Read an env var, treating unset and blank alike.
+///
+/// An exported-but-empty variable must fall through to the config file rather
+/// than override it with whitespace: `GITPIC_OWNER=" "` used to pass
+/// `require_target()` and then produce a request against `/repos/%20/repo` — a
+/// confusing 404 instead of an actionable "missing target repo". `crate::auth`
+/// already applies this rule to `GITPIC_TOKEN`.
+fn env_var(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
 
 /// Resolve a base directory: prefer the given env var, else `$HOME/<fallback>`
 /// (on Windows, fall back to `%USERPROFILE%`). Used for the XDG config/data dirs
 /// and for agent home dirs such as `CLAUDE_CONFIG_DIR` / `CODEX_HOME`.
-pub(crate) fn base_dir(env_var: &str, fallback: &str) -> Result<PathBuf> {
-    if let Ok(v) = std::env::var(env_var) {
-        if !v.is_empty() {
-            return Ok(PathBuf::from(v));
-        }
+pub(crate) fn base_dir(key: &str, fallback: &str) -> Result<PathBuf> {
+    if let Some(v) = env_var(key) {
+        return Ok(PathBuf::from(v));
     }
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| {
-            AppError::new(
-                crate::error::ErrorCode::General,
-                "cannot resolve home directory",
-            )
-        })?;
+    let home = env_var("HOME")
+        .or_else(|| env_var("USERPROFILE"))
+        .ok_or_else(|| AppError::general("cannot resolve home directory"))?;
     let mut p = PathBuf::from(home);
     for part in fallback.split('/') {
         p.push(part);
@@ -175,33 +164,23 @@ impl Config {
 
     /// Apply environment variable overrides in-place.
     ///
+    /// `GITPIC_TOKEN` is deliberately not handled here — `crate::auth` is its
+    /// sole reader, which keeps the credential out of this struct entirely.
+    ///
     /// # Errors
     /// Returns a usage error if `GITPIC_REPO` is malformed.
     pub fn apply_env(&mut self) -> Result<()> {
-        if let Ok(v) = std::env::var("GITPIC_TOKEN") {
-            if !v.is_empty() {
-                self.github.token = v;
-            }
+        if let Some(v) = env_var("GITPIC_OWNER") {
+            self.github.owner = v;
         }
-        if let Ok(v) = std::env::var("GITPIC_OWNER") {
-            if !v.is_empty() {
-                self.github.owner = v;
-            }
+        if let Some(v) = env_var("GITPIC_BRANCH") {
+            self.github.branch = v;
         }
-        if let Ok(v) = std::env::var("GITPIC_BRANCH") {
-            if !v.is_empty() {
-                self.github.branch = v;
-            }
+        if let Some(v) = env_var("GITPIC_LINK") {
+            self.upload.link_kind = v;
         }
-        if let Ok(v) = std::env::var("GITPIC_LINK") {
-            if !v.is_empty() {
-                self.upload.link_kind = v;
-            }
-        }
-        if let Ok(v) = std::env::var("GITPIC_REPO") {
-            if !v.is_empty() {
-                self.set_repo_spec(&v)?;
-            }
+        if let Some(v) = env_var("GITPIC_REPO") {
+            self.set_repo_spec(&v)?;
         }
         Ok(())
     }
@@ -229,13 +208,13 @@ impl Config {
         Ok(())
     }
 
-    /// Ensure the minimum required fields are present.
-    pub fn require_ready(&self) -> Result<()> {
-        if self.github.token.is_empty() {
-            return Err(AppError::config_missing(
-                "missing GitHub token (set GITPIC_TOKEN or run `gitpic init`)",
-            ));
-        }
+    /// Ensure the upload target is configured.
+    ///
+    /// Named for what it checks: the *target*, not the credential. The
+    /// credential is resolved separately by `crate::auth`, which may have to run
+    /// `gh`, so its availability cannot be known synchronously. A caller needing
+    /// both must do both — see `commands::upload::run`.
+    pub fn require_target(&self) -> Result<()> {
         if self.github.owner.is_empty() || self.github.repo.is_empty() {
             return Err(AppError::config_missing(
                 "missing target repo (set GITPIC_REPO=owner/name or run `gitpic init`)",
@@ -287,14 +266,33 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_repo_spec_is_caught_by_require_ready() {
-        // "owner/" parses, but require_ready must still reject the empty repo.
+    fn incomplete_repo_spec_is_caught_by_require_target() {
+        // "owner/" parses, but require_target must still reject the empty repo.
         let mut cfg = Config::default();
-        cfg.github.token = "t".to_string();
         cfg.set_repo_spec("owner/").unwrap();
         assert_eq!(
-            cfg.require_ready().unwrap_err().code,
+            cfg.require_target().unwrap_err().code,
             ErrorCode::ConfigMissing
+        );
+    }
+
+    #[test]
+    fn an_empty_token_is_not_written_back_to_disk() {
+        // Both READMEs promise a generated config carries no `token` key, so a
+        // synced dotfiles repo never gains a secret-shaped placeholder.
+        let toml = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!toml.contains("token"), "{toml}");
+    }
+
+    #[test]
+    fn a_config_with_no_keys_parses_to_exactly_the_defaults() {
+        // Container-level `#[serde(default)]` makes the `Default` impls the only
+        // source of defaults. This pins parsing and generation together for
+        // every field, including any added later.
+        let parsed: Config = toml::from_str("").expect("an empty config is valid");
+        assert_eq!(
+            toml::to_string_pretty(&parsed).unwrap(),
+            toml::to_string_pretty(&Config::default()).unwrap()
         );
     }
 }

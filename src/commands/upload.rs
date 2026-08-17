@@ -46,10 +46,14 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
         ));
     }
 
-    cfg.require_ready()?;
+    cfg.require_target()?;
+
+    // Resolved here, after the inputs are in hand: a credential helper may take
+    // a moment, and there is no point paying for it to upload a broken image.
+    let cred = crate::auth::resolve(cfg)?;
 
     let gh = GitHub::new(
-        &cfg.github.token,
+        &cred.token,
         &cfg.github.owner,
         &cfg.github.repo,
         &cfg.github.branch,
