@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-17
+
+### `doctor` can tell a broken credential from a GitHub hiccup
+
+### Fixed
+- `gitpic doctor` no longer gates the repository check on the credential check.
+  The two answer different questions — `/user` asks "is this credential
+  accepted", `/repos/{owner}/{repo}` asks "can it write here" — and an upload
+  only ever calls the second kind. Because the repository probe ran only after
+  `/user` succeeded, a transient 503 on `/user` reported
+  `repo_writable: false` as well, which is indistinguishable from a bad
+  credential. Observed live: `gh api user` returned 503 while
+  `gh api repos/...` returned `push: true`, and `doctor` still reported
+  everything red. Both probes now run concurrently and report independently, so
+  that fault reads as `token_valid: false, repo_writable: true` with a
+  retryable `NETWORK` code.
+- When both probes fail, a definite answer now outranks `NETWORK`, which only
+  ever means "could not tell". A 503 on `/user` no longer masks a 401 from the
+  repository endpoint, so a genuinely bad credential is still reported as
+  `AUTH_FAILED` rather than as something to retry forever.
+- The agent skill told agents to send the user to `gh auth login` whenever
+  `token_valid` was false. It now says to read the two checks together and
+  retry instead when `repo_writable` is true and the code is `NETWORK` — the
+  case where `gh auth login` cannot help.
+
 ## [0.2.0] - 2026-08-17
 
 ### Credentials no longer need to live in the config file

@@ -4,6 +4,26 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.1] - 2026-08-17
+
+### `doctor` 现在能区分"凭据坏了"和"GitHub 在抖"
+
+### 修复
+- `gitpic doctor` 不再把仓库检查挂在凭据检查之后。这两者回答的是不同的问题 ——
+  `/user` 回答"这个凭据被接受吗"，`/repos/{owner}/{repo}` 回答"它能往这里写吗"，
+  而上传只会调用后一类。此前仓库探测只在 `/user` 成功后才执行，所以 `/user` 上
+  一个暂时性的 503 会连带报出 `repo_writable: false` —— 这与"凭据坏了"无法区分。
+  实测撞到过：`gh api user` 返回 503 的同时 `gh api repos/...` 返回
+  `push: true`，而 `doctor` 依然全红。现在两个探测并发执行、各自独立汇报，同样的
+  故障会呈现为 `token_valid: false, repo_writable: true`，配一个可重试的
+  `NETWORK` 码。
+- 两个探测都失败时，确定的答案现在优先于 `NETWORK`（后者只意味着"没探出来"）。
+  `/user` 的 503 不会再掩盖仓库端点返回的 401，所以真正坏掉的凭据仍然报
+  `AUTH_FAILED`，而不是让人无休止地重试。
+- agent 技能文档此前只要 `token_valid` 为 false 就让 agent 叫用户去跑
+  `gh auth login`。现在改为要求把两个检查合起来读：当 `repo_writable` 为 true
+  且错误码是 `NETWORK` 时应当重试 —— 那种情况下 `gh auth login` 解决不了任何问题。
+
 ## [0.2.0] - 2026-08-17
 
 ### 凭据不再需要存在配置文件里
