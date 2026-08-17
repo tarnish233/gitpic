@@ -114,6 +114,7 @@ gitpic list --json                                            # recent uploads (
 
 | exit | error.code          | agent action                                      |
 |------|---------------------|---------------------------------------------------|
+| 1    | GENERAL             | unexpected failure — report `error.message`        |
 | 2    | USAGE               | fix the invocation                                |
 | 3    | CONFIG_MISSING      | no credential or repo — `gh auth login` / configure |
 | 4    | AUTH_FAILED         | credential invalid/expired — `gh auth login`      |
@@ -122,8 +123,13 @@ gitpic list --json                                            # recent uploads (
 | 7    | PERMISSION_DENIED   | check token Contents permission/repo access       |
 | 8    | REMOTE_NOT_FOUND    | check GitHub repository, branch, and remote path  |
 | 9    | RATE_LIMITED        | wait or ask the user before retrying later        |
+| 10   | CONFIG_INVALID      | the config file is broken — tell the user to run `gitpic config edit`; `error.message` names the file and the offending line |
 
 Error JSON: `{ "ok": false, "error": { "code": "AUTH_FAILED", "message": "…" } }`
+
+Do not confuse 3 with 10: `CONFIG_MISSING` means nothing is configured yet, so
+`gitpic init` is the fix. `CONFIG_INVALID` means the file exists but has bad syntax
+or an unknown key — running `init` would not fix it, and retrying will loop.
 
 ## Partial success (multiple images)
 

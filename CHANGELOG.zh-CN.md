@@ -21,7 +21,8 @@
 - 凭据改为惰性解析，只在真要发请求前才取，因此不再存入 `Config`（后者 derive 了
   `Debug`，此前 `{:?}` 能把 token 打出来）。取不到凭据现在表现为
   `token_valid: false`，而不是 `config_ok: false`。
-- `gitpic init` 不再一上来就索要 token；该项留空即使用 `gh`。
+- `gitpic init` 的 token 提示可以留空以使用 `gh`，提示文案也这么写了。（它仍然是
+  第一个字段。）
 
 注意：`gh` 那枚 OAuth token 的 scope 通常是 `gist, read:org, repo, workflow`，
 比"只往一个图床仓库写文件"所需的权限**更宽**。本次改动解决的是「密钥不落盘到会被
@@ -37,8 +38,39 @@
   静默产出 CDN 链接。
 - `GITPIC_OWNER`、`GITPIC_BRANCH`、`GITPIC_LINK`、`GITPIC_REPO` 为空白时，现在
   回落到配置文件，而不是用空白覆盖它。此前 `GITPIC_OWNER=" "` 能通过配置检查，
-  然后向 `/repos/%20/repo` 发请求 —— 得到一个莫名的 404 而非可操作的错误。
+  然后向 `/repos/%20/repo` 发请求 —— 得到一个莫名的 404 而非可操作的错误。现在
+  还会去掉首尾空格：此前空白判断看的是 trim 后的值、存的却是没 trim 的原值，
+  所以 `GITPIC_OWNER=" me "` 会请求 `/repos/%20me%20/repo`。
+- `config.toml` 里写错的键或段现在会被拒绝，而不是静默忽略。此前 `dedupe = false`
+  或 `[uplaod]` 都能解析通过且什么都不做，`gitpic config get` 还会照常显示默认值，
+  仿佛这个文件从没被编辑过 —— 和上面两条是同一类问题，只是发生在唯一一个**本就
+  设计给人手改**的入口上（`gitpic config edit`）。报错会指出文件和出错的行；
+  `gitpic config path` 与 `gitpic config edit` 在这种状态下仍然可用，用来修文件。
+- 分支名进入 URL 前会做百分号编码。git 的 ref 名允许 `&`、`#`、`+`、`%` 和 `=`，
+  而每一个都会静默改变请求的含义：`#` 让后面变成 fragment，`&` 另起一个参数，
+  `+` 被解码成空格。于是查询打到了**错误的 ref**，看起来就像"这里还没上传过" ——
+  既丢掉了去重，又让上传时不带 sha，覆盖已有文件时报 409。生成的 Markdown 链接
+  也受同样影响。
 - `gitpic list` 现在把去重的上传标记为 `(deduped)`，与上传输出里已用的措辞一致。
+
+### 新增
+- 退出码 `10` / `CONFIG_INVALID`：配置文件存在但读不了或解析不了。此前它是
+  exit `1` / `GENERAL` —— 那个同时兜着剪贴板失败和编码失败的兜底码，谁都没法据此
+  处理。`3` / `CONFIG_MISSING` 仍然表示"还没配"（跑 `gitpic init`），`10` 表示
+  "配了但文件坏了"（跑 `gitpic config edit`）。
+- 退出码 `1` / `GENERAL` 现在写进了两个 README 和 agent 技能文档。它一直是可达的
+  —— 剪贴板初始化、PNG 编码、拉起 `$EDITOR` —— 但那些表格都从 `2` 开始，照表写的
+  脚本会把它错判。
+
+### 文档
+- 两个 README 都写着环境变量"优先级最高"。实际上命令行参数会覆盖它们 ——
+  `GITPIC_LINK=raw gitpic a.png --link cdn` 出的是 cdn 链接 —— 这也正是
+  `src/config.rs` 一直写着的顺序。
+- 补上 `GITPIC_OWNER` 的说明（它早已实现，但两个 README 都没提）。
+- 英文 README 的安装章节只给了 `cargo install --path .`，而它在克隆之外根本用不了，
+  后面的章节却又引用了它从未介绍过的 Homebrew 和 release 压缩包。现在与中文版一致。
+- 演示输出里有一行 `📋 已复制到剪贴板`，而程序从不打印它（复制成功是静默的，只有
+  失败才报），并且把 `gitpic init` 缩略成了只剩最后一行。
 
 ### 移除
 - 删除未使用的 `anyhow` 与 `thiserror` 依赖，以及不可达的 `image/webp` 和未使用的

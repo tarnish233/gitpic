@@ -12,10 +12,17 @@ agents. Single static binary, no runtime required.
 
 ```console
 $ gitpic init
-✓ saved config to ~/.config/gitpic/config.toml
+gitpic init — configure your GitHub image host
+
+GitHub token (leave blank to use `gh auth token`):
+Target repo (owner/name): your-name/img
+Branch [main]:
+Link kind (cdn|raw) [cdn]:
+
+✓ saved config to /Users/you/.config/gitpic/config.toml
 
 $ gitpic ~/Desktop/shot.png
-✓ uploaded shot  📋 copied to clipboard
+✓ uploaded shot
 ![shot](https://cdn.jsdelivr.net/gh/your-name/img@main/images/2026/07/a1b2c3d4-shot.png)
 
 $ gitpic list
@@ -25,10 +32,31 @@ $ gitpic list
 
 ## Install
 
+**Homebrew (macOS/Linux, recommended — adds it to `PATH` and installs shell completions)**
+
 ```bash
-cargo install --path .
-# or after building:
-cargo build --release && cp target/release/gitpic ~/.local/bin/
+brew install tarnish233/tap/gitpic
+```
+
+**Prebuilt binary**
+
+Download the archive for your platform from the
+[releases page](https://github.com/tarnish233/gitpic-cli/releases). On macOS,
+clear the quarantine flag on first run:
+
+```bash
+tar -xzf gitpic-aarch64-apple-darwin.tar.gz     # Apple Silicon
+xattr -d com.apple.quarantine ./gitpic 2>/dev/null
+chmod +x ./gitpic && mv ./gitpic ~/.local/bin/  # ensure ~/.local/bin is on PATH
+```
+
+> Intel Mac: `x86_64-apple-darwin`. Linux: `x86_64-unknown-linux-gnu`. Windows is
+> a `.zip` containing `gitpic.exe`.
+
+**From source** (needs Rust)
+
+```bash
+cargo install --git https://github.com/tarnish233/gitpic-cli
 ```
 
 ## Setup
@@ -80,14 +108,21 @@ max_width     = 0        # 0 = keep original
 quality       = 82       # JPEG quality when compressing (1-100)
 ```
 
-Or via environment variables (nothing written to disk, highest priority):
+Or via environment variables (nothing written to disk; they override the config
+file, but CLI flags override them):
 
 ```bash
 export GITPIC_TOKEN="github_pat_xxx"   # fine-grained token, Contents: Read/Write
-export GITPIC_REPO="your-name/img"     # owner/name
+export GITPIC_REPO="your-name/img"     # owner/name (or just name, keeping the owner)
+export GITPIC_OWNER="your-name"        # optional: override only the owner
 export GITPIC_BRANCH="main"            # optional (default: main)
 export GITPIC_LINK="cdn"               # optional: cdn (jsDelivr) | raw
 ```
+
+Precedence is **CLI flags > environment variables > config file** — so
+`GITPIC_LINK=raw gitpic a.png --link cdn` produces a cdn link. A variable that is
+blank is ignored (falling through to the config file), and surrounding whitespace
+is trimmed.
 
 Upload history is stored at `~/.local/share/gitpic/history.jsonl`
 (honors `$XDG_DATA_HOME`).
@@ -125,7 +160,15 @@ gitpic config set upload.link_kind raw
 gitpic config set upload.compress true
 gitpic config set upload.max_width 1600
 gitpic config set upload.quality 82
+gitpic config edit                       # open the file in $EDITOR
 ```
+
+`path_template` placeholders: `{year} {month} {day} {hash} {hash8} {name} {ext}`
+
+Key names in the config file are validated strictly: a misspelled key or section
+(`dedupe`, `[uplaod]`) is a `CONFIG_INVALID` error pointing at the offending line
+rather than a value that is silently ignored. `gitpic config path` and
+`gitpic config edit` keep working in that state so you can fix the file.
 
 ## Shell completion
 
@@ -143,13 +186,15 @@ gitpic completion fish > ~/.config/fish/completions/gitpic.fish
 Prebuilt binaries for macOS (Apple Silicon + Intel), Linux, and Windows are
 attached to each [GitHub Release](../../releases) (built by CI on `v*` tags).
 
-`path_template` placeholders: `{year} {month} {day} {hash} {hash8} {name} {ext}`
-
 ## Exit codes
 
-`0` ok · `2` usage · `3` config missing · `4` auth failed · `5` network ·
-`6` local file not found · `7` permission denied · `8` remote resource not found ·
-`9` rate limited
+`0` ok · `1` other error · `2` usage · `3` config missing · `4` auth failed ·
+`5` network · `6` local file not found · `7` permission denied ·
+`8` remote resource not found · `9` rate limited · `10` config file unusable
+
+`3` means "nothing configured yet" (run `gitpic init`); `10` means "configured,
+but the file is broken" (run `gitpic config edit`). They need different fixes, so
+they get different codes.
 
 ## Agent integration
 
