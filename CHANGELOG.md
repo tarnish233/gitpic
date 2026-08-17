@@ -43,11 +43,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The newest record is now kept unconditionally. Reachable in 0.2.0–0.2.2 with a
   pathological `--name`, whose control characters JSON-escape to six times their
   length.
+- A closed reader no longer crashes the process. `gitpic list | head`,
+  `gitpic completion zsh | true`, `gitpic skill print | head` — any consumer that
+  stops reading — made `println!` panic, and with `panic = "abort"` that is SIGABRT:
+  exit 134, outside the documented 1-10 contract, with a raw Rust panic on stderr.
+  A closed pipe is not an error, so the process now exits 0, which is what `head`
+  and friends expect. Every stdout write in the crate goes through one guarded
+  place, `completion` included — it wrote through `clap_complete`'s own `.expect()`,
+  where this crate could not intercept it.
+- Concurrent uploads no longer corrupt the history. `writeln!` emits the record and
+  its newline as two separate `write` calls; `O_APPEND` makes each atomic but not
+  the pair, so a second process appending at the same time landed its record
+  between them. Merged lines were then skipped by the reader without a word —
+  records silently missing from `gitpic list`. It is one `write_all` now, and the
+  trim's temp file carries the pid so two trims cannot write the same path.
+- Config *values* are validated wherever they arrive, not just through
+  `config set`. `deny_unknown_fields` guarded key names; a hand-edited
+  `link_kind = "raw2"` or `GITPIC_LINK=raw2` still loaded and the lenient reader
+  then served cdn links forever. `github.owner` had no validation at all, so
+  `config set github.owner "  me  "` produced `/repos/%20%20me%20%20/repo` — the
+  exact failure env-var trimming was added to prevent, on the entry point it did
+  not cover — and `..` silently removed a path segment. An empty `github.branch`
+  and an out-of-range `upload.quality` in the file are likewise refused instead of
+  reaching a 422 or a silent clamp. One `validate` now runs for the file, the
+  environment and `config set` alike.
+- `gitpic --stdin` names the upload from the bytes instead of always calling it
+  `image.png`. `cat photo.jpg | gitpic --stdin` published JPEG data at a `.png`
+  path, which GitHub and jsDelivr then served as `image/png`. This is the same
+  defect fixed for `paste --name shot.jpg` in 0.2.0, on the source that fix missed:
+  the extension comes from the content and `--name` supplies only the stem.
+  Unidentifiable bytes with no `--name` are a usage error rather than a wrong
+  `.png`.
+- `--json` is honoured by every subcommand that produces output. `config path`
+  printed a bare path, `config get` printed TOML, and `skill print` printed raw
+  Markdown, so an agent following the skill's "always pass `--json`" instruction got
+  a parse error. `init` is interactive and now rejects `--json` outright rather than
+  interleaving prompts with an envelope.
+- `--quiet` prints only machine-usable lines. `gitpic list --quiet` rendered the
+  full human listing, and on an empty history printed "no uploads recorded yet" —
+  prose a script had to filter out. It is one URL per line now, matching what the
+  upload path already did.
 
 ### Added
 - `gitpic doctor` reports `branch_protected`. Protection does not mean this
   account cannot write, so it does not make a report unhealthy, but it is the
   usual explanation when an upload is refused after every preflight check passed.
+- `tests/json_contract.rs`, which spawns the built binary. The `--json` and
+  broken-pipe contracts live in the wiring between `dispatch` and each renderer,
+  which no unit test can reach — a source-scanning check written first passed while
+  the bugs were still present, so it was replaced with this.
 
 ## [0.2.2] - 2026-08-17
 

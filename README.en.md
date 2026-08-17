@@ -135,7 +135,7 @@ Upload history is stored at `~/.local/share/gitpic/history.jsonl`
 gitpic screenshot.png            # upload, print markdown, copy to clipboard
 gitpic a.png b.png               # batch upload
 gitpic paste                     # upload the image on your clipboard
-cat img.png | gitpic --stdin --name shot.png
+cat img.png | gitpic --stdin          # extension comes from the bytes
 gitpic doctor                    # verify token + repo access
 gitpic list                      # show recent uploads (local history)
 gitpic completion zsh            # print shell completion script
@@ -166,6 +166,10 @@ gitpic config edit                       # open the file in $EDITOR
 ```
 
 `path_template` placeholders: `{year} {month} {day} {hash} {hash8} {name} {ext}`
+
+Every subcommand honours `--json` and answers with an `ok`-bearing envelope, failures
+included; the one exception is the interactive `gitpic init`, which rejects it.
+`--quiet` prints only machine-usable lines.
 
 Key names in the config file are validated strictly: a misspelled key or section
 (`dedupe`, `[uplaod]`) is a `CONFIG_INVALID` error pointing at the offending line

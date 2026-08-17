@@ -7,7 +7,7 @@ use crate::error::{AppError, Result};
 pub fn run() -> Result<()> {
     let mut cfg = Config::load()?;
 
-    println!("gitpic init — configure your GitHub image host\n");
+    crate::output::line("gitpic init — configure your GitHub image host\n");
 
     // Deliberately no token prompt. `prompt` reads through a plain
     // `stdin.read_line()`, so a typed token would echo to the terminal and stay
@@ -18,11 +18,11 @@ pub fn run() -> Result<()> {
     // out of any file. An existing `github.token` in the config still works and
     // still wins over `gh`, so nobody is cut off by this.
     if cfg.github.token.is_empty() {
-        println!("Credentials come from `gh auth token`, or from GITPIC_TOKEN.");
-        println!("Run `gh auth login` once if you have not already.\n");
+        crate::output::line("Credentials come from `gh auth token`, or from GITPIC_TOKEN.");
+        crate::output::line("Run `gh auth login` once if you have not already.\n");
     } else {
-        println!("Using the `github.token` already in your config file.");
-        println!("Delete that line to switch to `gh auth token` instead.\n");
+        crate::output::line("Using the `github.token` already in your config file.");
+        crate::output::line("Delete that line to switch to `gh auth token` instead.\n");
     }
 
     let repo_spec = {
@@ -66,6 +66,6 @@ pub fn run() -> Result<()> {
     };
 
     let path = cfg.save()?;
-    println!("\n\u{2713} saved config to {}", path.display());
+    crate::output::line(&format!("\n\u{2713} saved config to {}", path.display()));
     Ok(())
 }

@@ -241,8 +241,34 @@ fn read_stdin(cli: &Cli) -> Result<InputImage> {
     if bytes.is_empty() {
         return Err(AppError::usage("stdin was empty"));
     }
-    let name = cli.name.clone().unwrap_or_else(|| "image.png".to_string());
-    Ok(InputImage { name, bytes })
+    Ok(InputImage {
+        name: stdin_name(cli.name.as_deref(), &bytes)?,
+        bytes,
+    })
+}
+
+/// Name a stdin capture from what the bytes actually are.
+///
+/// Everything used to be called `image.png`, so `cat photo.jpg | gitpic --stdin`
+/// published JPEG bytes at a `.png` path and GitHub and jsDelivr then served them
+/// as `image/png`. That is the same defect 9ee5320 fixed for `paste --name
+/// shot.jpg`; the clipboard path got the fix and this one did not.
+///
+/// The extension therefore comes from the content, never from `--name` — only the
+/// stem is taken from there. When the format cannot be identified and no `--name`
+/// was given there is nothing to guess from, so it is a usage error rather than a
+/// wrong `.png`; with a `--name`, the user has asserted an extension and it stands.
+fn stdin_name(explicit: Option<&str>, bytes: &[u8]) -> Result<String> {
+    let sniffed = image::guess_format(bytes)
+        .ok()
+        .and_then(|f| f.extensions_str().first().copied());
+    match (sniffed, explicit) {
+        (Some(ext), _) => Ok(content_name(explicit, ext)),
+        (None, Some(name)) => Ok(name.to_string()),
+        (None, None) => Err(AppError::usage(
+            "cannot tell what kind of image this is from the bytes; pass --name to set the filename",
+        )),
+    }
 }
 
 fn read_clipboard(cli: &Cli) -> Result<InputImage> {
@@ -266,17 +292,22 @@ fn read_clipboard(cli: &Cli) -> Result<InputImage> {
         .map_err(|e| AppError::general(format!("encode png: {e}")))?;
 
     Ok(InputImage {
-        name: clipboard_name(cli.name.as_deref()),
+        // Always PNG, because that is what was just encoded above.
+        name: content_name(cli.name.as_deref(), "png"),
         bytes: png,
     })
 }
 
-/// Name a clipboard capture.
+/// Name a byte stream by what it actually contains.
 ///
-/// The bytes are always PNG (encoded above), so the extension has to say so.
-/// Honouring a user-supplied `--name shot.jpg` would publish PNG bytes at a
-/// `.jpg` path, which GitHub and jsDelivr then serve as `image/jpeg`.
-fn clipboard_name(explicit: Option<&str>) -> String {
+/// The extension always comes from `ext` — the format of the bytes in hand — never
+/// from `--name`. Honouring a user-supplied `--name shot.jpg` for PNG data would
+/// publish it at a `.jpg` path, which GitHub and jsDelivr then serve as
+/// `image/jpeg`. Only the stem is taken from `--name`.
+///
+/// Shared by the clipboard path (always PNG, since it re-encodes) and stdin (the
+/// sniffed format), because they had the same bug and only one of them was fixed.
+fn content_name(explicit: Option<&str>, ext: &str) -> String {
     let stem = explicit
         .map(Path::new)
         .and_then(|p| p.file_stem())
@@ -285,7 +316,7 @@ fn clipboard_name(explicit: Option<&str>) -> String {
         // reject those rather than emitting `.png.png`.
         .filter(|s| !s.is_empty() && !s.starts_with('.'))
         .unwrap_or("clipboard");
-    format!("{stem}.png")
+    format!("{stem}.{ext}")
 }
 
 fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
@@ -298,28 +329,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clipboard_name_defaults_when_unnamed() {
-        assert_eq!(clipboard_name(None), "clipboard.png");
+    fn content_name_defaults_when_unnamed() {
+        assert_eq!(content_name(None, "png"), "clipboard.png");
     }
 
     #[test]
-    fn clipboard_name_keeps_an_explicit_stem() {
-        assert_eq!(clipboard_name(Some("shot")), "shot.png");
-        assert_eq!(clipboard_name(Some("shot.png")), "shot.png");
+    fn content_name_keeps_an_explicit_stem() {
+        assert_eq!(content_name(Some("shot"), "png"), "shot.png");
+        assert_eq!(content_name(Some("shot.png"), "png"), "shot.png");
     }
 
     #[test]
-    fn clipboard_name_rewrites_a_mismatched_extension() {
+    fn content_name_rewrites_a_mismatched_extension() {
         // Regression: the bytes are always PNG, so honouring ".jpg" published
         // PNG data at a .jpg path, which GitHub serves as image/jpeg.
-        assert_eq!(clipboard_name(Some("shot.jpg")), "shot.png");
-        assert_eq!(clipboard_name(Some("shot.webp")), "shot.png");
+        assert_eq!(content_name(Some("shot.jpg"), "png"), "shot.png");
+        assert_eq!(content_name(Some("shot.webp"), "png"), "shot.png");
     }
 
     #[test]
-    fn clipboard_name_falls_back_on_an_unusable_name() {
-        assert_eq!(clipboard_name(Some("")), "clipboard.png");
-        assert_eq!(clipboard_name(Some(".png")), "clipboard.png");
+    fn content_name_falls_back_on_an_unusable_name() {
+        assert_eq!(content_name(Some(""), "png"), "clipboard.png");
+        assert_eq!(content_name(Some(".png"), "png"), "clipboard.png");
     }
 
     #[test]
@@ -343,5 +374,61 @@ mod tests {
             classify(Some(AppError::network("boom")), 0),
             Report::Total(_)
         ));
+    }
+
+    /// Real magic bytes, so `image::guess_format` is exercised rather than mocked.
+    fn png_bytes() -> Vec<u8> {
+        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+        v.extend_from_slice(&[0, 0, 0, 13]);
+        v.extend_from_slice(b"IHDR");
+        v
+    }
+    fn jpeg_bytes() -> Vec<u8> {
+        vec![
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0,
+        ]
+    }
+    fn gif_bytes() -> Vec<u8> {
+        b"GIF89a\x01\x00\x01\x00".to_vec()
+    }
+
+    #[test]
+    fn stdin_is_named_by_what_the_bytes_are() {
+        // Regression: every stdin upload was called `image.png`, so
+        // `cat photo.jpg | gitpic --stdin` published JPEG bytes at a `.png` path and
+        // GitHub served them as image/png. This is the same defect 9ee5320 fixed for
+        // `paste --name shot.jpg`, on the source it missed.
+        assert_eq!(stdin_name(None, &jpeg_bytes()).unwrap(), "clipboard.jpg");
+        assert_eq!(stdin_name(None, &png_bytes()).unwrap(), "clipboard.png");
+        assert_eq!(stdin_name(None, &gif_bytes()).unwrap(), "clipboard.gif");
+    }
+
+    #[test]
+    fn stdin_takes_the_stem_from_name_but_never_the_extension() {
+        // The user names the file; the bytes decide the type.
+        assert_eq!(
+            stdin_name(Some("photo.png"), &jpeg_bytes()).unwrap(),
+            "photo.jpg",
+            "a wrong extension must be corrected, not honoured"
+        );
+        assert_eq!(stdin_name(Some("shot"), &png_bytes()).unwrap(), "shot.png");
+        assert_eq!(
+            stdin_name(Some("dir/shot.gif"), &png_bytes()).unwrap(),
+            "shot.png"
+        );
+    }
+
+    #[test]
+    fn unidentifiable_stdin_bytes_ask_for_a_name_instead_of_guessing() {
+        // Calling it `.png` would be a lie about the content; the previous
+        // behaviour did exactly that.
+        let err = stdin_name(None, b"this is not an image").expect_err("must be rejected");
+        assert_eq!(err.code, crate::error::ErrorCode::Usage);
+        assert!(err.message.contains("--name"), "{}", err.message);
+        // With a name, the user has asserted the extension and it stands.
+        assert_eq!(
+            stdin_name(Some("blob.bin"), b"this is not an image").unwrap(),
+            "blob.bin"
+        );
     }
 }

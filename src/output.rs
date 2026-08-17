@@ -2,6 +2,7 @@
 
 use owo_colors::{OwoColorize, Stream};
 use serde::Serialize;
+use std::io;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -77,13 +78,59 @@ pub struct PartialEnvelope<'a> {
     pub error: ErrorBody,
 }
 
+/// Write a line to stdout, treating a vanished reader as a normal end.
+///
+/// `println!` panics when the write fails, and with `panic = "abort"` in the
+/// release profile that is SIGABRT — exit 134, outside the documented 1-10
+/// contract, with a raw Rust panic on stderr. `gitpic list | head`,
+/// `gitpic completion zsh | true`, `gitpic *.png -q | head -1`: any reader that
+/// closes early produced that. A closed pipe is not an error — the reader got what
+/// it asked for — so the process exits 0, which is what `head` and friends expect.
+///
+/// Other write errors (a full disk, a closed descriptor) still abort loudly rather
+/// than being silently dropped: those *are* failures, and pretending output
+/// happened would be worse than a panic.
+pub fn line(text: &str) {
+    use std::io::Write;
+    let stdout = io::stdout();
+    let mut lock = stdout.lock();
+    match writeln!(lock, "{text}") {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(0),
+        Err(e) => panic!("failed printing to stdout: {e}"),
+    }
+}
+
+/// Write without a trailing newline. Same broken-pipe rule as [`line`].
+pub fn raw(text: &str) {
+    use std::io::Write;
+    let stdout = io::stdout();
+    let mut lock = stdout.lock();
+    match write!(lock, "{text}") {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(0),
+        Err(e) => panic!("failed printing to stdout: {e}"),
+    }
+}
+
+/// Flush stdout, treating a vanished reader as a normal end.
+///
+/// Needed because a locked-and-dropped `Stdout` flushes on drop and swallows the
+/// result, so a broken pipe on the very last buffered write would otherwise be
+/// reported by the runtime as a panic at exit.
+pub fn finish() {
+    use std::io::Write;
+    match io::stdout().flush() {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(0),
+        Err(_) => {}
+    }
+}
+
 /// Print a value as pretty JSON on stdout. Every `--json` envelope in the crate
 /// goes through here, so the shape and the formatting stay in one place.
 pub fn print_json<T: Serialize>(value: &T) {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(value).unwrap_or_default()
-    );
+    line(&serde_json::to_string_pretty(value).unwrap_or_default());
 }
 
 /// Print successful upload results according to the mode.
@@ -92,7 +139,7 @@ pub fn print_results(mode: Mode, results: &[ItemResult]) {
         Mode::Json => print_json(&SuccessEnvelope { ok: true, results }),
         Mode::Quiet => {
             for r in results {
-                println!("{}", r.output);
+                line(&r.output);
             }
         }
         Mode::Human => {
@@ -217,5 +264,64 @@ mod tests {
         assert!(json.contains(r#""ok":false"#));
         assert!(json.contains(r#""name":"one""#));
         assert!(json.contains(r#""code":"RATE_LIMITED""#));
+    }
+
+    /// Every stdout write in the crate has to go through this module, or a
+    /// `println!` somewhere else reintroduces the abort that `line`/`raw` exist to
+    /// prevent: `gitpic list | head` panicked on the broken pipe, and with
+    /// `panic = "abort"` that is exit 134 — outside the documented 1-10 contract.
+    ///
+    /// Checked by reading the sources rather than by spawning pipes, so it also
+    /// covers paths a test would struggle to reach (the interactive prompt, the
+    /// `skill install` picker) and fails at the moment someone adds a new one.
+    #[test]
+    fn no_module_writes_to_stdout_outside_this_one() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("src is readable") {
+                let path = entry.expect("readable entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                // This module is where the guarded writes live.
+                if path.file_name().and_then(|f| f.to_str()) == Some("output.rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("readable source");
+                for (i, l) in text.lines().enumerate() {
+                    let code = l.trim_start();
+                    if code.starts_with("//") {
+                        continue;
+                    }
+                    // `eprintln!` is fine: stderr is not what a reader closes, and
+                    // diagnostics must never take the process down either way. It
+                    // has to be removed before scanning, because "eprintln!"
+                    // contains "println!" as a substring.
+                    let code = code.replace("eprintln!", "").replace("eprint!", "");
+                    let hit = ["println!", "print!(", "std::io::stdout()", "io::stdout()"]
+                        .iter()
+                        .any(|pat| code.contains(pat));
+                    if hit {
+                        offenders.push(format!(
+                            "{}:{}: {}",
+                            path.file_name().unwrap().to_string_lossy(),
+                            i + 1,
+                            l.trim_start()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these write to stdout without the broken-pipe guard; use output::line / output::raw:\n{}",
+            offenders.join("\n")
+        );
     }
 }

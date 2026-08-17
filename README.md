@@ -118,7 +118,7 @@ export GITPIC_LINK="cdn"               # 可选：cdn | raw
 gitpic screenshot.png            # 上传 → 打印 Markdown → 复制到剪贴板
 gitpic a.png b.png               # 批量上传
 gitpic paste                     # 上传剪贴板里的图片（截图后直接用）
-cat img.png | gitpic --stdin --name shot.png
+cat img.png | gitpic --stdin          # 扩展名按字节内容判定
 gitpic doctor                    # 检查访问令牌与仓库权限
 gitpic list                      # 查看最近上传（本地历史）
 gitpic completion zsh            # 打印命令行补全脚本
@@ -149,6 +149,9 @@ gitpic config edit                       # 用 $EDITOR 打开配置文件
 ```
 
 `path_template` 占位符：`{year} {month} {day} {hash} {hash8} {name} {ext}`
+
+每个子命令都支持 `--json`（失败也返回带 `ok` 的信封），唯一例外是交互式的
+`gitpic init`，它会直接拒绝 `--json`。`--quiet` 只输出机器可用的行。
 
 配置文件里的键名是严格校验的：写错的键或段（比如 `dedupe`、`[uplaod]`）会报
 `CONFIG_INVALID` 并指出出错的行，而不是被静默忽略。这种情况下 `gitpic config path`

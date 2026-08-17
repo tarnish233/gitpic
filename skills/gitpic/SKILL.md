@@ -94,10 +94,14 @@ gitpic "/abs/a.png" "/abs/b.jpg" --json --no-copy
 ## 3. Upload raw bytes (no file path)
 
 ```bash
-cat image.png | gitpic --stdin --name shot.png --json --no-copy
+cat image.png | gitpic --stdin --json --no-copy
 ```
 
-Use this when you only have image bytes (e.g. a screenshot buffer).
+Use this when you only have image bytes (e.g. a screenshot buffer). The extension
+is derived from the bytes themselves, so JPEG data is never published at a `.png`
+path — `--name` only supplies the filename stem, and its extension is ignored.
+Pass `--name` when the bytes are a format gitpic cannot recognise; without it that
+is a `USAGE` error rather than a guess.
 
 ## 4. Upload an image explicitly requested from the clipboard
 
@@ -168,8 +172,13 @@ instead — `results` is never present and empty.
 
 ## Constraints
 
-- Always pass `--json` and `--no-copy` for programmatic calls.
+- Always pass `--json` and `--no-copy` for programmatic calls. Every subcommand
+  honours `--json` and answers with an `ok`-bearing envelope on stdout, failures
+  included — the one exception is `gitpic init`, which is interactive and rejects
+  `--json` outright. Use `GITPIC_REPO` or `gitpic config set` instead of `init`.
 - Only access the clipboard when the user explicitly requests it.
 - Use absolute file paths.
 - Never print the GitHub token in the conversation.
-- Prefer `--link cdn` (default) unless the user asks for raw GitHub links.
+- Prefer `--link cdn` (default) unless the user asks for raw GitHub links. A
+  freshly uploaded file can take a moment to appear on jsDelivr; `raw_url` in the
+  same result is served by GitHub immediately.

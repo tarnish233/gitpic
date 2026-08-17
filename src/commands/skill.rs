@@ -135,12 +135,32 @@ fn write_skill(path: &Path) -> Result<()> {
 pub fn run(action: &SkillAction, mode: Mode) -> Result<()> {
     match action {
         SkillAction::Print => {
-            print!("{SKILL_MD}");
+            if mode.is_json() {
+                // SKILL.md is a document, so JSON mode carries it as a field rather
+                // than dumping raw Markdown onto a stream the caller is parsing.
+                crate::output::print_json(&PrintEnvelope {
+                    ok: true,
+                    name: SKILL_NAME,
+                    version: env!("CARGO_PKG_VERSION"),
+                    content: SKILL_MD,
+                });
+            } else {
+                crate::output::raw(SKILL_MD);
+                crate::output::finish();
+            }
             Ok(())
         }
         SkillAction::Path => run_path(mode),
         SkillAction::Install { agent, dir, yes } => run_install(*agent, dir.as_deref(), *yes, mode),
     }
+}
+
+#[derive(Serialize)]
+struct PrintEnvelope<'a> {
+    ok: bool,
+    name: &'a str,
+    version: &'a str,
+    content: &'a str,
 }
 
 #[derive(Serialize)]
@@ -180,7 +200,7 @@ fn run_path(mode: Mode) -> Result<()> {
         return Ok(());
     }
     for t in &targets {
-        println!("{}", t.path.display());
+        crate::output::line(&t.path.display().to_string());
     }
     Ok(())
 }
@@ -239,12 +259,12 @@ fn run_install(agent: Option<AgentKind>, dir: Option<&Path>, yes: bool, mode: Mo
         } else {
             format!("  ({})", item.agents.join(", "))
         };
-        println!(
+        crate::output::line(&format!(
             "\u{2713} {} {SKILL_NAME} skill v{} \u{2192} {}{suffix}",
             item.action,
             env!("CARGO_PKG_VERSION"),
             item.path,
-        );
+        ));
     }
     Ok(())
 }
@@ -297,25 +317,25 @@ fn choose_targets(
 }
 
 fn select_interactively(detected: Vec<Target>) -> Result<Vec<Target>> {
-    println!(
+    crate::output::line(&format!(
         "gitpic skill v{} \u{2014} detected agent skill directories:\n",
         env!("CARGO_PKG_VERSION")
-    );
+    ));
     let width = detected
         .iter()
         .map(|t| t.agent_list().len())
         .max()
         .unwrap_or(0);
     for (i, t) in detected.iter().enumerate() {
-        println!(
+        crate::output::line(&format!(
             "  [{}] {:width$}  {}  ({})",
             i + 1,
             t.agent_list(),
             t.path.display(),
             classify(&t.path).label(),
-        );
+        ));
     }
-    println!();
+    crate::output::line("");
 
     let choices = if detected.len() == 1 {
         "1".to_string()
@@ -325,13 +345,13 @@ fn select_interactively(detected: Vec<Target>) -> Result<Vec<Target>> {
     // EOF (Ctrl-D) must abort rather than fall through to the "all" default —
     // this writes files, so a closed stdin is not consent.
     let Some(reply) = prompt_opt(&format!("install to? [{choices} / a=all / q=quit]"), "a")? else {
-        println!("\naborted");
+        crate::output::line("\naborted");
         return Ok(Vec::new());
     };
 
     match parse_selection(&reply, detected.len())? {
         Selection::Quit => {
-            println!("aborted");
+            crate::output::line("aborted");
             Ok(Vec::new())
         }
         Selection::All => Ok(detected),
