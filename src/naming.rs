@@ -52,6 +52,23 @@ fn sanitize_ext(ext: &str) -> Option<String> {
     }
 }
 
+/// Reject a remote path that would escape the repository or confuse the API.
+///
+/// The path template is user-supplied from three directions — `config set`, the
+/// `--path` flag, and a hand-edited `config.toml` — so the check belongs on the
+/// *rendered* result, which is the one thing all three funnel into. A `..`
+/// segment or a leading `/` produces a request GitHub answers with a puzzling
+/// 404 rather than a usable error, and `{name}` cannot introduce either (the
+/// slug keeps only alphanumerics, `-` and `_`, mapping `.` to `-`), so only the
+/// template's own literal text can.
+pub fn is_safe_remote_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path
+            .split('/')
+            .any(|seg| seg == ".." || seg.is_empty() || seg == ".")
+}
+
 /// Render the path template.
 ///
 /// Supported placeholders:
@@ -194,5 +211,35 @@ mod tests {
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
         assert_eq!(h.len(), 64);
+    }
+
+    #[test]
+    fn a_path_that_escapes_the_repo_is_rejected() {
+        // Regression: `config set upload.path_template ../../../etc/{name}.{ext}`
+        // was accepted and produced a request GitHub answers with a bare 404.
+        assert!(!is_safe_remote_path("../../../etc/x.png"));
+        assert!(!is_safe_remote_path("images/../../x.png"));
+        assert!(!is_safe_remote_path("/absolute/x.png"));
+        assert!(!is_safe_remote_path(""));
+        // Empty and `.` segments are equally unusable as a Contents API path.
+        assert!(!is_safe_remote_path("images//x.png"));
+        assert!(!is_safe_remote_path("images/./x.png"));
+        assert!(!is_safe_remote_path("images/x.png/"));
+    }
+
+    #[test]
+    fn ordinary_paths_including_the_default_template_are_accepted() {
+        assert!(is_safe_remote_path("x.png"));
+        assert!(is_safe_remote_path("images/2026/08/abc12345-shot.png"));
+        // The shipped default, rendered.
+        let rendered = render_path(
+            "images/{year}/{month}/{hash8}-{name}.{ext}",
+            "shot.png",
+            &"a".repeat(64),
+        );
+        assert!(is_safe_remote_path(&rendered), "{rendered}");
+        // A dot inside a segment is fine — only a whole `..` segment is not.
+        assert!(is_safe_remote_path("images/a..b/x.png"));
+        assert!(is_safe_remote_path("\u{56fe}/x.png"));
     }
 }

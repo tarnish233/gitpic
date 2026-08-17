@@ -58,8 +58,12 @@ pub struct Cli {
     pub link: Option<LinkKind>,
 
     /// Output format: md | html | url
-    #[arg(short, long, value_enum, default_value_t = OutputFormat::Md, global = true)]
-    pub format: OutputFormat,
+    ///
+    /// `Option` rather than a defaulted value so that "the user asked for md" is
+    /// distinguishable from "nobody said anything" — which is what lets
+    /// `upload_only_flags_set` report it. The default lives in `effective_format`.
+    #[arg(short, long, value_enum, global = true)]
+    pub format: Option<OutputFormat>,
 
     /// Do not copy the result to the clipboard
     #[arg(long, global = true)]
@@ -91,6 +95,67 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+impl Cli {
+    /// The output format to actually use.
+    pub fn effective_format(&self) -> OutputFormat {
+        self.format.unwrap_or(OutputFormat::Md)
+    }
+
+    /// Which upload-only options this invocation actually set.
+    ///
+    /// Every upload option is `global = true`, which is what lets `gitpic paste
+    /// --no-copy` work (see `upload_options_work_after_subcommand`). The side
+    /// effect was that `gitpic list --compress --max-width 99` also parsed, exited
+    /// 0, and ignored every one of them — the same "accepted, then silently
+    /// dropped" shape this project has been closing elsewhere. `main::dispatch`
+    /// turns a non-empty result into a usage error on subcommands that upload
+    /// nothing.
+    ///
+    /// Only options that can be distinguished from their default appear here; that
+    /// is why `format` is an `Option`. `--json`, `--quiet` and `--verbose` are
+    /// deliberately absent: they mean something everywhere.
+    pub fn upload_only_flags_set(&self) -> Vec<&'static str> {
+        let mut set = Vec::new();
+        if self.stdin {
+            set.push("--stdin");
+        }
+        if self.name.is_some() {
+            set.push("--name");
+        }
+        if self.link.is_some() {
+            set.push("--link");
+        }
+        if self.format.is_some() {
+            set.push("--format");
+        }
+        if self.no_copy {
+            set.push("--no-copy");
+        }
+        if self.compress {
+            set.push("--compress");
+        }
+        if self.no_compress {
+            set.push("--no-compress");
+        }
+        if self.max_width.is_some() {
+            set.push("--max-width");
+        }
+        if self.quality.is_some() {
+            set.push("--quality");
+        }
+        if self.path.is_some() {
+            set.push("--path");
+        }
+        set
+    }
+
+    /// Whether `--repo` was given. Meaningful for the upload path and `doctor`,
+    /// which both resolve a target; ignored by every other subcommand.
+    pub fn repo_override_set(&self) -> bool {
+        self.repo.is_some()
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -193,7 +258,7 @@ mod tests {
         assert!(cli.no_copy);
         assert_eq!(cli.link, Some(LinkKind::Raw));
         assert_eq!(cli.name.as_deref(), Some("shot.png"));
-        assert_eq!(cli.format, OutputFormat::Url);
+        assert_eq!(cli.format, Some(OutputFormat::Url));
     }
 
     #[test]
@@ -304,5 +369,84 @@ mod tests {
                 .unwrap_or_else(|e| panic!("quality {q} should parse: {e}"));
             assert_eq!(cli.quality, Some(q.parse().unwrap()));
         }
+    }
+
+    #[test]
+    fn the_format_default_survives_becoming_an_option() {
+        // `format` became `Option` so it could be told apart from its default;
+        // md must still be what an unadorned upload produces.
+        let cli = Cli::try_parse_from(["gitpic", "a.png"]).unwrap();
+        assert_eq!(cli.format, None);
+        assert_eq!(cli.effective_format(), OutputFormat::Md);
+        let explicit = Cli::try_parse_from(["gitpic", "a.png", "-f", "url"]).unwrap();
+        assert_eq!(explicit.effective_format(), OutputFormat::Url);
+    }
+
+    #[test]
+    fn an_untouched_invocation_reports_no_upload_only_flags() {
+        // The flags that mean something everywhere must never be reported.
+        let cli = Cli::try_parse_from(["gitpic", "list", "--json", "-q", "-vv"]).unwrap();
+        assert!(cli.upload_only_flags_set().is_empty());
+        assert!(!cli.repo_override_set());
+    }
+
+    #[test]
+    fn every_upload_only_flag_is_detected() {
+        // Regression: these all parsed on `list`/`completion`/`config`, exited 0,
+        // and were silently ignored. Each must be reportable so dispatch can
+        // refuse it. Listed one per line so a newly added upload option that
+        // nobody wired up shows here as a missing entry.
+        for (args, want) in [
+            (vec!["--stdin"], "--stdin"),
+            (vec!["--name", "x.png"], "--name"),
+            (vec!["--link", "raw"], "--link"),
+            (vec!["-f", "url"], "--format"),
+            (vec!["--no-copy"], "--no-copy"),
+            (vec!["--compress"], "--compress"),
+            (vec!["--no-compress"], "--no-compress"),
+            (vec!["--max-width", "99"], "--max-width"),
+            (vec!["--quality", "50"], "--quality"),
+            (vec!["-p", "t/{name}.{ext}"], "--path"),
+        ] {
+            let mut argv = vec!["gitpic", "list"];
+            argv.extend(args.iter().copied());
+            let cli = Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            assert_eq!(cli.upload_only_flags_set(), vec![want], "for {argv:?}");
+        }
+    }
+
+    #[test]
+    fn the_upload_path_still_accepts_all_of_them() {
+        // The rejection must not leak into the paths that do use these options.
+        let cli = Cli::try_parse_from([
+            "gitpic",
+            "paste",
+            "--no-copy",
+            "--link",
+            "raw",
+            "--name",
+            "s.png",
+            "-f",
+            "url",
+            "--compress",
+            "--max-width",
+            "800",
+            "--quality",
+            "90",
+        ])
+        .expect("paste must still accept every upload option");
+        assert_eq!(
+            cli.upload_only_flags_set(),
+            vec![
+                "--name",
+                "--link",
+                "--format",
+                "--no-copy",
+                "--compress",
+                "--max-width",
+                "--quality"
+            ]
+        );
+        assert!(matches!(cli.command, Some(Command::Paste)));
     }
 }

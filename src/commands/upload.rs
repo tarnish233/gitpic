@@ -101,6 +101,14 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
         }
         let hash = naming::sha256_hex(&bytes);
         let remote_path = naming::render_path(&template, &name, &hash);
+        // Checked on the rendered result, the single point every template source
+        // funnels into — `config set`, `--path`, and a hand-edited config.toml.
+        if !naming::is_safe_remote_path(&remote_path) {
+            return Err(AppError::usage(format!(
+                "path template produced an unusable remote path {remote_path:?}: \
+                 it must be repo-relative with no empty or `..` segments"
+            )));
+        }
         let message = format!("gitpic: upload {remote_path}");
 
         let outcome = match gh.put_file(&remote_path, &bytes, &message, dedup).await {
@@ -129,7 +137,7 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
             &outcome,
             &name,
             kind,
-            cli.format,
+            cli.effective_format(),
             &cfg.github.owner,
             &cfg.github.repo,
             &cfg.github.branch,

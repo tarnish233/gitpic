@@ -4,6 +4,46 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- A path template that escapes the repository is rejected instead of producing a
+  bare 404. `upload.path_template = "../../../etc/{name}.{ext}"` was accepted and
+  then sent to the Contents API, which answers with an unexplained "Not Found".
+  The check runs on the *rendered* path — the one point all three template sources
+  funnel into (`config set`, `--path`, a hand-edited file) — and `config set` also
+  renders a sample so a bad template fails when it is set.
+- Upload-only options are refused by the subcommands that ignore them.
+  `gitpic list --compress --max-width 99` parsed, exited 0, and quietly did none
+  of it; the same held for `completion`, `config`, `skill` and `init`. They stay
+  `global = true` so `gitpic paste --no-copy` keeps working, but `dispatch` now
+  reports the ones the chosen subcommand cannot act on. `--json`, `--quiet` and
+  `--verbose` mean something everywhere and are unaffected; `--repo` is still
+  accepted by `doctor`, which resolves a target.
+- `history.jsonl` no longer grows without bound. Past 2 MB it is trimmed to the
+  newest half, written to a temp file and renamed so an interrupted trim cannot
+  leave a partial history. The trim runs only when a cheap metadata check says the
+  file is over the ceiling, so an ordinary append does not read the file at all.
+  **This drops the oldest records**, which contain links to old uploads.
+
+### CI
+- The release workflow no longer has four jobs racing to create the same Release.
+  Each build now uploads an artifact and a single `publish` job downloads all of
+  them, verifies four archives and four sidecars are present, and makes one
+  `action-gh-release` call. The Release can no longer appear half-populated while
+  other platforms are still building, and the four build jobs run with a read-only
+  token — only `publish` can write.
+- The Windows checksum sidecar matches `shasum -a 256` byte for byte (lowercase
+  hash, two spaces, filename, LF, no BOM). `(Get-FileHash).Hash | Out-File` wrote
+  an uppercase hash with no filename, which `shasum -c` cannot read at all. Every
+  sidecar is now verified in CI, on the platform that produced it and again before
+  publishing — the Windows format is not something a maintainer on macOS can check
+  locally.
+- `check_manifests.py` requires both changelogs to carry a section for the version
+  in `Cargo.toml`. `release.yml` only ever read the Chinese one, so a release could
+  ship with `CHANGELOG.md` left at `## [Unreleased]` and CI would stay green, even
+  though AGENTS.md requires the two to stay aligned.
+
 ## [0.2.1] - 2026-08-17
 
 ### `doctor` can tell a broken credential from a GitHub hiccup
