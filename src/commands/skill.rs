@@ -81,7 +81,7 @@ fn resolve(skills_dir: &Path) -> PathBuf {
 /// `None` for `--agent all`, which means "every detected target" rather than one
 /// named directory. Returning `Option` instead of panicking discharges the
 /// hand-sync between `AgentKind` and `AGENTS` — and this binary is built with
-/// `panic = "abort"`, where a panic exits 134, outside the documented 1-9 codes.
+/// `panic = "abort"`, where a panic exits 134, outside the documented 1-10 codes.
 fn agent_entry(kind: AgentKind) -> Option<(&'static str, &'static str, &'static str)> {
     let want = match kind {
         AgentKind::Claude => "claude",

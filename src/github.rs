@@ -114,6 +114,21 @@ impl GitHub {
             .header("X-GitHub-Api-Version", "2022-11-28")
     }
 
+    /// `<api>/repos/<owner>/<repo>`, with every interpolated value encoded.
+    ///
+    /// Encoding is what stops a value from changing the URL's *structure*.
+    /// GitHub constrains owner and repo to `[A-Za-z0-9._-]`, so for those this is
+    /// an identity and the point is uniformity: one place where the rule holds,
+    /// rather than three format strings to keep in step.
+    fn repo_base(&self) -> String {
+        format!(
+            "{}/repos/{}/{}",
+            self.api,
+            encode_path(&self.owner),
+            encode_path(&self.repo)
+        )
+    }
+
     fn map_status(status: reqwest::StatusCode, body: &str) -> AppError {
         match status.as_u16() {
             401 => AppError::auth(format!("GitHub authentication failed ({status}): {body}")),
@@ -158,13 +173,19 @@ impl GitHub {
 
     /// GET the existing file sha, if present.
     async fn get_existing(&self, path: &str) -> Result<Option<ContentsGet>> {
+        // The branch is encoded like every other interpolated value. Git allows
+        // `&`, `#`, `+`, `%` and `=` in a ref name, and each one silently changes
+        // what this URL means: `#` makes the rest a fragment, `&` starts another
+        // parameter, `+` decodes to a space. The result was a GET against the
+        // wrong ref — read as "nothing uploaded there yet", which loses dedup and
+        // then omits the sha from the PUT below, so overwriting fails with a 409.
+        // `/` is deliberately left intact: it is legal in a query value and is
+        // exactly what GitHub expects for `feat/x`.
         let url = format!(
-            "{}/repos/{}/{}/contents/{}?ref={}",
-            self.api,
-            self.owner,
-            self.repo,
+            "{}/contents/{}?ref={}",
+            self.repo_base(),
             encode_path(path),
-            self.branch
+            encode_path(&self.branch)
         );
         match self
             .send_json::<ContentsGet>(self.req(reqwest::Method::GET, url), "contents")
@@ -210,13 +231,7 @@ impl GitHub {
             sha: existing.as_ref().map(|e| e.sha.as_str()),
         };
 
-        let url = format!(
-            "{}/repos/{}/{}/contents/{}",
-            self.api,
-            self.owner,
-            self.repo,
-            encode_path(path)
-        );
+        let url = format!("{}/contents/{}", self.repo_base(), encode_path(path));
         let parsed: PutResponse = self
             .send_json(
                 self.req(reqwest::Method::PUT, url).json(&body),
@@ -249,14 +264,8 @@ impl GitHub {
 
     /// Fetch repo info (permissions).
     pub async fn repo_info(&self) -> Result<RepoInfo> {
-        self.send_json(
-            self.req(
-                reqwest::Method::GET,
-                format!("{}/repos/{}/{}", self.api, self.owner, self.repo),
-            ),
-            "repo",
-        )
-        .await
+        self.send_json(self.req(reqwest::Method::GET, self.repo_base()), "repo")
+            .await
     }
 }
 
@@ -429,5 +438,44 @@ mod tests {
 
         assert_eq!(err.code, ErrorCode::AuthFailed);
         let _ = handle.join();
+    }
+
+    #[tokio::test]
+    async fn a_branch_name_cannot_change_the_query_it_sits_in() {
+        // Regression: the branch went into `?ref=` unencoded. Git allows `&`, `#`,
+        // `+` and `%` in a ref name, and each rewrites the URL: `#` makes the rest
+        // a fragment, `&` starts another parameter, `+` decodes to a space. The
+        // GET then read the WRONG ref, which looks like "nothing uploaded here
+        // yet" — losing dedup and omitting the sha from the PUT.
+        let (addr, handle) = stub(vec![
+            http("404 Not Found", r#"{"message":"Not Found"}"#),
+            http("201 Created", r#"{"content":{"sha":"newsha"}}"#),
+        ]);
+        let gh = GitHub::with_api(&addr, "tok", "o", "r", "feat&x#y+z").unwrap();
+
+        gh.put_file("a.png", b"bytes", "msg", true).await.unwrap();
+
+        let reqs = handle.join().unwrap();
+        let get = &reqs[0];
+        assert!(
+            get.contains("?ref=feat%26x%23y%2Bz"),
+            "branch must be encoded in the query: {get}"
+        );
+        // The literal separators must be gone, or the server sees a different ref.
+        assert!(!get.contains("ref=feat&"), "raw & survived: {get}");
+        assert!(!get.contains('#'), "raw # survived: {get}");
+    }
+
+    #[tokio::test]
+    async fn a_branch_with_a_slash_still_reaches_the_ref_intact() {
+        // `/` is legal in a query value and is what GitHub expects for `feat/x`,
+        // so encoding must not touch it.
+        let (addr, handle) = stub(vec![http("200 OK", r#"{"sha":"s","size":1}"#)]);
+        let gh = GitHub::with_api(&addr, "tok", "o", "r", "feat/x").unwrap();
+
+        let _ = gh.put_file("a.png", b"x", "msg", false).await;
+
+        let reqs = handle.join().unwrap();
+        assert!(reqs[0].contains("?ref=feat/x"), "GET: {}", reqs[0]);
     }
 }

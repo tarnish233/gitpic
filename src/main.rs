@@ -55,7 +55,7 @@ async fn main() -> ExitCode {
 async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
     // One match, so adding a subcommand fails to compile here — on the arm you
     // actually have to write — rather than at a catch-all that would compile and
-    // then panic (an abort exits 134, outside the documented 1-9 contract).
+    // then panic (an abort exits 134, outside the documented 1-10 contract).
     match &cli.command {
         // Config-free: these must work even when config.toml is missing or
         // unparseable, so they never touch `resolve_config`.
