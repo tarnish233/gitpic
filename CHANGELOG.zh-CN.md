@@ -12,11 +12,10 @@
   而回答它又会把这枚 token 明文写进磁盘，恰恰是凭据链改造要消除的那件事。现在 `init`
   改为引导 `gh auth login` 与 `GITPIC_TOKEN`。配置里已有的 `github.token` 继续可用、
   且仍优先于 `gh`，没有人被断掉。
-- 配置文件改为由 `open` 直接以 `0600` 创建，而不是先写再 chmod。`fs::write` 用的是
-  `0666 & !umask`，所以在常见的 `umask 022` 下，这个**可能存着遗留 token** 的文件在
-  写入与 chmod 之间是世界可读的；若进程恰好在此期间死掉，它就一直是。权限错误也不再
-  被丢弃 —— 此前 `let _ =` 会让 chmod 失败时留下一个可读的 token 而一声不响。写入还
-  改为经临时文件 + `sync_all` + rename，所在目录收紧为 `0700`。
+- 配置所在目录收紧为 `0700`。`config set` 与 `init` 生成的配置可能存着遗留 token，
+  `create_dir_all` 默认建出的 `0755` 目录会让同机用户**列出**文件名（不只是读到内容）；
+  现在每次保存后立即收紧。写入路径本身（同目录临时文件、`0600` 起步、权限错误不吞）
+  已在 0.2.3 收口。
 
 ### 修复
 - `gitpic doctor` 不再仅凭仓库级 push 权限就报 `repo_writable: true`。仓库级 `push`
@@ -68,6 +67,22 @@
 - `tests/json_contract.rs`：会启动构建出的二进制。`--json` 与断管契约存在于
   `dispatch` 和各渲染器之间的接线里，任何单元测试都够不到 —— 我先写的一个源码扫描式
   检查在 bug 仍然存在时就通过了，所以换成了这个。
+
+## [0.2.3] - 2026-08-18
+
+### 配置写入与发布契约收口
+
+### 修复
+- 配置文件现在先写入同目录临时文件、完整刷新后再替换目标文件，避免进程中断留下
+  半份 TOML；Unix 上从创建临时文件起就强制使用 `0600`，权限设置失败不再被忽略。
+- 损坏配置的诊断不再回显 TOML 源行，避免语法错误恰好位于 `github.token` 时把凭据
+  打到终端；未知字段名和 `gitpic config edit` 修复提示仍会保留。
+- Markdown 输出会转义 URL 目标中的括号和反斜杠，带这些字符的合法地址不再提前
+  终止图片链接。
+
+### CI
+- Release 说明只接受与 tag 完全匹配的 changelog 标题，并拒绝只有空白的章节；
+  `0.2.3-extra` 之类的标题不会再被误当作 `0.2.3`。
 
 ## [0.2.2] - 2026-08-17
 
@@ -346,8 +361,12 @@
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.2.2...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.2.3...HEAD
 [0.3.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.3.0
+[0.2.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.3
+[0.2.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.2
+[0.2.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.1
+[0.2.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.0
 [0.1.6]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.6
 [0.1.5]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.5
 [0.1.4]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.4

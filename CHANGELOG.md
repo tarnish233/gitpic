@@ -14,14 +14,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   credential chain was reworked to avoid. `init` now points at `gh auth login` and
   `GITPIC_TOKEN`. An existing `github.token` keeps working and still wins over
   `gh`, so nobody is cut off.
-- The config file is created `0600` by `open` rather than written and then
-  chmod'd. `fs::write` uses `0666 & !umask`, so under a typical `umask 022` the
-  file — which may still hold a legacy token — was world-readable for the window
-  between the write and the chmod, and stayed that way if the process died in
-  between. The permission error is no longer discarded either: swallowing it left
-  a readable token behind with nothing said. The write also goes through a temp
-  file, `sync_all`, and a rename, and the containing directory is tightened to
-  `0700`.
+- The directory holding the config is tightened to `0700` on every save. `config
+  set` and `init` write a file that may hold a legacy token, and `create_dir_all`
+  builds `0755` directories — enough for another local user to *list* the config,
+  not just read it. The write path itself (same-directory temp file, `0600` from
+  creation, permission errors surfaced) was already hardened in 0.2.3.
 
 ### Fixed
 - `gitpic doctor` no longer reports `repo_writable: true` on repository push
@@ -92,6 +89,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   broken-pipe contracts live in the wiring between `dispatch` and each renderer,
   which no unit test can reach — a source-scanning check written first passed while
   the bugs were still present, so it was replaced with this.
+
+## [0.2.3] - 2026-08-18
+
+### Config persistence and release contracts tightened
+
+### Fixed
+- Config is written to a same-directory temporary file, fully flushed, and only
+  then replaces the destination, preventing an interrupted process from leaving
+  half a TOML document. On Unix, mode `0600` is enforced from temporary-file
+  creation onward and permission errors are no longer ignored.
+- Invalid-config diagnostics no longer echo the TOML source line, so a syntax
+  error on `github.token` cannot print the credential. The unknown field name and
+  the `gitpic config edit` recovery hint remain available.
+- Markdown output escapes parentheses and backslashes in URL destinations, so a
+  valid address containing those characters cannot terminate the image link.
+
+### CI
+- Release notes only accept a changelog heading that exactly matches the tag and
+  reject whitespace-only sections. A heading such as `0.2.3-extra` can no longer
+  be mistaken for `0.2.3`.
 
 ## [0.2.2] - 2026-08-17
 
@@ -426,8 +443,12 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.2.3...HEAD
 [0.3.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.3.0
+[0.2.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.3
+[0.2.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.2
+[0.2.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.1
+[0.2.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.0
 [0.1.6]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.6
 [0.1.5]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.5
 [0.1.4]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.4
