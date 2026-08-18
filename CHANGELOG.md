@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-08-18
+
 ### Config persistence and release contracts tightened
 
 ### Fixed
@@ -357,7 +359,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.3
 [0.2.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.2
 [0.2.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.1
 [0.2.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.0
