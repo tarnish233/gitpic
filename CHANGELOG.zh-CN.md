@@ -4,7 +4,7 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.3.0] - 2026-08-18
 
 ### 安全
 - `gitpic init` 不再询问 token。`prompt` 走的是裸 `stdin.read_line()`，输入的 token
@@ -346,7 +346,8 @@
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.1.6...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.2.2...HEAD
+[0.3.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.3.0
 [0.1.6]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.6
 [0.1.5]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.5
 [0.1.4]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.4
