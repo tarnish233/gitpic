@@ -6,6 +6,8 @@
 
 ## [未发布]
 
+## [0.2.3] - 2026-08-18
+
 ### 配置写入与发布契约收口
 
 ### 修复
@@ -297,7 +299,8 @@
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.2.2...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.3
 [0.2.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.2
 [0.2.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.1
 [0.2.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.0
