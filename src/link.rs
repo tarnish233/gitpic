@@ -62,6 +62,18 @@ fn escape_md_alt(alt: &str) -> String {
     out
 }
 
+/// Escape delimiters inside a CommonMark inline-link destination.
+fn escape_md_url(url: &str) -> String {
+    let mut out = String::with_capacity(url.len());
+    for c in url.chars() {
+        if matches!(c, '\\' | '(' | ')') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Escape text for use inside a double-quoted HTML attribute.
 fn escape_html_attr(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -79,7 +91,7 @@ fn escape_html_attr(s: &str) -> String {
 }
 
 pub fn markdown(alt: &str, url: &str) -> String {
-    format!("![{}]({})", escape_md_alt(alt), url)
+    format!("![{}]({})", escape_md_alt(alt), escape_md_url(url))
 }
 
 pub fn html(alt: &str, url: &str) -> String {
@@ -175,6 +187,14 @@ mod tests {
     fn markdown_alt_newlines_become_spaces() {
         assert_eq!(markdown("a\nb", "u"), "![a b](u)");
         assert_eq!(markdown("a\r\nb", "u"), "![a  b](u)");
+    }
+
+    #[test]
+    fn markdown_url_parentheses_and_backslashes_are_escaped() {
+        assert_eq!(
+            markdown("image", "https://example.test/a)b(1)\\x.png"),
+            "![image](https://example.test/a\\)b\\(1\\)\\\\x.png)"
+        );
     }
 
     #[test]

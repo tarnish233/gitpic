@@ -10,7 +10,12 @@
 
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Every struct here carries `#[serde(default)]` at the container level, so a
 /// missing key falls back to that type's `Default` impl — which is therefore the
@@ -147,29 +152,64 @@ impl Config {
     /// the same seam as `history::parse_recent` and `auth::resolve_with`.
     fn parse(text: &str, shown: &str) -> Result<Self> {
         toml::from_str(text).map_err(|e| {
+            // `toml::de::Error`'s Display output includes the offending source
+            // line. That line can contain `github.token`, so keep the useful
+            // parser message without echoing any config contents.
             AppError::config_invalid(format!(
                 "cannot use config file {shown}: {}\nfix it with `gitpic config edit`",
-                e.to_string().trim_end()
+                e.message()
             ))
         })
     }
 
-    /// Persist config to disk (creating parent dirs).
+    /// Persist config to disk (creating parent dirs) with a same-directory
+    /// replace, so an interrupted write cannot leave a partial config behind.
     pub fn save(&self) -> Result<PathBuf> {
-        let path = Self::path()?;
+        self.save_to(&Self::path()?)
+    }
+
+    fn save_to(&self, path: &Path) -> Result<PathBuf> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| AppError::general(format!("mkdir: {e}")))?;
+            fs::create_dir_all(parent).map_err(|e| AppError::general(format!("mkdir: {e}")))?;
         }
         let text = toml::to_string_pretty(self)
             .map_err(|e| AppError::general(format!("serialize: {e}")))?;
-        std::fs::write(&path, text).map_err(|e| AppError::general(format!("write config: {e}")))?;
+
+        let temp_path = temporary_path(path);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
-        Ok(path)
+
+        let write_result = (|| -> std::io::Result<()> {
+            let mut file = options.open(&temp_path)?;
+            file.write_all(text.as_bytes())?;
+            file.flush()?;
+            file.sync_all()?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            }
+            drop(file);
+
+            #[cfg(windows)]
+            if path.exists() {
+                fs::remove_file(path)?;
+            }
+            fs::rename(&temp_path, path)
+        })();
+
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&temp_path);
+            return Err(AppError::general(format!("write config: {error}")));
+        }
+
+        Ok(path.to_path_buf())
     }
 
     /// Apply environment variable overrides in-place.
@@ -253,6 +293,18 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn temporary_path(path: &Path) -> PathBuf {
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml");
+    path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{sequence}",
+        std::process::id()
+    ))
 }
 
 #[cfg(test)]
@@ -359,6 +411,59 @@ mod tests {
         // has one specific remedy and therefore its own code.
         let err = Config::parse("[github", "/tmp/config.toml").expect_err("must be rejected");
         assert_eq!(err.code, ErrorCode::ConfigInvalid);
+    }
+
+    #[test]
+    fn invalid_config_diagnostic_does_not_echo_a_token() {
+        let secret = "ghp_DO_NOT_PRINT_THIS_SECRET";
+        let text = format!("[github]\ntoken = \"{secret}\n");
+        let err = Config::parse(&text, "/tmp/config.toml").expect_err("must be rejected");
+        assert_eq!(err.code, ErrorCode::ConfigInvalid);
+        assert!(!err.message.contains(secret), "{}", err.message);
+        assert!(err.message.contains("config edit"), "{}", err.message);
+    }
+
+    #[test]
+    fn save_replaces_an_existing_config_without_leaving_a_temp_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "gitpic-config-save-{}-{}",
+            std::process::id(),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, "old partial contents").unwrap();
+
+        let mut config = Config::default();
+        config.github.owner = "owner".to_string();
+        config.github.repo = "repo".to_string();
+        config.save_to(&path).unwrap();
+
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("owner = \"owner\""), "{saved}");
+        assert!(saved.contains("repo = \"repo\""), "{saved}");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "temp file survived");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_config_is_private_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "gitpic-config-mode-{}-{}",
+            std::process::id(),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = dir.join("config.toml");
+        Config::default().save_to(&path).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

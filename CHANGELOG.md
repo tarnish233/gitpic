@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Config persistence and release contracts tightened
+
+### Fixed
+- Config is written to a same-directory temporary file, fully flushed, and only
+  then replaces the destination, preventing an interrupted process from leaving
+  half a TOML document. On Unix, mode `0600` is enforced from temporary-file
+  creation onward and permission errors are no longer ignored.
+- Invalid-config diagnostics no longer echo the TOML source line, so a syntax
+  error on `github.token` cannot print the credential. The unknown field name and
+  the `gitpic config edit` recovery hint remain available.
+- Markdown output escapes parentheses and backslashes in URL destinations, so a
+  valid address containing those characters cannot terminate the image link.
+
+### CI
+- Release notes only accept a changelog heading that exactly matches the tag and
+  reject whitespace-only sections. A heading such as `0.2.3-extra` can no longer
+  be mistaken for `0.2.3`.
+
 ## [0.2.2] - 2026-08-17
 
 ### Input that cannot take effect is now refused
@@ -337,7 +357,10 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.2
+[0.2.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.1
+[0.2.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.0
 [0.1.6]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.6
 [0.1.5]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.5
 [0.1.4]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.4
