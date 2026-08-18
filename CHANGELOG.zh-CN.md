@@ -4,6 +4,22 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 配置写入与发布契约收口
+
+### 修复
+- 配置文件现在先写入同目录临时文件、完整刷新后再替换目标文件，避免进程中断留下
+  半份 TOML；Unix 上从创建临时文件起就强制使用 `0600`，权限设置失败不再被忽略。
+- 损坏配置的诊断不再回显 TOML 源行，避免语法错误恰好位于 `github.token` 时把凭据
+  打到终端；未知字段名和 `gitpic config edit` 修复提示仍会保留。
+- Markdown 输出会转义 URL 目标中的括号和反斜杠，带这些字符的合法地址不再提前
+  终止图片链接。
+
+### CI
+- Release 说明只接受与 tag 完全匹配的 changelog 标题，并拒绝只有空白的章节；
+  `0.2.3-extra` 之类的标题不会再被误当作 `0.2.3`。
+
 ## [0.2.2] - 2026-08-17
 
 ### 拒绝那些原本会被静默忽略的输入
@@ -281,7 +297,10 @@
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.1.6...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.2
+[0.2.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.1
+[0.2.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.0
 [0.1.6]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.6
 [0.1.5]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.5
 [0.1.4]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.4
