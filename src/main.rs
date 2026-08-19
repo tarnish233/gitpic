@@ -113,7 +113,7 @@ async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
 /// take effect is an error, not a no-op.
 fn reject_ignored_options(cli: &Cli, repo_allowed: bool) -> Result<()> {
     let mut ignored = cli.upload_only_flags_set();
-    if !repo_allowed && cli.repo_override_set() {
+    if !repo_allowed && cli.repo.is_some() {
         ignored.push("--repo");
     }
     if ignored.is_empty() {

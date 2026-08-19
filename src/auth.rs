@@ -1,92 +1,25 @@
-//! Resolve the GitHub credential.
-//!
-//! Priority (highest first): `GITPIC_TOKEN` > `config.github.token` > `gh auth token`.
-//!
-//! Explicit configuration deliberately beats auto-detection: if `gh` won, then
-//! upgrading gitpic would silently switch which account uploads for anyone who
-//! still has a token in their config — and `gh` may be logged into a different
-//! one. Migrating is therefore an explicit act: delete the `token` line.
-//!
-//! The resolved token is never stored in `Config`. It is fetched only when a
-//! request is about to be made, so `gitpic config get` cannot make a keychain
-//! prompt appear, and `{:?}` on a `Config` cannot print a secret.
+//! Read the GitHub credential from the GitHub CLI.
 
-use crate::config::Config;
 use crate::error::{AppError, Result};
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Where the token came from. Reported by `doctor` so a migration away from a
-/// plaintext token can actually be verified.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Source {
-    Env,
-    Config,
-    Gh,
-}
-
-impl Source {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Source::Env => "env",
-            Source::Config => "config",
-            Source::Gh => "gh",
-        }
-    }
-}
-
-pub struct Credential {
-    pub token: String,
-    pub source: Source,
-}
-
-/// Hand-written so that `{:?}` on a `Credential` cannot leak the token. This is
-/// the hazard that `Config`'s derived `Debug` still has for its inline token.
-impl std::fmt::Debug for Credential {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Credential")
-            .field("token", &"<redacted>")
-            .field("source", &self.source)
-            .finish()
-    }
-}
-
 /// How long `gh` gets to produce a token before it is killed. Generous enough
 /// for a cold start, short enough that an agent-invoked upload cannot hang.
 const GH_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub fn resolve(cfg: &Config) -> Result<Credential> {
-    resolve_with(
-        std::env::var("GITPIC_TOKEN").ok(),
-        &cfg.github.token,
-        gh_token,
-    )
+pub fn token() -> Result<String> {
+    resolve_with(gh_token)
 }
 
-/// Ordering logic, split from the process spawn so it can be tested without
-/// running `gh` and without mutating the environment (unsound across parallel
-/// test threads). Mirrors the `GitHub::new` / `with_api` seam in `github.rs`.
-fn resolve_with(
-    env: Option<String>,
-    inline: &str,
-    gh: impl FnOnce() -> Result<Option<String>>,
-) -> Result<Credential> {
-    let (source, raw) = if let Some(v) = env.filter(|v| !v.trim().is_empty()) {
-        (Source::Env, v)
-    } else if !inline.trim().is_empty() {
-        (Source::Config, inline.to_string())
-    } else if let Some(v) = gh()? {
-        (Source::Gh, v)
-    } else {
-        return Err(AppError::config_missing(
-            "no GitHub credential: run `gh auth login`, or set GITPIC_TOKEN",
-        ));
-    };
-    Ok(Credential {
-        token: sanitize(&raw)?,
-        source,
-    })
+/// Split from the process spawn so credential handling can be tested without
+/// depending on the developer's `gh` session.
+fn resolve_with(gh: impl FnOnce() -> Result<Option<String>>) -> Result<String> {
+    let raw = gh()?.ok_or_else(|| {
+        AppError::config_missing("no GitHub credential: install GitHub CLI and run `gh auth login`")
+    })?;
+    sanitize(&raw)
 }
 
 /// Trim the trailing newline every credential helper emits, and reject anything
@@ -109,11 +42,9 @@ fn sanitize(raw: &str) -> Result<String> {
 
 /// Ask the `gh` CLI for its token.
 ///
-/// Any way `gh` can be unusable — not installed, not executable, not logged in —
-/// returns `Ok(None)` so resolution falls through to the actionable error in
-/// `resolve_with` instead of surfacing `gh`'s own wording. A timeout is the one
-/// real error: falling through after `gh` actually hung would tell the user to
-/// run `gh auth login` when that is not the problem.
+/// Missing/unusable/not-logged-in `gh` returns `Ok(None)` so the caller can show
+/// one stable, actionable error. A timeout remains a real error: telling the user
+/// to log in would be misleading when the helper actually hung.
 fn gh_token() -> Result<Option<String>> {
     let Ok(mut child) = Command::new("gh")
         .args(["auth", "token", "--hostname", "github.com"])
@@ -149,7 +80,7 @@ fn gh_token() -> Result<Option<String>> {
         }
     };
 
-    // Not logged in, or any other `gh` failure: fall through to the next source.
+    // Not logged in, or any other `gh` failure.
     if !status.success() {
         return Ok(None);
     }
@@ -183,46 +114,14 @@ mod tests {
     }
 
     #[test]
-    fn env_wins_over_everything() {
-        let c = resolve_with(
-            Some("from_env".into()),
-            "from_config",
-            gh_returns("from_gh"),
-        )
-        .unwrap();
-        assert_eq!(c.token, "from_env");
-        assert_eq!(c.source, Source::Env);
+    fn reads_and_sanitizes_the_gh_token() {
+        assert_eq!(resolve_with(gh_returns("gho_abc\n")).unwrap(), "gho_abc");
     }
 
     #[test]
-    fn config_wins_over_gh() {
-        // Explicit configuration must beat auto-detection, so upgrading gitpic
-        // never silently switches which account uploads.
-        let c = resolve_with(None, "from_config", gh_returns("from_gh")).unwrap();
-        assert_eq!(c.token, "from_config");
-        assert_eq!(c.source, Source::Config);
-    }
-
-    #[test]
-    fn gh_is_used_when_nothing_is_configured() {
-        let c = resolve_with(None, "", gh_returns("from_gh")).unwrap();
-        assert_eq!(c.token, "from_gh");
-        assert_eq!(c.source, Source::Gh);
-    }
-
-    #[test]
-    fn blank_sources_do_not_shadow_a_working_one() {
-        // An exported-but-empty GITPIC_TOKEN, and a `token = ""` left in the
-        // config after migrating, must both fall through rather than fail.
-        let c = resolve_with(Some("   ".into()), "", gh_returns("from_gh")).unwrap();
-        assert_eq!(c.source, Source::Gh);
-    }
-
-    #[test]
-    fn no_source_at_all_is_config_missing() {
-        let err = resolve_with(None, "", no_gh).expect_err("must fail");
+    fn unavailable_gh_credential_is_config_missing() {
+        let err = resolve_with(no_gh).expect_err("must fail");
         assert_eq!(err.code, ErrorCode::ConfigMissing);
-        // The message has to say what to actually do about it.
         assert!(err.message.contains("gh auth login"), "{}", err.message);
     }
 
@@ -246,13 +145,5 @@ mod tests {
     fn sanitize_rejects_empty_and_whitespace_only() {
         assert!(sanitize("").is_err());
         assert!(sanitize("  \n ").is_err());
-    }
-
-    #[test]
-    fn debug_never_prints_the_token() {
-        let c = resolve_with(Some("sensitive-value-for-test".into()), "", no_gh).unwrap();
-        let shown = format!("{c:?}");
-        assert!(!shown.contains("sensitive-value-for-test"), "{shown}");
-        assert!(shown.contains("<redacted>"), "{shown}");
     }
 }

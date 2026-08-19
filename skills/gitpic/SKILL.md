@@ -5,7 +5,8 @@ description: >-
   Markdown link. Use when the user wants to "upload an image", "turn this image
   into a link", "host an image", "get a markdown link for a screenshot",
   "把图片上传图床", or "生成图片 markdown 链接". Requires the `gitpic` CLI installed
-  and a GitHub token configured (install via `brew install tarnish233/tap/gitpic`).
+  plus GitHub CLI authenticated with `gh auth login` (install gitpic via
+  `brew install tarnish233/tap/gitpic`).
 ---
 
 # gitpic — GitHub image host uploader
@@ -34,6 +35,10 @@ install it one of these ways, then verify with `gitpic --version`:
   cargo install --git https://github.com/tarnish233/gitpic-cli
   ```
 
+Also require `command -v gh` and a successful `gh auth status`. `gitpic` obtains
+credentials only from `gh auth token`; if needed, ask the user to run
+`gh auth login`. Never ask the user to paste a token into the conversation.
+
 ## 0. Preflight
 
 Run the health check before the first upload in a session:
@@ -46,9 +51,9 @@ Parse stdout JSON. Require `config_ok`, `token_valid`, and `repo_writable` to be
 `true`; an unhealthy report also has a non-zero exit status. If `config_ok` is
 false, tell the user to either run `gitpic init` or set
 `GITPIC_REPO=owner/name` (and optionally `GITPIC_BRANCH`,
-`GITPIC_LINK=cdn|raw`), then stop. If `token_valid` is false, tell the user to
-run `gh auth login` — gitpic takes its credential from `gh auth token` — or to
-set `GITPIC_TOKEN`; then stop.
+`GITPIC_LINK=cdn|raw`), then stop. If `token_valid` is false and
+`repo_writable` is also false, tell the user to run `gh auth login` — gitpic
+takes its credential only from `gh auth token` — then stop.
 
 `repo_writable` means **both** that the token may push to the repository **and**
 that the target branch exists. When it is false, read `error.code` to tell the two
@@ -69,10 +74,8 @@ set. It is the usual explanation when an upload is nevertheless refused with
 `PERMISSION_DENIED` or a 409/422 after every preflight check passed — if that
 happens, say so rather than retrying.
 
-The report's `token_source` field (`env` / `config` / `gh`) says where the
-credential came from. Never ask the user to paste a token into the conversation;
-prefer `gh auth login`, which keeps it in the OS keyring. `gitpic init` no longer
-accepts a token interactively, precisely so one is never typed into a terminal.
+The report's compatibility field `token_source` is `"gh"` when a credential was
+obtained and `null` otherwise. `gitpic init` never accepts a token interactively.
 
 ## 1. Upload a local image
 
@@ -139,7 +142,7 @@ gitpic list --json                                            # recent uploads (
 |------|---------------------|---------------------------------------------------|
 | 1    | GENERAL             | unexpected failure — report `error.message`        |
 | 2    | USAGE               | fix the invocation                                |
-| 3    | CONFIG_MISSING      | no credential or repo — `gh auth login` / configure |
+| 3    | CONFIG_MISSING      | run `gh auth login` or configure the target repo   |
 | 4    | AUTH_FAILED         | credential invalid/expired — `gh auth login`      |
 | 5    | NETWORK             | retry once, then report                           |
 | 6    | NOT_FOUND           | check the local input file path                   |

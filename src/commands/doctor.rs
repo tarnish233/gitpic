@@ -19,9 +19,8 @@ struct DoctorReport {
     /// upload will fail — the rules may permit this account — but it is the usual
     /// explanation when one does after every other check passed.
     branch_protected: bool,
-    /// Where the credential came from: `env`, `config`, or `gh`; `null` when none
-    /// could be obtained. Lets a migration away from a plaintext token be
-    /// verified. Always present, so an agent can read it on a failing report too.
+    /// Always `gh` when a credential was obtained, otherwise `null`. Kept in the
+    /// JSON contract for compatibility with earlier releases.
     token_source: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     login: Option<String>,
@@ -184,19 +183,19 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
 
     // Resolved before the target check so the source is reported even when the
     // repo is unconfigured — that is what tells you whether `gh` is being used.
-    let (cred, mut setup_err) = match crate::auth::resolve(cfg) {
-        Ok(c) => (Some(c), None),
+    let (token, mut setup_err) = match crate::auth::token() {
+        Ok(token) => (Some(token), None),
         Err(e) => (None, Some(e)),
     };
-    let source = cred.as_ref().map(|c| c.source.as_str());
+    let source = token.as_ref().map(|_| "gh");
 
     let mut user = None;
     let mut repo = None;
     let mut branch = None;
     if config_ok {
-        if let Some(cred) = &cred {
+        if let Some(token) = &token {
             match GitHub::new(
-                &cred.token,
+                token,
                 &cfg.github.owner,
                 &cfg.github.repo,
                 &cfg.github.branch,

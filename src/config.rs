@@ -4,9 +4,8 @@
 //!   Env vars: GITPIC_OWNER, GITPIC_REPO ("owner/name" or "name"),
 //!             GITPIC_BRANCH, GITPIC_LINK (cdn|raw)
 //!
-//! The credential is deliberately absent from that list. `GITPIC_TOKEN` is read
-//! by `crate::auth`, which owns the whole credential chain — so no token is ever
-//! stored in this struct, which derives `Debug`.
+//! Credentials are handled separately by `crate::auth`; configuration contains
+//! only the upload target and upload preferences.
 
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
@@ -37,10 +36,6 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GithubConfig {
-    /// Legacy inline token. Still honoured, and still takes priority over `gh`,
-    /// but omitted when empty so a generated config carries no secret at all.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub token: String,
     pub owner: String,
     pub repo: String,
     pub branch: String,
@@ -49,7 +44,6 @@ pub struct GithubConfig {
 impl Default for GithubConfig {
     fn default() -> Self {
         Self {
-            token: String::new(),
             owner: String::new(),
             repo: String::new(),
             branch: "main".to_string(),
@@ -137,12 +131,6 @@ fn check_segment(what: &str, value: &str) -> std::result::Result<(), String> {
 }
 
 impl Config {
-    /// [`Config::validate`] for callers outside this module — `config set`, which
-    /// has to apply exactly the same rules as the file and the environment.
-    pub(crate) fn validate_public(&self) -> std::result::Result<(), String> {
-        self.validate()
-    }
-
     /// Check every value, whatever produced it.
     ///
     /// `deny_unknown_fields` guards key *names*; nothing guarded the values. A
@@ -156,7 +144,7 @@ impl Config {
     /// Returns a bare message so each caller can attach the code that fits where
     /// the value came from: a file is `CONFIG_INVALID`, a flag or variable is a
     /// usage error.
-    fn validate(&self) -> std::result::Result<(), String> {
+    pub(crate) fn validate(&self) -> std::result::Result<(), String> {
         check_segment("github.owner", &self.github.owner)?;
         check_segment("github.repo", &self.github.repo)?;
         if self.github.branch.trim().is_empty() {
@@ -225,13 +213,11 @@ impl Config {
     /// Parse config text, naming the offending file in any error.
     ///
     /// Split from the file read so the strictness rules are testable without
-    /// mutating `XDG_CONFIG_HOME` (unsound across the parallel test runner) —
-    /// the same seam as `history::parse_recent` and `auth::resolve_with`.
+    /// mutating `XDG_CONFIG_HOME` across parallel test threads.
     fn parse(text: &str, shown: &str) -> Result<Self> {
         let cfg: Self = toml::from_str(text).map_err(|e| {
-            // `toml::de::Error`'s Display output includes the offending source
-            // line. That line can contain `github.token`, so keep the useful
-            // parser message without echoing any config contents.
+            // `toml::de::Error`'s Display output includes source text. Keep the
+            // useful parser message without echoing config contents.
             AppError::config_invalid(format!(
                 "cannot use config file {shown}: {}\nfix it with `gitpic config edit`",
                 e.message()
@@ -248,16 +234,8 @@ impl Config {
     /// Persist config to disk (creating parent dirs) with a same-directory
     /// replace, so an interrupted write cannot leave a partial config behind.
     ///
-    /// The file may still hold a legacy `github.token`, so it is created `0600`
-    /// from its first byte rather than written and then chmod'd: `fs::write` uses
-    /// the default `0666 & !umask`, which under a typical `umask 022` means the
-    /// file is world-readable for the window between the write and the chmod, and
-    /// stays that way if the process dies in between. The permission error is
-    /// propagated for the same reason — swallowing it left a readable token behind
-    /// with no indication anything was wrong.
-    ///
-    /// The temp file carries the same mode and lives in the same directory, so
-    /// the secret is never briefly exposed under a different name either.
+    /// The file is created privately and atomically replaced from a same-directory
+    /// temp file, so interrupted writes cannot leave partial configuration behind.
     pub fn save(&self) -> Result<PathBuf> {
         self.save_to(&Self::path()?)
     }
@@ -316,9 +294,6 @@ impl Config {
 
     /// Apply environment variable overrides in-place.
     ///
-    /// `GITPIC_TOKEN` is deliberately not handled here — `crate::auth` is its
-    /// sole reader, which keeps the credential out of this struct entirely.
-    ///
     /// # Errors
     /// Returns a usage error if `GITPIC_REPO` is malformed.
     pub fn apply_env(&mut self) -> Result<()> {
@@ -329,7 +304,7 @@ impl Config {
     ///
     /// Split from `std::env` so the normalization rules are testable without
     /// mutating the environment (unsound across parallel test threads) — the same
-    /// seam as `auth::resolve_with`.
+    /// seam as the other environment-independent parsers in this crate.
     ///
     /// Every variable here ends up inside a request URL, so each is trimmed and
     /// then dropped if nothing is left. Both halves are load-bearing:
@@ -386,10 +361,8 @@ impl Config {
 
     /// Ensure the upload target is configured.
     ///
-    /// Named for what it checks: the *target*, not the credential. The
-    /// credential is resolved separately by `crate::auth`, which may have to run
-    /// `gh`, so its availability cannot be known synchronously. A caller needing
-    /// both must do both — see `commands::upload::run`.
+    /// Named for what it checks: credentials are resolved separately by
+    /// `crate::auth`, which may have to run `gh`.
     pub fn require_target(&self) -> Result<()> {
         if self.github.owner.is_empty() || self.github.repo.is_empty() {
             return Err(AppError::config_missing(
@@ -465,9 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_token_is_not_written_back_to_disk() {
-        // Both READMEs promise a generated config carries no `token` key, so a
-        // synced dotfiles repo never gains a secret-shaped placeholder.
+    fn generated_config_contains_no_token_key() {
         let toml = toml::to_string_pretty(&Config::default()).unwrap();
         assert!(!toml.contains("token"), "{toml}");
     }
@@ -519,12 +490,13 @@ mod tests {
     }
 
     #[test]
-    fn invalid_config_diagnostic_does_not_echo_a_token() {
+    fn removed_token_key_is_rejected_without_echoing_its_value() {
         let secret = "ghp_DO_NOT_PRINT_THIS_SECRET";
-        let text = format!("[github]\ntoken = \"{secret}\n");
+        let text = format!("[github]\ntoken = \"{secret}\"\n");
         let err = Config::parse(&text, "/tmp/config.toml").expect_err("must be rejected");
         assert_eq!(err.code, ErrorCode::ConfigInvalid);
         assert!(!err.message.contains(secret), "{}", err.message);
+        assert!(err.message.contains("token"), "{}", err.message);
         assert!(err.message.contains("config edit"), "{}", err.message);
     }
 
@@ -577,12 +549,6 @@ mod tests {
         // every existing install on upgrade.
         let generated = toml::to_string_pretty(&Config::default()).unwrap();
         Config::parse(&generated, "/tmp/config.toml").expect("round-trip must parse");
-
-        // And with the optional token key present, which Default omits.
-        let mut with_token = Config::default();
-        with_token.github.token = "t".to_string();
-        let rendered = toml::to_string_pretty(&with_token).unwrap();
-        Config::parse(&rendered, "/tmp/config.toml").expect("a token key must parse");
     }
 
     /// Build a lookup over a fixed table, standing in for the environment.

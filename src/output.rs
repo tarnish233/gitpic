@@ -2,7 +2,7 @@
 
 use owo_colors::{OwoColorize, Stream};
 use serde::Serialize;
-use std::io;
+use std::io::{self, Write};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -91,22 +91,18 @@ pub struct PartialEnvelope<'a> {
 /// than being silently dropped: those *are* failures, and pretending output
 /// happened would be worse than a panic.
 pub fn line(text: &str) {
-    use std::io::Write;
-    let stdout = io::stdout();
-    let mut lock = stdout.lock();
-    match writeln!(lock, "{text}") {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(0),
-        Err(e) => panic!("failed printing to stdout: {e}"),
-    }
+    write_stdout(|out| writeln!(out, "{text}"));
 }
 
 /// Write without a trailing newline. Same broken-pipe rule as [`line`].
 pub fn raw(text: &str) {
-    use std::io::Write;
+    write_stdout(|out| write!(out, "{text}"));
+}
+
+fn write_stdout(write: impl FnOnce(&mut dyn Write) -> io::Result<()>) {
     let stdout = io::stdout();
     let mut lock = stdout.lock();
-    match write!(lock, "{text}") {
+    match write(&mut lock) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(0),
         Err(e) => panic!("failed printing to stdout: {e}"),
@@ -119,7 +115,6 @@ pub fn raw(text: &str) {
 /// result, so a broken pipe on the very last buffered write would otherwise be
 /// reported by the runtime as a panic at exit.
 pub fn finish() {
-    use std::io::Write;
     match io::stdout().flush() {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(0),
@@ -157,11 +152,11 @@ fn print_human_item(r: &ItemResult) {
         .if_supports_color(Stream::Stdout, |t| t.bold().to_string());
     if r.deduped {
         let tag = " (deduped)".if_supports_color(Stream::Stdout, |t| t.yellow().to_string());
-        println!("{check} {name}{tag}");
+        line(&format!("{check} {name}{tag}"));
     } else {
-        println!("{check} {name}");
+        line(&format!("{check} {name}"));
     }
-    println!("{}", r.output);
+    line(&r.output);
 }
 
 /// Print results that succeeded before a failure, followed by the error.

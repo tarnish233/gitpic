@@ -5,7 +5,7 @@
 - `main.rs` — entry point, subcommand dispatch, exit codes.
 - `cli.rs` — clap argument/subcommand definitions.
 - `config.rs` — config model + XDG path resolution (`~/.config/gitpic/config.toml`).
-- `auth.rs` — credential resolution: `GITPIC_TOKEN` > config `github.token` > `gh auth token`. Lazy, so no secret is held in `Config`.
+- `auth.rs` — obtains credentials exclusively from `gh auth token`; no secret is held in `Config`.
 - `github.rs` — GitHub Contents API client (upload, dedup, health checks).
 - `naming.rs`, `link.rs`, `imageproc.rs`, `output.rs`, `error.rs` — path/hash, URL/markdown, compression, human/JSON output, error types.
 - `commands/` — one module per action (`upload`, `init`, `doctor`, `list`, `config_cmd`, `completion`, `skill`).
@@ -46,4 +46,4 @@ it up with everything else.
 Follow Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`. PRs need a clear description, linked issues, and green CI (fmt, clippy, test on Linux/macOS/Windows). Releases are cut by pushing a `vX.Y.Z` tag, which triggers multi-platform binaries.
 
 ## Security & Configuration Tips
-Never commit tokens. Credentials come from `gh auth token` by default, so nothing secret is written to `~/.config/gitpic/config.toml`; override with `GITPIC_TOKEN` in CI. A `github.token` left in the config file still works (and still takes priority over `gh`), but `gitpic doctor` reports `token_source` so a stale plaintext token is visible.
+Never commit tokens. Credentials come exclusively from `gh auth token`, so nothing secret is written to `~/.config/gitpic/config.toml`. `GITPIC_TOKEN` and the removed `github.token` key are not accepted; CI must authenticate GitHub CLI before invoking gitpic.

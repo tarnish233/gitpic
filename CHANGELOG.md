@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Breaking:** GitHub credentials now come exclusively from
+  `gh auth token --hostname github.com`. `GITPIC_TOKEN` is ignored and the
+  legacy `github.token` config key is rejected. Before upgrading, remove that
+  key and run `gh auth login`.
+- `gitpic doctor` keeps the `token_source` field for wire compatibility, but its
+  only non-null value is now `"gh"`.
+
+### Refactored
+- Removed the three-source credential precedence model, token-source enum,
+  config redaction path, and legacy token branches from `init` and `config`.
+- Centralized `config set` semantic validation in `Config::validate`, moved
+  upload-only helpers into the upload module, and unified guarded stdout writes.
+  These changes reduce duplicated logic without changing non-authentication
+  behavior.
+
 ## [0.3.0] - 2026-08-18
 
 ### Security

@@ -4,7 +4,7 @@
 
 把本地或剪贴板里的图片上传到 GitHub 仓库（当图床），一键生成 Markdown 链接，并自动复制到剪贴板。
 
-命令行交互对人友好，加 `--json` 后也便于脚本和 AI 助手调用。程序为单个静态二进制文件，无需额外运行时。
+命令行交互对人友好，加 `--json` 后也便于脚本和 AI 助手调用。程序本体为单个二进制文件，认证统一交给 GitHub CLI（`gh`）。
 
 ## 演示
 
@@ -12,7 +12,7 @@
 $ gitpic init
 gitpic init — configure your GitHub image host
 
-Credentials come from `gh auth token`, or from GITPIC_TOKEN.
+Credentials come from `gh auth token`.
 Run `gh auth login` once if you have not already.
 
 Target repo (owner/name): your-name/img
@@ -60,24 +60,19 @@ cargo install --path .
 
 ## 初始化与设置
 
-凭据默认取自 [GitHub CLI](https://cli.github.com)，配置文件里**不保存任何密钥**：
+凭据只取自 [GitHub CLI](https://cli.github.com)，配置文件里**不保存任何密钥**：
 
 ```bash
 gh auth login          # 一次即可，token 存在系统 keyring 里
 gitpic init            # 只问仓库/分支/链接类型，不问 token
 ```
 
-`gitpic` 按以下顺序取凭据，第一个可用的生效：
+`gitpic` 每次需要访问 GitHub 时调用 `gh auth token --hostname github.com`。`GITPIC_TOKEN`
+不再读取，配置文件里的 `github.token` 也不再支持。若从旧版本升级，请删除配置中的
+`token` 行并运行一次 `gh auth login`；否则严格配置校验会提示 `CONFIG_INVALID`。
 
-| 顺序 | 来源 | 用途 |
-|---|---|---|
-| 1 | `GITPIC_TOKEN` 环境变量 | CI / 容器 / 没装 `gh` 的机器 |
-| 2 | 配置文件里的 `github.token` | 遗留方式，仍然可用 |
-| 3 | `gh auth token` | 默认，配置文件零密钥 |
-
-配置里写了 `token` 时它会压过 `gh` —— 显式配置优先于自动探测，升级 gitpic 不会静默换掉你上传用的账号。想改用 `gh`，删掉那一行即可；`gitpic doctor` 会显示当前实际用的是哪一个。
-
-> **权限范围提醒**：`gh` 那枚 OAuth token 的 scope 通常是 `gist, read:org, repo, workflow`，比"只往图床仓库写文件"所需的权限**更宽**。这个方案解决的是「密钥不落盘到会被同步的文件里」，并不缩小权限范围。若你要的是最小权限，请改用限定单仓库 `Contents: Read/Write` 的细粒度令牌，通过 `GITPIC_TOKEN` 传入。
+> **权限范围提醒**：`gh` 的 OAuth token 可能比“只往图床仓库写文件”所需的权限更宽。
+> 可通过 `gh auth status` 检查当前账号与认证状态。
 
 `~/.config/gitpic/config.toml`（遵循 `$XDG_CONFIG_HOME`）也可以手写 —— 注意其中没有 `token` 项，所以这个文件可以安全地纳入 dotfiles 同步：
 
@@ -97,10 +92,9 @@ max_width     = 0        # 0 = 不缩放
 quality       = 82       # 压缩时的 JPEG 质量（1-100）
 ```
 
-或用环境变量（不落盘，优先级高于配置文件，但低于命令行参数）：
+上传目标和偏好也可以用环境变量覆盖（不包括凭据；优先级高于配置文件，但低于命令行参数）：
 
 ```bash
-export GITPIC_TOKEN="github_pat_xxx"   # 细粒度令牌，Contents: Read/Write
 export GITPIC_REPO="your-name/img"     # owner/name（也可只写 name，沿用现有 owner）
 export GITPIC_OWNER="your-name"        # 可选：只覆盖 owner
 export GITPIC_BRANCH="main"            # 可选
@@ -119,7 +113,7 @@ gitpic screenshot.png            # 上传 → 打印 Markdown → 复制到剪�
 gitpic a.png b.png               # 批量上传
 gitpic paste                     # 上传剪贴板里的图片（截图后直接用）
 cat img.png | gitpic --stdin          # 扩展名按字节内容判定
-gitpic doctor                    # 检查访问令牌与仓库权限
+gitpic doctor                    # 检查 gh 认证与仓库权限
 gitpic list                      # 查看最近上传（本地历史）
 gitpic completion zsh            # 打印命令行补全脚本
 gitpic skill install             # 安装 AI 助手技能（见下文）
@@ -139,7 +133,7 @@ gitpic big.jpg --compress --quality 80       # JPEG 质量
 
 ```bash
 gitpic config path                       # 打印配置文件路径
-gitpic config get                        # 查看全部设置（访问令牌会被隐藏）
+gitpic config get                        # 查看全部设置
 gitpic config set github.repo owner/name # 修改某项
 gitpic config set upload.link_kind raw
 gitpic config set upload.compress true
