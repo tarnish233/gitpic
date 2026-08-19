@@ -1,3 +1,5 @@
 /target
 **/*.rs.bk
 .DS_Store
+/dist-app
+/apps/GitPic/.build
