@@ -241,11 +241,13 @@ commands. `--no-copy` is meaningful only on the upload path (`gitpic <files>`,
 so `gitpic doctor --json --no-copy` fails.
 
 `gitpic doctor` exits non-zero when any check fails; scripts should still parse
-`config_ok`, `token_valid`, and `repo_writable` from its JSON report. That report is
-its own envelope and carries **no `error` field**, so telling "branch missing" (8)
-from "no write permission" (7) means reading the exit status — the latter does not
-even set `detail`. Argument parsing failures also use the standard
-`{ "ok": false, "error": ... }` envelope when `--json` is present.
+`config_ok`, `token_valid`, and `repo_writable` from its JSON report. An unhealthy
+report also carries an `error` object in the same shape as every other subcommand
+(present exactly when `ok` is false), so "branch missing" (8) and "no write
+permission" (7) can be told apart from stdout alone — no need to depend on the exit
+status, which piping to a parser (`… | jq`) replaces with the parser's own. Argument
+parsing failures also use the standard `{ "ok": false, "error": ... }` envelope when
+`--json` is present.
 
 ## Changelog
 

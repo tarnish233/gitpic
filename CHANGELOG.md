@@ -8,6 +8,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Align the contract with the implementation
 
+### Added
+- `gitpic doctor`'s report now carries an `error` object (`{ code, message }`, the
+  shape every other subcommand uses), present on exactly the reports where `ok` is
+  false. The failure reason used to live only in the **exit status** — a side channel
+  an agent may never see: `gitpic doctor --json | jq` replaces it with jq's own 0
+  (measured; the pipeline semantics are harness-independent), and `| jq` is the most
+  common way an agent parses JSON. Some agent harnesses' shell wrappers do not return
+  the exit status at all. stdout is the one channel a caller parsing this report
+  definitely has, so the code goes there too. The exit status is unchanged.
+- The "every probe answered and GitHub simply said no" outcome now has a message to
+  read. Its `PERMISSION_DENIED` is *synthesised* — there is no probe error to take a
+  code from — so it previously carried neither `error` nor `detail`: the most common
+  "can read, cannot write" result told neither a machine nor a human why. `summarize`
+  now keeps the code and the message together in one `AppError` rather than two loose
+  `Option`s, which is what let them come apart.
+
 ### Fixed
 - `gitpic init` no longer writes a config it would refuse to load. It was the one
   writer that **persists** to disk while skipping `Config::validate`, so answering
@@ -26,12 +42,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `validate`'s two wrappers.
 
 ### Documentation
-- The `doctor` triage described by the skill document and both READMEs was
-  impossible to follow: the report is its own envelope and carries **no `error`
-  field**, yet three passages told agents to read `error.code` to tell "branch
-  missing" (8) from "no write permission" (7). They now read the exit status, and
-  say that the latter does not even set `detail` — that code is *synthesised* after
-  every probe answered.
+- The skill document and both READMEs told agents, in three places, to read
+  `error.code` from the `doctor` report to tell "branch missing" (8) from "no write
+  permission" (7) — and that field did not exist. It does now (see above), and the
+  documents say to read it rather than the exit status, and why the exit status is
+  not dependable.
 - "Always pass `--json` and `--no-copy`" contradicted the documents' own examples.
   `--no-copy` is meaningful only on the upload path; the other five subcommands
   reject it as a `USAGE` error (2), so `gitpic doctor --json --no-copy` fails. The

@@ -288,6 +288,40 @@ fn init_never_leaves_a_config_it_would_refuse_to_load() {
     assert_eq!(value.trim(), "raw");
 }
 
+/// `doctor` was the only subcommand whose failure reason lived solely in the
+/// process exit status — a channel `gitpic doctor --json | jq` silently replaces
+/// with jq's own 0, and that some agent harnesses never surface. Needs the real
+/// binary because the field is added where `summarize`'s result is serialized.
+/// Runs with an empty `PATH` so `gh` is unreachable and no network is touched.
+#[test]
+fn an_unhealthy_doctor_report_carries_its_code_on_stdout() {
+    let sb = Sandbox::new("doctor-error");
+    let empty_path = sb.dir.join("empty-path");
+    std::fs::create_dir_all(&empty_path).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_gitpic"))
+        .args(["doctor", "--json"])
+        .env("XDG_CONFIG_HOME", sb.dir.join("cfg"))
+        .env("XDG_DATA_HOME", sb.dir.join("data"))
+        .env("PATH", &empty_path)
+        .output()
+        .expect("the binary runs");
+
+    assert_eq!(out.status.code(), Some(3));
+    let body = parse(&String::from_utf8_lossy(&out.stdout), "doctor --json");
+    assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(
+        body.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("CONFIG_MISSING"),
+        "an agent parsing stdout must see the code the exit status carries: {body}"
+    );
+    assert!(
+        body.pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .is_some_and(|m| !m.is_empty()),
+        "the code needs a message next to it: {body}"
+    );
+}
+
 #[test]
 fn the_binary_under_test_is_the_one_we_built() {
     // Guards against a stale binary quietly making these tests meaningless — a
