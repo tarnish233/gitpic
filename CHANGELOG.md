@@ -6,7 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-19
+
 ### Align the contract with the implementation
+
+> **Upgrade note**: `--repo` and `gitpic init` now reject bad target values they
+> used to accept — `--repo 'owner/re po'`, `--repo owner/..`, or an answer with a
+> space at `init`'s repo/branch prompt are `USAGE` errors (exit 2). The only calls
+> affected are the ones that could never have produced a working link: they
+> previously ended in a bare 404, or in a config file gitpic itself refused to load.
 
 ### Added
 - `gitpic doctor`'s report now carries an `error` object (`{ code, message }`, the
@@ -532,7 +540,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.3.0
 [0.2.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.3
