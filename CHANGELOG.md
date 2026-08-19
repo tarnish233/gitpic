@@ -49,7 +49,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `gitpic list` honour it; `doctor -q` and `skill install -q` still render human
   output.
 
+### CI
+- The release subtitle no longer accepts a Keep a Changelog category word. It is
+  taken from the first `### ` heading in the changelog section, so a section that
+  opens straight into "Changed" or "Security" produced a public release title of
+  "gitpic v0.4.0 — 变更" — a category label carrying no information about the
+  release. Hitting a category word now fails the job, forcing a theme line first,
+  and an empty subtitle fails instead of falling back to "Release". The 0.4.0
+  section gained the theme line it was missing.
+
 ## [0.4.0] - 2026-08-19
+
+### Credentials come from the GitHub CLI only
 
 ### Changed
 - **Breaking:** GitHub credentials now come exclusively from

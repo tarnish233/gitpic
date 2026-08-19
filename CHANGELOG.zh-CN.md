@@ -37,7 +37,16 @@
 - `--quiet` 被写成通用规则，实际只有上传路径和 `gitpic list` 兑现；`doctor -q` 与
   `skill install -q` 照打人类可读输出。
 
+### CI
+- Release 的副标题不再接受 Keep a Changelog 的类目词。它取 changelog 段里第一个
+  `### `，于是当那一段直接以「变更」或「安全」开头时，公开的 Release 标题就成了
+  "gitpic v0.4.0 — 变更" —— 一个没有信息量的类目词，而不是这次发布的主题。现在
+  命中类目词就让 job 失败，逼 changelog 先写一行主题；空副标题也从回落 "Release"
+  改为失败。0.4.0 段补上了它缺的那行主题。
+
 ## [0.4.0] - 2026-08-19
+
+### 凭据只来自 GitHub CLI
 
 ### 变更
 - **破坏性变更：**GitHub 凭据现在只通过
