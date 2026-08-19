@@ -214,10 +214,15 @@ gitpic-cli/
 - **Swift 单测**（Swift Testing）：`Envelope` 解码——用真实 gitpic 输出的样本 JSON 覆盖三种 envelope（success / partial / error）与 10 个错误码；`ToolDiscovery` 的三级回退；路径/格式选择逻辑。
 - **契约对齐测试**：一个测试实际调用打包的 gitpic 二进制拿 `--json` 输出并解码，确保 Swift 侧 `Codable` 与 `src/output.rs` 不漂移。这是防止"CLI 改了字段 GUI 静默失效"的唯一手段。
 - **人工验收清单**（无法自动化的部分，逐条勾）：
-  - M1：从 Finder 启动 app，拖一个 png 到刘海落区 → 上传成功、剪贴板拿到链接
+  - ~~M1：从 Finder 启动 app，拖一个 png 到刘海落区~~ → 搁置，见 §9
   - Finder 启动下 `gh` 解析成功（这是 C1 的回归点）
-  - 无刘海外接屏 / 多屏切换下面板定位正确
+  - 无刘海外接屏 / 多屏切换下面板定位正确（仅在打开 `NotchDropZone` 时相关）
   - 菜单栏 popover 落区可用（C2 的兜底路径）
+- **菜单对齐**：`NSMenuItem` 按图片自身尺寸绘制，SF Symbol 每个字形的包围盒都不一样
+  （本菜单六个符号在 2x 下 21–28 px 宽、19–25 px 高），所以每个符号都要居中画进同一个
+  盒子；符号 scale 用 `.small`（默认的 `.medium` 比任何系统菜单都重）；section header 由
+  AppKit 排在图标列而不是标题列，要塞一张同尺寸空图片才能和下面的条目对齐。三条都是拿
+  Finder 的「文件」菜单当基准量出来的，不是眼估。
 
 ---
 
@@ -226,10 +231,24 @@ gitpic-cli/
 | # | 内容 | 验收 |
 |---|---|---|
 | M0 | SwiftPM 骨架 + `.accessory` 起得来 | `swift build` 过，菜单栏出现图标 |
-| **M1** | **刘海 ledge 收到真实拖拽** | **人手拖一次文件，`performDragOperation` 触发** |
+| ~~M1~~ | ~~刘海 ledge 收到真实拖拽~~ — **搁置** | 见下 |
 | M2 | `ToolDiscovery` + `GitpicRunner` + Envelope 解码 | Finder 启动下跑通一次真实上传 |
 | M3 | 菜单栏 popover（落区 / 剪贴板 / 格式切换 / 最近） | 三种格式零重传切换正确 |
 | M4 | 主窗口（历史 + 设置） | 设置改动落到 config，串行无丢更新 |
 | M5 | 构建脚本 + 签名 + 独立 tag 发布流水线 | `app-v0.1.0` 不触发 CLI 发布，CLI 的 4-sidecar 断言不受影响 |
 
-M1 排在功能之前——它是唯一一个失败就要改设计的里程碑（兜底见 §4.3）。
+M1 原本排在功能之前——它是唯一一个失败就要改设计的里程碑（兜底见 §4.3）。
+
+**M1 的实际结果：搁置，未验证。** `NotchPanel.swift` 和 C2 那批实测结论都留在树里，但
+面板默认不再启动（`defaults write dev.gitpic.app NotchDropZone -bool true` 打开）。原因
+是验收动作本身做不到：合成一次真实的 Finder→面板拖拽需要辅助功能授权下的 CGEvent 拖拽
+序列，我没做出来，而 §4.3 已经说明这一条只能人手验。
+
+**连带后果**：刘海摘掉后 app 没有任何拖拽落区了——`NSMenu` 的菜单项不能收拖拽。当前只
+有「上传剪贴板图片」和「选择文件上传…」两条路。要补回拖拽，三个选项，工作量差别很大：
+
+1. 拖到菜单栏图标上（`statusItem.button` 注册 `registerForDraggedTypes`）——最省，且不
+   受 C2 约束，因为那个 button 归系统管。
+2. §4.1 的菜单栏 popover 里放落区——原计划的兜底路径，必然可用，但要写 popover。
+3. 暂时不做拖拽。
+
