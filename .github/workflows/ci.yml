@@ -21,6 +21,46 @@ jobs:
       - name: Check skill manifests
         run: python3 .github/scripts/check_manifests.py
 
+  msrv:
+    name: builds on the declared MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Read the version out of Cargo.toml rather than repeating it here. A
+      # hardcoded toolchain in this file would drift from the very promise this
+      # job exists to check — the same trap `check_manifests.py` closes for the
+      # plugin manifests.
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          set -euo pipefail
+          version="$(sed -n '/^\[package\]/,/^\[[^p]/p' Cargo.toml \
+            | sed -n 's/^rust-version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+            | head -1)"
+          if [[ -z "$version" ]]; then
+            echo "Cargo.toml [package] declares no rust-version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "declared MSRV: $version"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-${{ steps.msrv.outputs.version }}
+
+      # What is promised is that `cargo install` works on this toolchain, and that
+      # does not build tests — so neither does this. cargo refuses the build itself
+      # if a dependency needs a newer rustc than we claim, which is the drift that
+      # actually happens: `cargo update` raises a dependency's floor above ours.
+      - name: Build
+        run: cargo build --locked
+
   test:
     name: fmt · clippy · test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

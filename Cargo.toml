@@ -2,6 +2,13 @@
 name = "gitpic"
 version = "0.5.0"
 edition = "2021"
+# Verified, not guessed: `image 0.25.10` declares 1.88.0 and the `icu_*` crates
+# reqwest pulls in declare 1.86, so this is the floor the dependency graph sets —
+# and `cargo build --locked` was run on a 1.88.0 toolchain to confirm it. The CI
+# `msrv` job reads this value back out of this file, so the two cannot drift.
+# Only affects building from source; the Homebrew and release binaries are built
+# by CI on stable.
+rust-version = "1.88"
 description = "Upload local/clipboard images to a GitHub repo (image host) and get a Markdown link"
 license = "MIT"
 readme = "README.md"

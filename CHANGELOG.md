@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Packaging
+- Declared an MSRV: `rust-version = "1.88"`. There was none, so on an older
+  toolchain `cargo install` blew up somewhere inside a dependency instead of saying
+  "gitpic requires rustc 1.88". 1.88 is the floor the dependency graph sets —
+  `image 0.25.10` declares 1.88.0 and the `icu_*` crates reqwest pulls in declare
+  1.86 — and it is *measured*, not read off those manifests: a 1.88.0 toolchain was
+  installed and `cargo build --locked` passes on it. This only affects building from
+  source; the Homebrew and release binaries are built by CI on stable. Both READMEs
+  and the skill document now state the requirement in their from-source section.
+
+### CI
+- Added a build job pinned to the declared MSRV. It reads the toolchain version
+  **out of `Cargo.toml`** rather than repeating it in the workflow — a hardcoded
+  copy would drift from the promise the job exists to check, which is the same hole
+  `check_manifests.py` closes for the three plugin manifests. It runs
+  `cargo build --locked` and not the tests: what is promised is that `cargo install`
+  works, and that path does not build tests. cargo itself refuses the build when a
+  dependency requires a newer rustc than we claim — which is the drift that actually
+  happens, since one `cargo update` can raise a dependency's floor above ours.
+
 ## [0.5.0] - 2026-08-19
 
 ### Align the contract with the implementation

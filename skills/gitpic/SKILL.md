@@ -30,7 +30,7 @@ install it one of these ways, then verify with `gitpic --version`:
   ```bash
   xattr -d com.apple.quarantine ./gitpic 2>/dev/null; chmod +x ./gitpic
   ```
-- From source (needs Rust):
+- From source (needs Rust 1.88 or newer):
   ```bash
   cargo install --git https://github.com/tarnish233/gitpic-cli
   ```

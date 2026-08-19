@@ -52,7 +52,7 @@ chmod +x ./gitpic && mv ./gitpic ~/.local/bin/  # 确保 ~/.local/bin 在 PATH
 
 > Intel Mac 用 `x86_64-apple-darwin`，Linux 用 `x86_64-unknown-linux-gnu`，Windows 是 `.zip`（解压得到 `gitpic.exe`）。
 
-**从源码**
+**从源码**（需要 Rust 1.88 或更新）
 
 ```bash
 cargo install --path .
