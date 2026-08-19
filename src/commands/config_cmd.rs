@@ -165,8 +165,8 @@ fn set_key(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
         _ => return Err(AppError::usage(format!("unknown key: {key}"))),
     }
     // Syntax is parsed above; all semantic rules are centralized in Config so
-    // file, environment, and `config set` cannot drift apart.
-    cfg.validate().map_err(AppError::usage)
+    // file, environment, `config set`, `init` and `--repo` cannot drift apart.
+    cfg.validate_input()
 }
 
 fn parse_bool(v: &str) -> Result<bool> {

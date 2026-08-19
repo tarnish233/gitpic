@@ -35,17 +35,44 @@ impl Sandbox {
     }
 
     fn run(&self, args: &[&str]) -> (String, String, i32) {
-        let out = Command::new(env!("CARGO_BIN_EXE_gitpic"))
-            .args(args)
+        self.spawn(args, None)
+    }
+
+    /// Same, with `input` written to the child's stdin — needed for `init`, which
+    /// is a conversation and cannot be driven any other way.
+    fn run_with_stdin(&self, args: &[&str], input: &str) -> (String, String, i32) {
+        self.spawn(args, Some(input))
+    }
+
+    fn spawn(&self, args: &[&str], input: Option<&str>) -> (String, String, i32) {
+        use std::io::Write;
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_gitpic"));
+        cmd.args(args)
             .env("XDG_CONFIG_HOME", self.dir.join("cfg"))
             .env("XDG_DATA_HOME", self.dir.join("data"))
             .env_remove("GITPIC_REPO")
             .env_remove("GITPIC_OWNER")
             .env_remove("GITPIC_BRANCH")
             .env_remove("GITPIC_LINK")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .expect("the binary runs");
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let out = match input {
+            None => {
+                cmd.stdin(std::process::Stdio::null());
+                cmd.output().expect("the binary runs")
+            }
+            Some(text) => {
+                cmd.stdin(std::process::Stdio::piped());
+                let mut child = cmd.spawn().expect("the binary runs");
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin is piped")
+                    .write_all(text.as_bytes())
+                    .expect("write stdin");
+                child.wait_with_output().expect("the binary finishes")
+            }
+        };
         (
             String::from_utf8_lossy(&out.stdout).to_string(),
             String::from_utf8_lossy(&out.stderr).to_string(),
@@ -224,6 +251,41 @@ fn a_closed_reader_is_not_a_crash() {
             );
         }
     }
+}
+
+/// `init` writes the config file, so it is the one entry point whose validation
+/// gap persisted across runs. Needs the real binary: the prompts read stdin.
+#[test]
+fn init_never_leaves_a_config_it_would_refuse_to_load() {
+    let sb = Sandbox::new("init");
+    let cfg_file = sb.dir.join("cfg/gitpic/config.toml");
+    let before = std::fs::read_to_string(&cfg_file).expect("the sandbox config exists");
+
+    // `me x/pics` parses as a spec — `set_repo_spec` only splits and trims — but
+    // `me x` cannot go into a URL path segment. Answering this used to print
+    // "✓ saved config" and then make every later command fail CONFIG_INVALID,
+    // `init` included, because `init` loads the file before prompting.
+    let (stdout, stderr, code) = sb.run_with_stdin(&["init"], "me x/pics\nmain\ncdn\n");
+    assert_eq!(code, 2, "must be a usage error\n{stdout}\n{stderr}");
+    assert!(
+        !stdout.contains("saved config"),
+        "must not claim success: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&cfg_file).expect("config still readable"),
+        before,
+        "a rejected answer must not touch the file on disk"
+    );
+
+    // And the config is still loadable, so `init` can be re-run to fix the answer.
+    let (_, _, code) = sb.run(&["config", "get"]);
+    assert_eq!(code, 0, "the existing config must still load");
+
+    let (stdout, stderr, code) = sb.run_with_stdin(&["init"], "someone/pics\nmain\nraw\n");
+    assert_eq!(code, 0, "a good answer must still save\n{stdout}\n{stderr}");
+    assert!(stdout.contains("saved config"), "{stdout}");
+    let (value, _, _) = sb.run(&["config", "get", "upload.link_kind"]);
+    assert_eq!(value.trim(), "raw");
 }
 
 #[test]

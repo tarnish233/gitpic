@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Align the contract with the implementation
+
+### Fixed
+- `gitpic init` no longer writes a config it would refuse to load. It was the one
+  writer that **persists** to disk while skipping `Config::validate`, so answering
+  `me x/pics` at "Target repo" — or a branch with a space, or `..` — printed
+  "✓ saved config" and then made **every** config-reading command fail with
+  `CONFIG_INVALID` (exit 10), `init` itself included, since it loads the file
+  before prompting. The only way out was `gitpic config edit`. Validation now runs
+  before the write: a bad answer is a `USAGE` error and nothing on disk is touched,
+  so `init` can simply be re-run.
+- `--repo` is now validated like every other source. It is the **highest**-priority
+  source and was the only unchecked one: `--repo o/..` made reqwest normalise a
+  whole segment out of the request URL (the request landed on a different
+  endpoint), and `--repo 'o/re po'` sent `%20` into the path — both surfacing as a
+  bare 404, while the identical value in `config.toml` was `CONFIG_INVALID` and in
+  `GITPIC_REPO` was `USAGE`. All five entry points now go through one of
+  `validate`'s two wrappers.
+
 ## [0.4.0] - 2026-08-19
 
 ### Changed

@@ -52,6 +52,14 @@ pub fn run() -> Result<()> {
         link.trim().to_ascii_lowercase()
     };
 
+    // Checked before the write, not after: `init` is the one writer that used to
+    // skip this, so an answer like `me x/pics` or a branch with a space was saved
+    // under a "✓ saved config" and then made *every* later command fail with
+    // CONFIG_INVALID — `init` itself included, since it loads the file first. The
+    // only way back was `gitpic config edit`. Failing here leaves nothing on disk,
+    // so re-running `init` still works.
+    cfg.validate_input()?;
+
     let path = cfg.save()?;
     crate::output::line(&format!("\n\u{2713} saved config to {}", path.display()));
     Ok(())
