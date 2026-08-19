@@ -6,7 +6,14 @@
 
 ## [未发布]
 
+## [0.5.0] - 2026-08-19
+
 ### 把契约与实现对齐
+
+> **升级提示**：`--repo` 和 `gitpic init` 现在会拒掉以前被接受的坏目标值 ——
+> `--repo 'owner/re po'`、`--repo owner/..`，或在 `init` 的仓库/分支提示里填带空格的
+> 值，都会报 `USAGE`（exit 2）。受影响的只有那些**本来就产不出可用链接**的调用：它们
+> 此前的结局是一句光秃秃的 404，或者一个 gitpic 自己都拒绝加载的配置文件。
 
 ### 新增
 - `gitpic doctor` 的报告现在带 `error` 对象（`{code, message}`，与其他子命令同形），
@@ -429,7 +436,8 @@
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.4.0...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.3.0
 [0.2.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.3
