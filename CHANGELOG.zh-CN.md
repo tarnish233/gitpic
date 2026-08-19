@@ -6,6 +6,10 @@
 
 ## [未发布]
 
+## [0.5.1] - 2026-08-19
+
+### 声明 MSRV，并让 CI 替你守住它
+
 ### 打包
 - 声明 MSRV：`rust-version = "1.88"`。此前没有声明，于是在更老的工具链上
   `cargo install` 会在某个依赖内部炸开，而不是给出一句"gitpic 需要 rustc 1.88"。
@@ -453,7 +457,8 @@
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.5.0...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.5.1
 [0.5.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.3.0
