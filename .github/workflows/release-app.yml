@@ -1,0 +1,134 @@
+# Release GitPic.app.
+#
+# Kept entirely separate from release.yml, which publishes the CLI. Two things
+# make that separation real rather than nominal, and both must stay true:
+#
+#  1. This workflow triggers on `app-v*`, which does not match release.yml's
+#     `v*` tag filter. Tag globs anchor at the start, so `app-v0.1.0` fires only
+#     this workflow.
+#  2. Artifacts are named `GitPic-*` and staged in `dist-app/`, never `dist/`.
+#     release.yml's publish job asserts `ls gitpic-*.sha256` counts exactly 4 and
+#     uploads `dist/gitpic-*`; an app artifact matching that glob would fail the
+#     CLI release outright.
+#
+# The app also must never be added to .claude-plugin/marketplace.json or
+# .codex-plugin/plugin.json: check_manifests.py welds those versions to
+# Cargo.toml and asserts exactly one plugin entry.
+name: Release app
+
+on:
+  push:
+    tags: ["app-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and publish GitPic.app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Tag must match apps/GitPic/VERSION
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          want="app-v$(tr -d '[:space:]' < apps/GitPic/VERSION)"
+          echo "tag=$tag expected=$want"
+          test "$tag" = "$want"
+
+      - name: App changelog must have a section for this version
+        run: |
+          set -euo pipefail
+          ver="$(tr -d '[:space:]' < apps/GitPic/VERSION)"
+          grep -qE "^## \[${ver}\]" apps/GitPic/CHANGELOG.md \
+            || { echo "apps/GitPic/CHANGELOG.md has no '## [$ver]' section" >&2; exit 1; }
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the CLI that gets embedded
+        run: cargo build --release --locked
+
+      - name: Swift tests (offline only)
+        working-directory: apps/GitPic
+        # GITPIC_LIVE is intentionally unset: the live suite uploads to a real
+        # repository and needs a gh credential, neither of which belongs in CI.
+        run: swift test
+
+      - name: Build the app bundle
+        run: ./scripts/build-app.sh
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          ver="$(tr -d '[:space:]' < apps/GitPic/VERSION)"
+          cli="$(./target/release/gitpic --version | awk '{print $2}')"
+          name="GitPic-${ver}-macos-arm64"
+          ( cd dist-app && ditto -c -k --sequesterRsrc --keepParent GitPic.app "${name}.zip" )
+          ( cd dist-app && shasum -a 256 "${name}.zip" > "${name}.zip.sha256" )
+          echo "version=$ver"     >> "$GITHUB_OUTPUT"
+          echo "cli=$cli"         >> "$GITHUB_OUTPUT"
+          echo "asset=$name.zip"  >> "$GITHUB_OUTPUT"
+          # Guard the separation described at the top of this file, rather than
+          # trusting it: nothing we produce may look like a CLI artifact.
+          if find dist-app -maxdepth 1 -name 'gitpic-*' | grep -q .; then
+            echo "error: an artifact matches the CLI's gitpic-* glob" >&2
+            exit 1
+          fi
+          test ! -d dist
+
+      - name: Verify the packaged app
+        run: |
+          set -euo pipefail
+          cd dist-app
+          shasum -c "${{ steps.package.outputs.asset }}.sha256"
+          rm -rf verify && mkdir verify
+          ditto -x -k "${{ steps.package.outputs.asset }}" verify
+          test -x verify/GitPic.app/Contents/MacOS/GitPic
+          # The embedded CLI is the whole reason a Finder-launched app works.
+          test -x verify/GitPic.app/Contents/Resources/gitpic
+          verify/GitPic.app/Contents/Resources/gitpic --version
+          codesign --verify --deep --strict verify/GitPic.app
+          plutil -lint verify/GitPic.app/Contents/Info.plist
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: GitPic.app v${{ steps.package.outputs.version }}
+          # Not notarisable yet, so this ships as a prerelease with the caveat
+          # stated up front rather than buried.
+          prerelease: true
+          body: |
+            macOS menu-bar app for gitpic. Embeds gitpic ${{ steps.package.outputs.cli }}.
+
+            **This build is ad-hoc signed and not notarised.** macOS will refuse to
+            open it after download until you clear the quarantine flag:
+
+            ```
+            xattr -dr com.apple.quarantine /Applications/GitPic.app
+            ```
+
+            Building from source avoids that entirely:
+
+            ```
+            ./scripts/build-app.sh && open dist-app/GitPic.app
+            ```
+
+            Apple Silicon only. Requires GitHub CLI (`brew install gh`) and
+            `gh auth login` — the app finds `gh` itself, since a Finder-launched
+            app does not inherit your shell `PATH`.
+
+            See `apps/GitPic/CHANGELOG.md` for details.
+          files: |
+            dist-app/${{ steps.package.outputs.asset }}
+            dist-app/${{ steps.package.outputs.asset }}.sha256
+          fail_on_unmatched_files: true
