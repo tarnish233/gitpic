@@ -55,7 +55,7 @@ chmod +x ./gitpic && mv ./gitpic ~/.local/bin/  # ensure ~/.local/bin is on PATH
 > Intel Mac: `x86_64-apple-darwin`. Linux: `x86_64-unknown-linux-gnu`. Windows is
 > a `.zip` containing `gitpic.exe`.
 
-**From source** (needs Rust)
+**From source** (needs Rust 1.88 or newer)
 
 ```bash
 cargo install --git https://github.com/tarnish233/gitpic-cli
