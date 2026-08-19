@@ -6,7 +6,7 @@ Upload local or clipboard images to a GitHub repository (used as an image host)
 and get a Markdown link — instantly copied to your clipboard.
 
 Human-friendly on the terminal, machine-friendly (`--json`) for scripts and AI
-agents. Single static binary, no runtime required.
+agents. The program is a single binary; authentication is delegated to GitHub CLI (`gh`).
 
 ## Demo
 
@@ -14,7 +14,7 @@ agents. Single static binary, no runtime required.
 $ gitpic init
 gitpic init — configure your GitHub image host
 
-Credentials come from `gh auth token`, or from GITPIC_TOKEN.
+Credentials come from `gh auth token`.
 Run `gh auth login` once if you have not already.
 
 Target repo (owner/name): your-name/img
@@ -63,7 +63,7 @@ cargo install --git https://github.com/tarnish233/gitpic-cli
 
 ## Setup
 
-Credentials come from the [GitHub CLI](https://cli.github.com) by default, so
+Credentials come only from the [GitHub CLI](https://cli.github.com), so
 **no secret is stored in the config file**:
 
 ```bash
@@ -71,24 +71,14 @@ gh auth login          # once; the token lives in your system keyring
 gitpic init            # asks for repo/branch/link kind only, never a token
 ```
 
-`gitpic` takes the first credential it can get, in this order:
+Whenever GitHub access is needed, `gitpic` runs
+`gh auth token --hostname github.com`. `GITPIC_TOKEN` is no longer read and the
+`github.token` config key is no longer supported. When upgrading, remove any
+legacy `token` line and run `gh auth login`; otherwise strict config validation
+reports `CONFIG_INVALID`.
 
-| Order | Source | For |
-|---|---|---|
-| 1 | `GITPIC_TOKEN` env var | CI, containers, machines without `gh` |
-| 2 | `github.token` in the config file | Legacy; still supported |
-| 3 | `gh auth token` | Default; keeps the config file secret-free |
-
-A `token` in the config wins over `gh`: explicit configuration beats
-auto-detection, so upgrading gitpic never silently changes which account
-uploads. To switch to `gh`, delete that line — `gitpic doctor` reports which
-source is actually in use.
-
-> **Scope caveat**: `gh`'s OAuth token typically carries
-> `gist, read:org, repo, workflow` — *broader* than what writing to one image
-> repo needs. This keeps the secret out of a syncable file; it does not narrow
-> the token's scope. For least privilege, use a fine-grained token limited to the
-> one repo with `Contents: Read/Write` and pass it via `GITPIC_TOKEN`.
+> **Scope caveat**: `gh`'s OAuth token may be broader than what writing to one
+> image repo needs. Use `gh auth status` to inspect the active account and login.
 
 Config lives at `~/.config/gitpic/config.toml` (honors `$XDG_CONFIG_HOME`).
 You can hand-write it or generate it with `gitpic init`. Note there is no `token`
@@ -110,11 +100,10 @@ max_width     = 0        # 0 = keep original
 quality       = 82       # JPEG quality when compressing (1-100)
 ```
 
-Or via environment variables (nothing written to disk; they override the config
-file, but CLI flags override them):
+The upload target and preferences can also be overridden with environment
+variables (credentials cannot; CLI flags still take priority):
 
 ```bash
-export GITPIC_TOKEN="github_pat_xxx"   # fine-grained token, Contents: Read/Write
 export GITPIC_REPO="your-name/img"     # owner/name (or just name, keeping the owner)
 export GITPIC_OWNER="your-name"        # optional: override only the owner
 export GITPIC_BRANCH="main"            # optional (default: main)
@@ -136,7 +125,7 @@ gitpic screenshot.png            # upload, print markdown, copy to clipboard
 gitpic a.png b.png               # batch upload
 gitpic paste                     # upload the image on your clipboard
 cat img.png | gitpic --stdin          # extension comes from the bytes
-gitpic doctor                    # verify token + repo access
+gitpic doctor                    # verify gh authentication + repo access
 gitpic list                      # show recent uploads (local history)
 gitpic completion zsh            # print shell completion script
 gitpic skill install             # install the agent skill (see below)
@@ -156,7 +145,7 @@ gitpic big.jpg --compress --quality 80       # JPEG quality
 
 ```bash
 gitpic config path
-gitpic config get                        # token is redacted
+gitpic config get                        # show all settings
 gitpic config set github.repo owner/name
 gitpic config set upload.link_kind raw
 gitpic config set upload.compress true

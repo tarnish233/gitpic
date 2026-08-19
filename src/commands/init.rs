@@ -9,21 +9,8 @@ pub fn run() -> Result<()> {
 
     crate::output::line("gitpic init — configure your GitHub image host\n");
 
-    // Deliberately no token prompt. `prompt` reads through a plain
-    // `stdin.read_line()`, so a typed token would echo to the terminal and stay
-    // in the scrollback, in `script`/asciinema recordings, and in any terminal
-    // logger — and answering it would then write that token to disk in plaintext,
-    // which is the exact thing the credential chain was reworked to avoid.
-    // `gh auth token` keeps the secret in the OS keyring; `GITPIC_TOKEN` keeps it
-    // out of any file. An existing `github.token` in the config still works and
-    // still wins over `gh`, so nobody is cut off by this.
-    if cfg.github.token.is_empty() {
-        crate::output::line("Credentials come from `gh auth token`, or from GITPIC_TOKEN.");
-        crate::output::line("Run `gh auth login` once if you have not already.\n");
-    } else {
-        crate::output::line("Using the `github.token` already in your config file.");
-        crate::output::line("Delete that line to switch to `gh auth token` instead.\n");
-    }
+    crate::output::line("Credentials come from `gh auth token`.");
+    crate::output::line("Run `gh auth login` once if you have not already.\n");
 
     let repo_spec = {
         // Offered whenever *either* half is set, and `require_target` still has to

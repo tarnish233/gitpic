@@ -150,12 +150,6 @@ impl Cli {
         }
         set
     }
-
-    /// Whether `--repo` was given. Meaningful for the upload path and `doctor`,
-    /// which both resolve a target; ignored by every other subcommand.
-    pub fn repo_override_set(&self) -> bool {
-        self.repo.is_some()
-    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -387,7 +381,7 @@ mod tests {
         // The flags that mean something everywhere must never be reported.
         let cli = Cli::try_parse_from(["gitpic", "list", "--json", "-q", "-vv"]).unwrap();
         assert!(cli.upload_only_flags_set().is_empty());
-        assert!(!cli.repo_override_set());
+        assert!(cli.repo.is_none());
     }
 
     #[test]

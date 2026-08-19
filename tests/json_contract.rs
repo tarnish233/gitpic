@@ -39,8 +39,6 @@ impl Sandbox {
             .args(args)
             .env("XDG_CONFIG_HOME", self.dir.join("cfg"))
             .env("XDG_DATA_HOME", self.dir.join("data"))
-            // Must not leak the developer's own credential into a test run.
-            .env_remove("GITPIC_TOKEN")
             .env_remove("GITPIC_REPO")
             .env_remove("GITPIC_OWNER")
             .env_remove("GITPIC_BRANCH")
@@ -99,6 +97,7 @@ fn a_json_error_is_a_json_envelope_on_stdout() {
     // on stderr and an empty stdout.
     for (args, want_code) in [
         (vec!["config", "get", "no.such.key", "--json"], 2),
+        (vec!["config", "set", "github.token", "legacy", "--json"], 2),
         (vec!["config", "set", "upload.quality", "0", "--json"], 2),
         // `init` is interactive and refuses --json rather than pretending.
         (vec!["init", "--json"], 2),
@@ -116,25 +115,48 @@ fn a_json_error_is_a_json_envelope_on_stdout() {
 }
 
 #[test]
-fn json_mode_never_leaks_the_token() {
+fn removed_config_token_is_rejected_without_leaking_its_value() {
     let sb = Sandbox::new("redact");
     std::fs::write(
         sb.dir.join("cfg/gitpic/config.toml"),
         "[github]\ntoken = \"ghp_do_not_print_me\"\nowner = \"someone\"\nrepo = \"pics\"\n",
     )
     .expect("write config");
-    for args in [
-        vec!["config", "get", "--json"],
-        vec!["config", "get", "github.token", "--json"],
-    ] {
-        let label = args.join(" ");
-        let (stdout, stderr, _) = sb.run(&args);
-        assert!(
-            !stdout.contains("ghp_do_not_print_me") && !stderr.contains("ghp_do_not_print_me"),
-            "`{label}` leaked the token:\n{stdout}\n{stderr}"
-        );
-        assert!(stdout.contains("<redacted>"), "`{label}`: {stdout}");
-    }
+    let (stdout, stderr, code) = sb.run(&["config", "get", "--json"]);
+    assert_eq!(code, 10);
+    assert!(
+        !stdout.contains("ghp_do_not_print_me") && !stderr.contains("ghp_do_not_print_me"),
+        "config diagnostic leaked the removed token:\n{stdout}\n{stderr}"
+    );
+    let body = parse(&stdout, "config get --json");
+    assert_eq!(
+        body.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("CONFIG_INVALID")
+    );
+}
+
+#[test]
+fn gitpic_token_is_ignored_and_gh_is_required() {
+    let sb = Sandbox::new("gh-only");
+    let empty_path = sb.dir.join("empty-path");
+    std::fs::create_dir_all(&empty_path).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_gitpic"))
+        .args(["doctor", "--json"])
+        .env("XDG_CONFIG_HOME", sb.dir.join("cfg"))
+        .env("XDG_DATA_HOME", sb.dir.join("data"))
+        .env("PATH", &empty_path)
+        .env("GITPIC_TOKEN", "ghp_legacy_value_must_not_be_used")
+        .output()
+        .expect("the binary runs");
+    assert_eq!(out.status.code(), Some(3));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("ghp_legacy_value_must_not_be_used"));
+    let body = parse(&stdout, "doctor --json");
+    assert_eq!(body.get("token_source"), Some(&serde_json::Value::Null));
+    assert_eq!(
+        body.get("token_valid").and_then(|v| v.as_bool()),
+        Some(false)
+    );
 }
 
 #[test]

@@ -1,16 +1,64 @@
 //! Upload orchestration for files, stdin, and clipboard sources.
 
-use super::{build_item, resolve_compress, resolve_link_kind, resolve_template, InputImage};
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, LinkKind, OutputFormat};
 use crate::config::Config;
 use crate::error::{AppError, Result};
-use crate::github::GitHub;
+use crate::github::{GitHub, PutOutcome};
 use crate::history::{self, Record};
-use crate::imageproc;
+use crate::imageproc::{self, CompressOpts};
+use crate::link;
 use crate::naming;
 use crate::output::{self, ItemResult, Mode};
 use std::io::Read;
 use std::path::Path;
+
+struct InputImage {
+    name: String,
+    bytes: Vec<u8>,
+}
+
+fn resolve_compress(cli: &Cli, cfg: &Config) -> CompressOpts {
+    CompressOpts {
+        enabled: (cfg.upload.compress || cli.compress) && !cli.no_compress,
+        max_width: cli.max_width.unwrap_or(cfg.upload.max_width),
+        quality: cli.quality.unwrap_or(cfg.upload.quality),
+    }
+}
+
+fn build_item(
+    outcome: &PutOutcome,
+    name: &str,
+    kind: LinkKind,
+    format: OutputFormat,
+    cfg: &Config,
+) -> ItemResult {
+    let alt = naming::alt_text(name);
+    let url = link::url_for(
+        kind,
+        &cfg.github.owner,
+        &cfg.github.repo,
+        &cfg.github.branch,
+        &outcome.path,
+    );
+    let raw_url = link::raw_url(
+        &cfg.github.owner,
+        &cfg.github.repo,
+        &cfg.github.branch,
+        &outcome.path,
+    );
+    ItemResult {
+        markdown: link::markdown(&alt, &url),
+        html: link::html(&alt, &url),
+        output: link::render(format, &alt, &url),
+        name: alt,
+        url,
+        raw_url,
+        path: outcome.path.clone(),
+        sha: outcome.content_sha.clone(),
+        size: outcome.size,
+        deduped: outcome.deduped,
+    }
+}
 
 /// Entry point for the default (upload) path and `paste`.
 ///
@@ -50,17 +98,19 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
 
     // Resolved here, after the inputs are in hand: a credential helper may take
     // a moment, and there is no point paying for it to upload a broken image.
-    let cred = crate::auth::resolve(cfg)?;
+    let token = crate::auth::token()?;
 
     let gh = GitHub::new(
-        &cred.token,
+        &token,
         &cfg.github.owner,
         &cfg.github.repo,
         &cfg.github.branch,
     )?;
 
-    let kind = resolve_link_kind(cli, cfg);
-    let template = resolve_template(cli, cfg).to_string();
+    let kind = cli
+        .link
+        .unwrap_or_else(|| link::parse_link_kind(&cfg.upload.link_kind));
+    let template = cli.path.as_deref().unwrap_or(&cfg.upload.path_template);
     let dedup = cfg.upload.dedup;
 
     if crate::link::cdn_branch_is_ambiguous(kind, &cfg.github.branch) {
@@ -100,7 +150,7 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
             );
         }
         let hash = naming::sha256_hex(&bytes);
-        let remote_path = naming::render_path(&template, &name, &hash);
+        let remote_path = naming::render_path(template, &name, &hash);
         // Checked on the rendered result, the single point every template source
         // funnels into — `config set`, `--path`, and a hand-edited config.toml.
         if !naming::is_safe_remote_path(&remote_path) {
@@ -133,15 +183,7 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
                 if outcome.deduped { " [deduped]" } else { "" }
             );
         }
-        let item = build_item(
-            &outcome,
-            &name,
-            kind,
-            cli.effective_format(),
-            &cfg.github.owner,
-            &cfg.github.repo,
-            &cfg.github.branch,
-        );
+        let item = build_item(&outcome, &name, kind, cli.effective_format(), cfg);
         // Record to local history (best-effort; never fail an upload for this).
         if let Err(e) = history::append(&Record {
             time: chrono::Local::now().to_rfc3339(),
@@ -327,6 +369,41 @@ fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("valid args")
+    }
+
+    #[test]
+    fn no_compress_overrides_the_flag_and_config() {
+        let mut cfg = Config::default();
+        cfg.upload.compress = true;
+        let cli = parse(&["gitpic", "a.png", "--compress", "--no-compress"]);
+        assert!(!resolve_compress(&cli, &cfg).enabled);
+    }
+
+    #[test]
+    fn flag_or_config_enables_compression() {
+        let mut cfg = Config::default();
+        assert!(resolve_compress(&parse(&["gitpic", "a.png", "--compress"]), &cfg).enabled);
+        cfg.upload.compress = true;
+        assert!(resolve_compress(&parse(&["gitpic", "a.png"]), &cfg).enabled);
+    }
+
+    #[test]
+    fn cli_sizing_overrides_config() {
+        let mut cfg = Config::default();
+        cfg.upload.max_width = 100;
+        cfg.upload.quality = 50;
+        let overridden = resolve_compress(
+            &parse(&["gitpic", "a.png", "--max-width", "800", "--quality", "90"]),
+            &cfg,
+        );
+        assert_eq!((overridden.max_width, overridden.quality), (800, 90));
+        let inherited = resolve_compress(&parse(&["gitpic", "a.png"]), &cfg);
+        assert_eq!((inherited.max_width, inherited.quality), (100, 50));
+    }
 
     #[test]
     fn content_name_defaults_when_unnamed() {

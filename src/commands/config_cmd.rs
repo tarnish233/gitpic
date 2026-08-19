@@ -21,7 +21,7 @@ struct ValueEnvelope<'a> {
     value: &'a str,
 }
 
-/// `config get` with no key. The token is redacted, exactly as in the human view.
+/// `config get` with no key.
 #[derive(Serialize)]
 struct ConfigEnvelope<'a> {
     ok: bool,
@@ -55,14 +55,13 @@ pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
             let cfg = Config::load()?;
             match key.as_deref() {
                 None => {
-                    let safe = redacted_config(&cfg);
                     if mode.is_json() {
                         crate::output::print_json(&ConfigEnvelope {
                             ok: true,
-                            config: &safe,
+                            config: &cfg,
                         });
                     } else {
-                        crate::output::line(&toml::to_string_pretty(&safe).unwrap_or_default());
+                        crate::output::line(&toml::to_string_pretty(&cfg).unwrap_or_default());
                     }
                 }
                 Some(k) => {
@@ -82,11 +81,6 @@ pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
         ConfigAction::Set { key, value } => {
             let mut cfg = Config::load()?;
             set_key(&mut cfg, key, value)?;
-            // The same check the file and the environment go through, so no entry
-            // point can accept a value the others refuse. `set_key` still parses
-            // per-key (a bool is not a number), but the *semantic* rules live in
-            // one place.
-            cfg.validate_public().map_err(AppError::usage)?;
             let path = cfg.save()?;
             let shown = path.display().to_string();
             if mode.is_json() {
@@ -131,7 +125,6 @@ pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
 
 fn get_key(cfg: &Config, key: &str) -> Result<String> {
     let v = match key {
-        "github.token" => redact_token(&cfg.github.token),
         "github.owner" => cfg.github.owner.clone(),
         "github.repo" => cfg.github.repo.clone(),
         "github.branch" => cfg.github.branch.clone(),
@@ -147,44 +140,13 @@ fn get_key(cfg: &Config, key: &str) -> Result<String> {
     Ok(v)
 }
 
-fn redact_token(token: &str) -> String {
-    if token.is_empty() {
-        String::new()
-    } else {
-        "<redacted>".to_string()
-    }
-}
-
-fn redacted_config(cfg: &Config) -> Config {
-    let mut safe = cfg.clone();
-    safe.github.token = redact_token(&safe.github.token);
-    safe
-}
-
 fn set_key(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
     match key {
-        "github.token" => cfg.github.token = value.to_string(),
         "github.owner" => cfg.github.owner = value.to_string(),
         "github.repo" => cfg.set_repo_spec(value)?,
         "github.branch" => cfg.github.branch = value.to_string(),
-        "upload.path_template" => {
-            // Rendered here with stand-in values so a bad template fails at the
-            // moment it is set, not on the next upload. `upload::run` re-checks
-            // the rendered path, which is what also covers a hand-edited file.
-            let sample = crate::naming::render_path(value, "sample.png", &"0".repeat(64));
-            if !crate::naming::is_safe_remote_path(&sample) {
-                return Err(AppError::usage(format!(
-                    "invalid path template {value:?}: it must be repo-relative \
-                     with no empty or `..` segments (renders to {sample:?})"
-                )));
-            }
-            cfg.upload.path_template = value.to_string()
-        }
+        "upload.path_template" => cfg.upload.path_template = value.to_string(),
         "upload.link_kind" => {
-            // Validate on the way in. `parse_link_kind` silently falls back to
-            // cdn, so an unchecked typo here is permanent and invisible.
-            crate::link::parse_link_kind_strict(value)
-                .ok_or_else(|| AppError::usage(format!("invalid link kind (cdn|raw): {value}")))?;
             cfg.upload.link_kind = value.trim().to_ascii_lowercase();
         }
         "upload.dedup" => cfg.upload.dedup = parse_bool(value)?,
@@ -196,19 +158,15 @@ fn set_key(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
                 .map_err(|_| AppError::usage(format!("invalid u32: {value}")))?
         }
         "upload.quality" => {
-            let q: u8 = value
+            cfg.upload.quality = value
                 .parse()
                 .map_err(|_| AppError::usage(format!("invalid u8 (1-100): {value}")))?;
-            if !(1..=100).contains(&q) {
-                return Err(AppError::usage(format!(
-                    "quality out of range (1-100): {value}"
-                )));
-            }
-            cfg.upload.quality = q;
         }
         _ => return Err(AppError::usage(format!("unknown key: {key}"))),
     }
-    Ok(())
+    // Syntax is parsed above; all semantic rules are centralized in Config so
+    // file, environment, and `config set` cannot drift apart.
+    cfg.validate().map_err(AppError::usage)
 }
 
 fn parse_bool(v: &str) -> Result<bool> {
@@ -224,29 +182,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn token_is_never_returned_by_get_key() {
-        let mut cfg = Config::default();
-        cfg.github.token = "sensitive-value-for-test".to_string();
-        assert_eq!(get_key(&cfg, "github.token").unwrap(), "<redacted>");
-        let rendered = toml::to_string_pretty(&redacted_config(&cfg)).unwrap();
-        assert!(!rendered.contains("sensitive-value-for-test"));
-        assert!(rendered.contains("<redacted>"));
-    }
-
-    #[test]
-    fn empty_token_stays_empty_when_redacted() {
-        assert_eq!(redact_token(""), "");
-    }
-
-    #[test]
     fn every_config_field_is_reachable_by_get_and_set() {
         // One drift direction is already compile-checked: every match arm
         // dereferences a real field. The open hole is adding a `Config` field and
         // forgetting the arms, which silently 404s for the user. Deriving the key
         // list from `Config` itself turns that into a test failure instead.
-        let mut cfg = Config::default();
-        // Needs a non-empty token, or `skip_serializing_if` hides the key.
-        cfg.github.token = "t".to_string();
+        let cfg = Config::default();
         let value = toml::Value::try_from(&cfg).expect("Config serializes");
         for (section, body) in value.as_table().expect("Config is a table") {
             for field in body.as_table().expect("each section is a table").keys() {

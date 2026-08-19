@@ -4,6 +4,21 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 变更
+- **破坏性变更：**GitHub 凭据现在只通过
+  `gh auth token --hostname github.com` 获取。`GITPIC_TOKEN` 会被忽略，遗留的
+  `github.token` 配置键会被拒绝。升级前请删除该键，并运行 `gh auth login`。
+- `gitpic doctor` 为保持 JSON 契约兼容继续输出 `token_source`，但其非空值现在只可能是
+  `"gh"`。
+
+### 重构
+- 删除三来源凭据优先级、凭据来源枚举、配置脱敏路径，以及 `init`、`config` 中的遗留
+  token 分支。
+- 将 `config set` 的语义校验统一收口到 `Config::validate`，把上传专用辅助逻辑移回上传
+  模块，并合并 stdout 的受保护写入路径；在不改变非认证行为的前提下减少重复逻辑。
+
 ## [0.3.0] - 2026-08-18
 
 ### 安全
