@@ -9,22 +9,30 @@ repository root.
 
 ## [0.1.0] — unreleased
 
-First version. Menu-bar app with a notch drop zone, driving the bundled CLI over
-its `--json` contract.
+First version. Menu-bar app driving the bundled CLI over its `--json` contract.
 
 ### Added
 
 - Menu-bar item: upload from the clipboard, pick files, switch link format
-  (Markdown / HTML / CDN / Raw), re-copy a recent upload, run `doctor`.
-- Notch drop zone: drag images onto the island under the notch. The interactive
-  area is the strip *below* the menu bar — see the constraint note below.
+  (Markdown / HTML / CDN / Raw), re-copy a recent upload, run `doctor`. Progress,
+  success, and failure all report on the status item — its symbol, its tooltip,
+  and the main window's status line.
 - Main window: target repository, upload settings (all ten CLI config keys),
   history browser, and an About pane showing resolved tool paths.
 - `gitpic` is embedded in the bundle and invoked by absolute path.
 - `gh` is discovered at launch (Homebrew paths, then a login-shell probe) and its
   directory is prepended to the `PATH` handed to the CLI child process.
 - Launch diagnostics at `~/Library/Logs/GitPic.log`.
-- `GITPIC_APP_DRY_RUN=1` records drops without uploading.
+- `GITPIC_APP_DRY_RUN=1` records what would be uploaded without uploading. Both
+  upload entry points honour it.
+
+### Not in this version
+
+- **The notch drop zone.** The panel is written and the platform constraints
+  behind it are measured (see below), but a real Finder-to-panel drag was never
+  verified end to end, so it does not start with the app. `defaults write
+  dev.gitpic.app NotchDropZone -bool true` opts in. With it off the app has no
+  drag-and-drop target: upload from the clipboard or the file picker.
 
 ### Notes on constraints this version works within
 
@@ -34,8 +42,16 @@ its `--json` contract.
   reproducing it requires launching via Finder, since `open(1)` propagates the
   caller's environment and hides the problem.
 - **The menu-bar strip delivers no mouse or drag events to any window, at any
-  window level.** The drop target therefore hangs below it. Tested at
+  window level.** Any drop target therefore has to hang below it. Tested at
   shielding, statusBar+1, mainMenu+1, popUpMenu, and floating levels.
+- **Menu icons need normalising.** `NSMenuItem` draws each image at the image's
+  own size, and SF Symbols have per-glyph bounding boxes — 21–28 px wide and
+  19–25 px tall at 2x for the symbols in this menu — so the icon column is ragged
+  unless every symbol is centred in one shared box. The default `.medium` symbol
+  scale also renders heavier than any system menu; `.small` at the menu font's
+  point size matches Finder's own metrics. A section header is laid out at the
+  icon column rather than the title column, so it needs a spacer image to line up
+  with the items under it.
 - **The app is ad-hoc signed and is not notarised.** It runs when built locally.
   Downloaded copies are blocked by Gatekeeper until a Developer ID certificate
   exists. The machine's only Apple Development identity is revoked in effect —
