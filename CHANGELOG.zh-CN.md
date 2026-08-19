@@ -21,6 +21,22 @@
   写在配置文件里是 `CONFIG_INVALID`、来自 `GITPIC_REPO` 是 `USAGE`。五个入口现在都
   必须经过 `validate` 的两个包装之一。
 
+### 文档
+- 技能文档与两份 README 此前描述的 `doctor` 分诊是做不到的：报告本身就是信封、
+  **不含 `error` 字段**，而文档三处让 agent 去读 `error.code` 来区分"分支不存在"(8)
+  与"没有写权限"(7)。现在改为读退出码，并写明后者连 `detail` 都没有 —— 因为那个码是
+  在所有探测都答复之后**合成**出来的。
+- "总是传 `--json` 和 `--no-copy`"与文档自己的示例矛盾。`--no-copy` 只在上传路径有
+  意义，其余五个子命令会把它当 `USAGE`（2）拒掉，所以
+  `gitpic doctor --json --no-copy` 是失败的。现在措辞改为只在上传命令上加它。
+- `--json` 的例外不止 `init` 一个：`gitpic completion <shell>` 忽略它、照打几百行
+  shell 脚本；`gitpic config edit` 忽略它并把 stdout 交给 `$EDITOR`（默认 `vi`），
+  非 tty 下先吐一屏终端控制序列再吐信封。三个例外现在都写明了。
+- `CONFIG_INVALID` 自 0.2.3 起就不再报行号（为避免回显可能含凭据的源码行，`Display`
+  换成了 `message()`），但技能文档的退出码表和两份 README 都还承诺"指出出错的行"。
+- `--quiet` 被写成通用规则，实际只有上传路径和 `gitpic list` 兑现；`doctor -q` 与
+  `skill install -q` 照打人类可读输出。
+
 ## [0.4.0] - 2026-08-19
 
 ### 变更

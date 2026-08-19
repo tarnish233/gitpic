@@ -25,6 +25,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `GITPIC_REPO` was `USAGE`. All five entry points now go through one of
   `validate`'s two wrappers.
 
+### Documentation
+- The `doctor` triage described by the skill document and both READMEs was
+  impossible to follow: the report is its own envelope and carries **no `error`
+  field**, yet three passages told agents to read `error.code` to tell "branch
+  missing" (8) from "no write permission" (7). They now read the exit status, and
+  say that the latter does not even set `detail` — that code is *synthesised* after
+  every probe answered.
+- "Always pass `--json` and `--no-copy`" contradicted the documents' own examples.
+  `--no-copy` is meaningful only on the upload path; the other five subcommands
+  reject it as a `USAGE` error (2), so `gitpic doctor --json --no-copy` fails. The
+  instruction now scopes it to the upload commands.
+- `init` is not the only `--json` exception: `gitpic completion <shell>` ignores it
+  and prints hundreds of lines of shell script, and `gitpic config edit` ignores it
+  and hands stdout to `$EDITOR` (defaulting to `vi`), which off a tty emits a
+  screenful of terminal control sequences before the envelope. All three exceptions
+  are now stated.
+- `CONFIG_INVALID` has not reported a line number since 0.2.3 — `Display` was
+  replaced with `message()` so a source line that might hold a credential is never
+  echoed — but the skill's exit-code table and both READMEs still promised it named
+  "the offending line".
+- `--quiet` was written as a general rule while only the upload path and
+  `gitpic list` honour it; `doctor -q` and `skill install -q` still render human
+  output.
+
 ## [0.4.0] - 2026-08-19
 
 ### Changed

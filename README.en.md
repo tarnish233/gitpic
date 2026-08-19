@@ -156,13 +156,19 @@ gitpic config edit                       # open the file in $EDITOR
 
 `path_template` placeholders: `{year} {month} {day} {hash} {hash8} {name} {ext}`
 
-Every subcommand honours `--json` and answers with an `ok`-bearing envelope, failures
-included; the one exception is the interactive `gitpic init`, which rejects it.
-`--quiet` prints only machine-usable lines.
+`--json` answers with an `ok`-bearing envelope on every subcommand, failures
+included, with three exceptions: the interactive `gitpic init` **rejects** it;
+`gitpic completion <shell>` ignores it and prints the raw shell script; and
+`gitpic config edit` ignores it and hands stdout to `$EDITOR`, whose output is not
+JSON. `--quiet` only changes the output of the upload path and `gitpic list` (one
+link per line); `gitpic doctor` and `gitpic skill install` still print human check
+marks and prose under it (`config get`, `config path` and `skill path` already emit
+machine-usable output).
 
 Key names in the config file are validated strictly: a misspelled key or section
-(`dedupe`, `[uplaod]`) is a `CONFIG_INVALID` error pointing at the offending line
-rather than a value that is silently ignored. `gitpic config path` and
+(`dedupe`, `[uplaod]`) is a `CONFIG_INVALID` error naming the file and the rejected
+key rather than a value that is silently ignored (no line number, so a source line
+that might hold a credential is never echoed). `gitpic config path` and
 `gitpic config edit` keep working in that state so you can fix the file.
 
 ## Shell completion
@@ -229,12 +235,17 @@ codex plugin marketplace add tarnish233/gitpic-cli
 codex plugin add gitpic@gitpic
 ```
 
-Always call `gitpic` with `--json --no-copy` from an agent.
+Always call `gitpic` with `--json` from an agent, plus `--no-copy` on the upload
+commands. `--no-copy` is meaningful only on the upload path (`gitpic <files>`,
+`--stdin`, `paste`); every other subcommand rejects it as a `USAGE` error (exit 2),
+so `gitpic doctor --json --no-copy` fails.
 
 `gitpic doctor` exits non-zero when any check fails; scripts should still parse
-`config_ok`, `token_valid`, and `repo_writable` from its JSON report. Argument
-parsing failures also use the standard `{ "ok": false, "error": ... }` envelope
-when `--json` is present.
+`config_ok`, `token_valid`, and `repo_writable` from its JSON report. That report is
+its own envelope and carries **no `error` field**, so telling "branch missing" (8)
+from "no write permission" (7) means reading the exit status — the latter does not
+even set `detail`. Argument parsing failures also use the standard
+`{ "ok": false, "error": ... }` envelope when `--json` is present.
 
 ## Changelog
 
