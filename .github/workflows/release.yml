@@ -127,7 +127,25 @@ jobs:
             exit 1
           fi
           subtitle="$(awk '/^### / { sub(/^### /, ""); print; exit }' RELEASE_NOTES.md)"
-          if [[ -z "$subtitle" ]]; then subtitle="Release"; fi
+          # The subtitle is the first `### ` heading, which is only a *theme* when
+          # the changelog author wrote one before the Keep a Changelog categories.
+          # When they did not, the public title became "gitpic v0.4.0 — 变更" —
+          # a category label saying nothing about the release. Same rule this
+          # project applies everywhere else: input that cannot mean what it is
+          # being used for is an error, not a silently wrong default.
+          case "$subtitle" in
+            Added|Changed|Deprecated|Removed|Fixed|Security|Performance|Documentation|Testing|Packaging|CI|\
+            新增|变更|弃用|移除|修复|安全|性能|文档|测试|打包)
+              echo "The first '### ' heading in the ${version} changelog section is the category" >&2
+              echo "'${subtitle}', which would become the public release title. Add a theme line" >&2
+              echo "(a one-line '### <what this release is about>') above the categories." >&2
+              exit 1
+              ;;
+          esac
+          if [[ -z "$subtitle" ]]; then
+            echo "The ${version} changelog section has no '### ' heading to use as a subtitle" >&2
+            exit 1
+          fi
           echo "name=gitpic ${GITHUB_REF_NAME} — ${subtitle}" >> "$GITHUB_OUTPUT"
 
       - name: Download every build artifact
