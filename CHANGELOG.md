@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-19
+
+### Declare an MSRV, and let CI hold it for you
+
 ### Packaging
 - Declared an MSRV: `rust-version = "1.88"`. There was none, so on an older
   toolchain `cargo install` blew up somewhere inside a dependency instead of saying
@@ -560,7 +564,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.5.1
 [0.5.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.3.0
