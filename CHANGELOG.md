@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-19
+
 ### Changed
 - **Breaking:** GitHub credentials now come exclusively from
   `gh auth token --hostname github.com`. `GITPIC_TOKEN` is ignored and the
@@ -461,7 +463,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.3.0
 [0.2.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.3
 [0.2.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.2

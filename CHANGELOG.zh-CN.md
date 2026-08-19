@@ -6,6 +6,8 @@
 
 ## [未发布]
 
+## [0.4.0] - 2026-08-19
+
 ### 变更
 - **破坏性变更：**GitHub 凭据现在只通过
   `gh auth token --hostname github.com` 获取。`GITPIC_TOKEN` 会被忽略，遗留的
@@ -376,7 +378,8 @@
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.2.3...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.3.0
 [0.2.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.3
 [0.2.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.2
