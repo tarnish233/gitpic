@@ -92,3 +92,29 @@ jobs:
       # native dependency on this platform.
       - name: Test
         run: cargo test
+
+  app:
+    name: GitPic.app builds and tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build
+        working-directory: apps/GitPic
+        run: swift build
+
+      # Offline suites only. The live suite is gated behind GITPIC_LIVE because it
+      # uploads to a real repository and needs a gh credential.
+      - name: Test
+        working-directory: apps/GitPic
+        run: swift test
+
+      - name: App version and changelog agree
+        run: |
+          set -euo pipefail
+          ver="$(tr -d '[:space:]' < apps/GitPic/VERSION)"
+          grep -qE "^## \\[${ver}\\]" apps/GitPic/CHANGELOG.md \
+            || { echo "apps/GitPic/CHANGELOG.md has no '## [$ver]' section" >&2; exit 1; }
