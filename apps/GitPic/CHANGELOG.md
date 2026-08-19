@@ -7,7 +7,7 @@ the CLI build it embeds; that version is recorded in the bundle's
 The CLI's own changelogs are `CHANGELOG.md` and `CHANGELOG.zh-CN.md` at the
 repository root.
 
-## [0.1.0] — unreleased
+## [0.1.0] — 2026-08-19
 
 First version. Menu-bar app driving the bundled CLI over its `--json` contract.
 
