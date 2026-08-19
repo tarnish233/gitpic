@@ -214,10 +214,11 @@ codex plugin add gitpic@gitpic
 会把它当 `USAGE`（退出码 2）拒掉——`gitpic doctor --json --no-copy` 是会失败的。
 
 `gitpic doctor` 在任一检查失败时返回非零退出码；脚本仍应解析 JSON 中的
-`config_ok`、`token_valid` 和 `repo_writable`。它的报告本身就是信封，**不含
-`error` 字段**，所以要区分「分支不存在」（8）和「没有写权限」（7）得看退出码；
-后者连 `detail` 都没有。参数解析错误在 `--json` 模式下
-也会使用统一的 `{ "ok": false, "error": ... }` 结构。
+`config_ok`、`token_valid` 和 `repo_writable`。不健康的报告还会带上与其他子命令同形的
+`error` 对象（`ok` 为 false 时必有、为 true 时必无），所以「分支不存在」（8）和
+「没有写权限」（7）从 stdout 就能分开 —— 不必依赖退出码，管到解析器（`… | jq`）会把它
+换成解析器自己的。参数解析错误在 `--json` 模式下也会使用统一的
+`{ "ok": false, "error": ... }` 结构。
 
 ## 更新日志
 

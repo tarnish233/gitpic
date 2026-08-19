@@ -3,7 +3,7 @@
 use crate::config::Config;
 use crate::error::{AppError, ErrorCode, Result};
 use crate::github::GitHub;
-use crate::output::Mode;
+use crate::output::{ErrorBody, Mode};
 use owo_colors::{OwoColorize, Stream};
 use serde::Serialize;
 
@@ -26,6 +26,16 @@ struct DoctorReport {
     login: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// The failure, in the same `{ code, message }` shape every other subcommand
+    /// uses — present on exactly the reports where `ok` is false.
+    ///
+    /// The exit status carries the same code, but that is a side channel an agent
+    /// may never see: `gitpic doctor --json | jq` replaces it with jq's own 0, and
+    /// some agent harnesses do not surface it at all. stdout is the one channel a
+    /// caller parsing this report definitely has, so the code goes there too.
+    /// `detail` carries the same message for the human renderer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<ErrorBody>,
 }
 
 /// Pick which of the two probe failures to report.
@@ -84,13 +94,12 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
     let mut token_valid = false;
     let mut push_ok = false;
     let mut login = None;
-    let mut detail = None;
-    let mut failure_code = None;
-
-    if let Some(e) = &p.setup_err {
-        failure_code = Some(e.code);
-        detail = Some(e.message.clone());
-    }
+    // Code and message travel together, in the type that already pairs them.
+    // Holding them in two loose `Option`s is what let the synthesised
+    // PERMISSION_DENIED below end up with a code and no message at all.
+    let mut failure: Option<AppError> = p.setup_err;
+    // Worth reporting but not a failure, so it must not reach the exit status.
+    let mut caveat: Option<String> = None;
 
     // Synthesised up front so a missing branch can compete with the probe errors
     // on equal footing: it is a definite, actionable answer, not a "could not
@@ -105,8 +114,9 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
     if !p.config_ok {
         // An unconfigured target outranks everything else: it is the first thing
         // the user has to fix, and its remedy is the one they can act on.
-        failure_code = Some(ErrorCode::ConfigMissing);
-        detail = Some("run `gitpic init` or set GITPIC_REPO=owner/name".into());
+        failure = Some(AppError::config_missing(
+            "run `gitpic init` or set GITPIC_REPO=owner/name",
+        ));
     } else {
         let user_err = match &p.user {
             Some(Ok(name)) => {
@@ -137,13 +147,12 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
         };
         let worst = more_actionable(more_actionable(user_err, repo_err), branch_err);
         if let Some(e) = worst {
-            failure_code = Some(e.code);
-            detail = Some(e.message.clone());
+            failure = Some(AppError::new(e.code, e.message.clone()));
         } else if protected {
             // Not a failure: the rules may well permit this account. Worth saying,
             // because it is the usual reason an upload 409/422s after every check
             // above came back clean.
-            detail = Some(
+            caveat = Some(
                 "target branch is protected; an upload may still be refused by its rules".into(),
             );
         }
@@ -155,14 +164,26 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
     let repo_writable = push_ok && branch_present;
 
     let ok = p.config_ok && token_valid && repo_writable;
-    let exit = if ok {
-        0
-    } else if let Some(code) = failure_code {
-        code.exit_code()
-    } else {
-        // Everything answered, but GitHub reports no push/admin permission.
-        ErrorCode::PermissionDenied.exit_code()
-    };
+
+    // One value decides all three of `ok`, the exit status and `error`, so a report
+    // can no longer claim one thing and exit another. The fallback covers the run
+    // where every probe answered and GitHub simply said no: there is no probe error
+    // to take a code or a message from, and that is the most common way an upload
+    // turns out to be impossible — it used to report neither.
+    let failure = (!ok).then(|| {
+        failure.unwrap_or_else(|| {
+            AppError::permission_denied(
+                "GitHub reports no push or admin permission on this repository; check the \
+                 credential's access to it and its Contents read/write permission",
+            )
+        })
+    });
+    let exit = failure.as_ref().map_or(0, |e| e.code.exit_code());
+    // `detail` keeps its meaning — the one human-readable note — which is the
+    // failure's message whenever there is one, and the caveat otherwise.
+    let detail = failure.as_ref().map(|e| e.message.clone()).or(caveat);
+    let error = failure.map(|e| ErrorBody::new(e.code.as_str(), &e.message));
+
     (
         DoctorReport {
             ok,
@@ -173,6 +194,7 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
             token_source: p.source,
             login,
             detail,
+            error,
         },
         exit,
     )
@@ -398,12 +420,106 @@ mod tests {
 
     #[test]
     fn a_valid_token_without_push_is_permission_denied() {
-        // Everything answered; GitHub just says no. There is no error to report,
-        // so the exit code has to be synthesised.
+        // Everything answered; GitHub just says no. There is no probe error to take
+        // a code or a message from, so both are synthesised — this outcome used to
+        // carry neither `error` nor `detail`, which left the exit status as the only
+        // thing that said why `repo_writable` was false.
         let (r, exit) = summarize(probed(Ok("someone".into()), Ok(false)));
         assert!(r.token_valid && !r.repo_writable && !r.ok);
         assert_eq!(exit, ErrorCode::PermissionDenied.exit_code());
-        assert!(r.detail.is_none());
+        assert_eq!(
+            r.error.as_ref().map(|e| e.code.as_str()),
+            Some("PERMISSION_DENIED")
+        );
+        assert!(
+            r.detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("permission"),
+            "{:?}",
+            r.detail
+        );
+    }
+
+    /// The reporting contract agents key on: `error` is on stdout, in the shape
+    /// every other subcommand uses, and it is present on exactly the unhealthy
+    /// reports. The exit status says the same thing, but it is a side channel —
+    /// `gitpic doctor --json | jq` replaces it with jq's own 0 — so the two must
+    /// never disagree, and neither may go missing.
+    #[test]
+    fn error_marks_exactly_the_unhealthy_reports_and_names_the_exit_status() {
+        let cases: Vec<(&str, Probed, Option<ErrorCode>)> = vec![
+            ("healthy", probed(Ok("me".into()), Ok(true)), None),
+            (
+                "protected but healthy",
+                Probed {
+                    branch: Some(Ok(Branch::Present { protected: true })),
+                    ..probed(Ok("me".into()), Ok(true))
+                },
+                None,
+            ),
+            (
+                "no push permission",
+                probed(Ok("me".into()), Ok(false)),
+                Some(ErrorCode::PermissionDenied),
+            ),
+            (
+                "dead credential",
+                probed(Err(AppError::auth("nope")), Ok(true)),
+                Some(ErrorCode::AuthFailed),
+            ),
+            (
+                "/user outage only",
+                probed(Err(AppError::network("503")), Ok(true)),
+                Some(ErrorCode::Network),
+            ),
+            (
+                "missing branch",
+                Probed {
+                    branch: Some(Ok(Branch::Missing)),
+                    ..probed(Ok("me".into()), Ok(true))
+                },
+                Some(ErrorCode::RemoteNotFound),
+            ),
+            (
+                "nothing configured",
+                Probed {
+                    config_ok: false,
+                    source: None,
+                    user: None,
+                    repo: None,
+                    branch: None,
+                    setup_err: Some(AppError::config_missing("no credential")),
+                },
+                Some(ErrorCode::ConfigMissing),
+            ),
+        ];
+        for (what, p, want) in cases {
+            let (r, exit) = summarize(p);
+            assert_eq!(
+                r.error.as_ref().map(|e| e.code.clone()),
+                want.map(|c| c.as_str().to_string()),
+                "{what}: error.code"
+            );
+            assert_eq!(exit, want.map_or(0, ErrorCode::exit_code), "{what}: exit");
+            assert_eq!(r.ok, want.is_none(), "{what}: ok");
+            assert_eq!(
+                r.ok,
+                r.error.is_none(),
+                "{what}: `error` must be present on exactly the unhealthy reports"
+            );
+            if let Some(e) = &r.error {
+                assert!(
+                    !e.message.is_empty(),
+                    "{what}: error.message must say something"
+                );
+                assert_eq!(
+                    r.detail.as_deref(),
+                    Some(e.message.as_str()),
+                    "{what}: detail must carry the same message"
+                );
+            }
+        }
     }
 
     #[test]
