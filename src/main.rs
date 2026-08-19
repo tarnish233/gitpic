@@ -128,11 +128,19 @@ fn reject_ignored_options(cli: &Cli, repo_allowed: bool) -> Result<()> {
 }
 
 /// Resolve config: file -> env -> CLI overrides.
+///
+/// Each layer is validated by whoever applies it, and `--repo` is applied here —
+/// so the check belongs here too. Without it, the *highest*-priority source was
+/// the only unchecked one: `--repo o/..` collapsed a segment out of the request
+/// URL and `--repo 'o/re po'` sent `%20` into the path, both surfacing as a bare
+/// 404 while the identical value from the file or `GITPIC_REPO` was refused with
+/// an actionable message.
 fn resolve_config(cli: &Cli) -> Result<Config> {
     let mut cfg = Config::load()?;
     cfg.apply_env()?;
     if let Some(repo) = &cli.repo {
         cfg.set_repo_spec(repo)?;
+        cfg.validate_input()?;
     }
     Ok(cfg)
 }

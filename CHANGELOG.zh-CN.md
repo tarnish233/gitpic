@@ -6,6 +6,21 @@
 
 ## [未发布]
 
+### 把契约与实现对齐
+
+### 修复
+- `gitpic init` 不再写出一个自己拒绝加载的配置。它是唯一**落盘**却跳过
+  `Config::validate` 的写入方，所以 "Target repo" 里填 `me x/pics`、或分支带空格、
+  或填 `..`，都会在打出"✓ saved config"之后让**每一条**读配置的命令以
+  `CONFIG_INVALID`（退出码 10）失败 —— 包括 `init` 自己（它开头就 `Config::load()`），
+  唯一出路是 `gitpic config edit`。现在校验发生在写盘之前，坏答案报 `USAGE` 且盘上
+  什么都没动，`init` 可以直接重跑。
+- `--repo` 现在和其他来源一样被校验。它是优先级**最高**的来源，却是唯一不过
+  `validate` 的：`--repo o/..` 会让 reqwest 归一化掉一整段请求 URL（打到了别的端点），
+  `--repo 'o/re po'` 把 `%20` 送进路径 —— 两者都表现为一句光秃秃的 404，而同一个值
+  写在配置文件里是 `CONFIG_INVALID`、来自 `GITPIC_REPO` 是 `USAGE`。五个入口现在都
+  必须经过 `validate` 的两个包装之一。
+
 ## [0.4.0] - 2026-08-19
 
 ### 变更

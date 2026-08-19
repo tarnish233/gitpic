@@ -144,7 +144,7 @@ impl Config {
     /// Returns a bare message so each caller can attach the code that fits where
     /// the value came from: a file is `CONFIG_INVALID`, a flag or variable is a
     /// usage error.
-    pub(crate) fn validate(&self) -> std::result::Result<(), String> {
+    fn validate(&self) -> std::result::Result<(), String> {
         check_segment("github.owner", &self.github.owner)?;
         check_segment("github.repo", &self.github.repo)?;
         if self.github.branch.trim().is_empty() {
@@ -174,6 +174,19 @@ impl Config {
             ));
         }
         Ok(())
+    }
+
+    /// [`Config::validate`] for values that came from the user *now* — a CLI flag,
+    /// an environment variable, an `init` answer, a `config set` argument — where a
+    /// bad value is a usage error rather than a broken file.
+    ///
+    /// Every writer and every override must go through one of these two wrappers.
+    /// `--repo` and `init` did not, and each reintroduced on its own entry point
+    /// exactly the failure the check exists to prevent: `--repo o/..` deformed the
+    /// request URL into a bare 404, and `init` wrote a config that every later
+    /// command — `init` included — then refused with `CONFIG_INVALID`.
+    pub(crate) fn validate_input(&self) -> Result<()> {
+        self.validate().map_err(AppError::usage)
     }
 
     /// Locate the config file: `$XDG_CONFIG_HOME/gitpic/config.toml`
@@ -332,7 +345,7 @@ impl Config {
         }
         // Checked after the overrides, not per-variable: `GITPIC_LINK=raw2` used to
         // be accepted here and then read back leniently as cdn.
-        self.validate().map_err(AppError::usage)?;
+        self.validate_input()?;
         Ok(())
     }
 
@@ -676,5 +689,28 @@ mod tests {
         )
         .expect_err("must be rejected");
         assert_eq!(err.code, ErrorCode::ConfigInvalid);
+    }
+
+    #[test]
+    fn a_repo_spec_from_a_flag_is_validated_like_one_from_anywhere_else() {
+        // Regression: `--repo` is the highest-priority source and was the only
+        // unvalidated one. `set_repo_spec` trims the halves but cannot judge what
+        // is left, so `o/..` and `o/re po` were accepted and deformed the request
+        // URL — a bare 404 — while the identical value in the file or in
+        // GITPIC_REPO was refused with a message naming the field.
+        for bad in ["o/..", "o/re po", "o/a\tb", ".."] {
+            let mut cfg = Config::default();
+            cfg.github.owner = "o".to_string();
+            cfg.set_repo_spec(bad)
+                .unwrap_or_else(|_| panic!("{bad:?} parses as a spec"));
+            let err = cfg
+                .validate_input()
+                .expect_err(&format!("--repo {bad:?} must be rejected"));
+            assert_eq!(err.code, ErrorCode::Usage, "for {bad:?}");
+        }
+        // An ordinary override still goes through.
+        let mut cfg = Config::default();
+        cfg.set_repo_spec("owner/pics").unwrap();
+        cfg.validate_input().expect("a normal --repo must work");
     }
 }
