@@ -12,8 +12,8 @@ description: >-
 # gitpic — GitHub image host uploader
 
 `gitpic` uploads an image to a GitHub repository (used as an image host) and
-prints a Markdown link. It is human/agent dual-mode: always pass `--json` and
-`--no-copy` when calling it programmatically.
+prints a Markdown link. It is human/agent dual-mode: always pass `--json` when
+calling it programmatically, and `--no-copy` on the upload commands.
 
 ## Installation
 
@@ -47,23 +47,28 @@ Run the health check before the first upload in a session:
 gitpic doctor --json
 ```
 
-Parse stdout JSON. Require `config_ok`, `token_valid`, and `repo_writable` to be
-`true`; an unhealthy report also has a non-zero exit status. If `config_ok` is
-false, tell the user to either run `gitpic init` or set
-`GITPIC_REPO=owner/name` (and optionally `GITPIC_BRANCH`,
-`GITPIC_LINK=cdn|raw`), then stop. If `token_valid` is false and
-`repo_writable` is also false, tell the user to run `gh auth login` — gitpic
-takes its credential only from `gh auth token` — then stop.
+Parse stdout JSON. The report is its own envelope and carries exactly
+`ok`, `config_ok`, `token_valid`, `repo_writable`, `branch_protected`,
+`token_source`, and optionally `login` and `detail` — **there is no `error`
+object**, so the machine-readable diagnosis is the **exit status**.
+
+Require `config_ok`, `token_valid`, and `repo_writable` to be `true`; an unhealthy
+report always has a non-zero exit status. If `config_ok` is false, tell the user to
+either run `gitpic init` or set `GITPIC_REPO=owner/name` (and optionally
+`GITPIC_BRANCH`, `GITPIC_LINK=cdn|raw`), then stop. If `token_valid` is false and
+`repo_writable` is also false, tell the user to run `gh auth login` — gitpic takes
+its credential only from `gh auth token` — then stop.
 
 `repo_writable` means **both** that the token may push to the repository **and**
-that the target branch exists. When it is false, read `error.code` to tell the two
-apart: `REMOTE_NOT_FOUND` (8) means the branch is missing — the user should create
-it or change `github.branch` — while `PERMISSION_DENIED` (7) means the token lacks
-Contents read/write on the repository. `detail` says which.
+that the target branch exists. Read the exit status to tell the two apart: 8
+(`REMOTE_NOT_FOUND`) means the branch is missing — the user should create it or
+change `github.branch`, and `detail` says so — while 7 (`PERMISSION_DENIED`) means
+the token lacks Contents read/write on the repository, and there `detail` is
+**absent**, so the exit status is the only signal.
 
 The three checks are probed independently, so read them together before acting. If
-`token_valid` is false **but `repo_writable` is true** and `error.code` is
-`NETWORK`, the credential is fine and GitHub's `/user` endpoint — which uploads
+`token_valid` is false **but `repo_writable` is true** and the exit status is 5
+(`NETWORK`), the credential is fine and GitHub's `/user` endpoint — which uploads
 never call — is simply unreachable. Retry; do not send the user to
 `gh auth login`, which cannot fix it. Treat `token_valid: false` as a credential
 problem only when `repo_writable` is also false.
@@ -149,9 +154,11 @@ gitpic list --json                                            # recent uploads (
 | 7    | PERMISSION_DENIED   | check token Contents permission/repo access       |
 | 8    | REMOTE_NOT_FOUND    | check GitHub repository, branch, and remote path  |
 | 9    | RATE_LIMITED        | wait or ask the user before retrying later        |
-| 10   | CONFIG_INVALID      | the config file is broken — tell the user to run `gitpic config edit`; `error.message` names the file and the offending line |
+| 10   | CONFIG_INVALID      | the config file is broken — tell the user to run `gitpic config edit`; `error.message` names the file plus the rejected key or the parser's complaint, but not a line number |
 
 Error JSON: `{ "ok": false, "error": { "code": "AUTH_FAILED", "message": "…" } }`
+This is the shape for upload and the other subcommands; `doctor` is the exception
+described above — it answers with its report and no `error` object.
 
 Do not confuse 3 with 10: `CONFIG_MISSING` means nothing is configured yet, so
 `gitpic init` is the fix. `CONFIG_INVALID` means the file exists but has bad syntax
@@ -175,10 +182,18 @@ instead — `results` is never present and empty.
 
 ## Constraints
 
-- Always pass `--json` and `--no-copy` for programmatic calls. Every subcommand
-  honours `--json` and answers with an `ok`-bearing envelope on stdout, failures
-  included — the one exception is `gitpic init`, which is interactive and rejects
-  `--json` outright. Use `GITPIC_REPO` or `gitpic config set` instead of `init`.
+- Always pass `--json` for programmatic calls, and `--no-copy` on the upload
+  commands only (`gitpic <files>`, `--stdin`, `paste`). Every other subcommand
+  **rejects** `--no-copy` with a `USAGE` error (2), so never add it to `doctor`,
+  `list`, `config`, `skill` or `completion`. The same goes for the other
+  upload-only options (`--link`, `--format`, `--name`, `--path`, `--compress`,
+  `--no-compress`, `--max-width`, `--quality`, `--stdin`).
+- `--json` produces an `ok`-bearing envelope on stdout for every subcommand,
+  failures included, with three exceptions — none of which an agent should call:
+  `gitpic init` **rejects** `--json` (it is interactive; use `GITPIC_REPO` or
+  `gitpic config set` instead), `gitpic completion <shell>` ignores it and prints
+  the raw shell script, and `gitpic config edit` ignores it and hands stdout to
+  `$EDITOR` (defaulting to `vi`), whose terminal output is not JSON.
 - Only access the clipboard when the user explicitly requests it.
 - Use absolute file paths.
 - Never print the GitHub token in the conversation.

@@ -144,11 +144,16 @@ gitpic config edit                       # 用 $EDITOR 打开配置文件
 
 `path_template` 占位符：`{year} {month} {day} {hash} {hash8} {name} {ext}`
 
-每个子命令都支持 `--json`（失败也返回带 `ok` 的信封），唯一例外是交互式的
-`gitpic init`，它会直接拒绝 `--json`。`--quiet` 只输出机器可用的行。
+`--json` 在每个子命令上都返回带 `ok` 的信封（失败也一样），三个例外：交互式的
+`gitpic init` 会直接**拒绝** `--json`；`gitpic completion <shell>` 忽略它、照打
+shell 脚本；`gitpic config edit` 忽略它并把 stdout 交给 `$EDITOR`，那不是 JSON。
+`--quiet` 只在上传路径和 `gitpic list` 上真正改变输出（每行一个链接）；`gitpic doctor`
+和 `gitpic skill install` 收到它仍打人类可读的勾/散文（`config get`、`config path`、
+`skill path` 的输出本来就是机器可用的）。
 
 配置文件里的键名是严格校验的：写错的键或段（比如 `dedupe`、`[uplaod]`）会报
-`CONFIG_INVALID` 并指出出错的行，而不是被静默忽略。这种情况下 `gitpic config path`
+`CONFIG_INVALID` 并指出文件名和被拒绝的那个键，而不是被静默忽略（为了不把可能含
+凭据的源码行回显出来，不报行号）。这种情况下 `gitpic config path`
 和 `gitpic config edit` 仍然可用，用来把文件改回来。
 
 ## 命令行补全
@@ -204,10 +209,14 @@ codex plugin marketplace add tarnish233/gitpic-cli
 codex plugin add gitpic@gitpic
 ```
 
-助手调用 `gitpic` 时请始终带上 `--json --no-copy`。
+助手调用 `gitpic` 时请始终带上 `--json`，并在上传命令上加 `--no-copy`。
+`--no-copy` 只对上传路径（`gitpic <文件>`、`--stdin`、`paste`）有意义，其余子命令
+会把它当 `USAGE`（退出码 2）拒掉——`gitpic doctor --json --no-copy` 是会失败的。
 
 `gitpic doctor` 在任一检查失败时返回非零退出码；脚本仍应解析 JSON 中的
-`config_ok`、`token_valid` 和 `repo_writable`。参数解析错误在 `--json` 模式下
+`config_ok`、`token_valid` 和 `repo_writable`。它的报告本身就是信封，**不含
+`error` 字段**，所以要区分「分支不存在」（8）和「没有写权限」（7）得看退出码；
+后者连 `detail` 都没有。参数解析错误在 `--json` 模式下
 也会使用统一的 `{ "ok": false, "error": ... }` 结构。
 
 ## 更新日志
