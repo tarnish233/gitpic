@@ -7,6 +7,60 @@ the CLI build it embeds; that version is recorded in the bundle's
 The CLI's own changelogs are `CHANGELOG.md` and `CHANGELOG.zh-CN.md` at the
 repository root.
 
+## [0.1.2] — 2026-08-20
+
+### Editable fields, a clipboard that takes a copied file, and an Icon Composer icon
+
+### Fixed
+
+- **Copying an image *file* — the ordinary Finder ⌘C — no longer reports "剪贴板里
+  没有图片".** The clipboard reader only looked for bitmap data (`.png`, `.tiff`,
+  an `NSImage`), and a Finder copy puts none of those on the pasteboard: it puts
+  `public.file-url`, which `NSImage` does not read back either. Measured, not
+  assumed. File URLs are now checked first and uploaded as files, so the original
+  bytes, extension, and name survive instead of every paste landing as a
+  re-encoded `clipboard.png`. A clipboard with nothing usable on it now also logs
+  the pasteboard's types — it was the one failure that left no trace at all, which
+  made "GitPic 没反应" undiagnosable.
+- A failed clipboard write is no longer reported as "已复制". `setString`'s result
+  was discarded, so a failure claimed success and the user pasted stale content
+  with no explanation. An empty result list no longer clears the clipboard either.
+- The file picker and the connectivity-test alert now hold `.regular` for as long
+  as they are on screen, the way the main window does, instead of calling
+  `NSApp.activate(ignoringOtherApps:)` — deprecated since macOS 14, and under
+  cooperative activation a background app cannot pull itself in front of the
+  active one.
+
+### Changed
+
+- The target-repository pane is now called **图床**, and its `doctor` button
+  **连通性测试** — the status-bar item's entry is renamed to match. The button's
+  three probes are all reads, and the pane now says so before it is pressed.
+- **Owner / Repo / Branch and the path template read as editable, because they now
+  look editable.** A bare `TextField` in a `.grouped` form draws no bezel and
+  right-aligns its text, which on macOS 26 is pixel-identical to the read-only
+  rows beside it — the fields have always been writable, but nothing on screen
+  said so. They now carry a bezel, read from the left, and show a placeholder;
+  Return saves.
+- **The status-bar menu no longer advertises shortcuts it cannot honour.** `⌘⇧V`,
+  `⌘O`, `⌘,` and `⌘Q` were shown as if they were global hotkeys. Nothing in the app
+  registers one, and a status-bar menu is not in the main menu chain, so they fired
+  only while the menu was already open — measured: pressing `⌘⇧V` with Finder
+  frontmost leaves no trace in the log at all. The labels are gone; the items work
+  by clicking.
+- The application icon is now an Icon Composer document: the menu-bar SF Symbol
+  `photo.on.rectangle.angled`, enlarged, as a black mark on a white Icon Composer
+  fill. Tahoe applies specular glass and shadow from `AppIcon.icon`; older macOS
+  gets the flattened `.icns`. This replaces the `sips`-generated iconset that 0.1.1
+  shipped.
+- `scripts/build-app.sh` compiles `AppIcon.icon` with `actool` (icns + Assets.car)
+  and declares it through `CFBundleIconFile` / `CFBundleIconName`.
+
+### Not in this version
+
+- **Global hotkeys.** Uploading from the clipboard without opening the menu would
+  need `RegisterEventHotKey`; this version does not register one.
+
 ## [0.1.1] — 2026-08-20
 
 ### A monochrome icon that belongs on macOS

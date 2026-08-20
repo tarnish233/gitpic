@@ -3,12 +3,12 @@ import SwiftUI
 import GitPicCore
 
 enum MainTab: String, CaseIterable, Identifiable {
-    case target, upload, history, about
+    case host, upload, history, about
     var id: Self { self }
 
     var title: String {
         switch self {
-        case .target:  "目标仓库"
+        case .host:    "图床"
         case .upload:  "上传"
         case .history: "历史"
         case .about:   "关于"
@@ -17,7 +17,7 @@ enum MainTab: String, CaseIterable, Identifiable {
 
     var systemImage: String {
         switch self {
-        case .target:  "shippingbox"
+        case .host:    "photo.stack"
         case .upload:  "arrow.up.circle"
         case .history: "clock.arrow.circlepath"
         case .about:   "info.circle"
@@ -29,7 +29,7 @@ enum MainTab: String, CaseIterable, Identifiable {
 @Observable
 final class MainNavigation {
     static let shared = MainNavigation()
-    var selectedTab: MainTab? = .target
+    var selectedTab: MainTab? = .host
     private init() {}
 }
 
@@ -37,7 +37,7 @@ struct MainWindowView: View {
     @State private var navigation = MainNavigation.shared
     @State private var model = AppModel.shared
 
-    private var activeTab: MainTab { navigation.selectedTab ?? .target }
+    private var activeTab: MainTab { navigation.selectedTab ?? .host }
 
     var body: some View {
         NavigationSplitView(columnVisibility: .constant(.all)) {
@@ -74,7 +74,7 @@ struct MainWindowView: View {
 
     @ViewBuilder private var detail: some View {
         switch activeTab {
-        case .target:  TargetPane(model: model)
+        case .host:    HostPane(model: model)
         case .upload:  UploadPane(model: model)
         case .history: HistoryPane(model: model)
         case .about:   AboutPane(model: model)
@@ -129,19 +129,55 @@ extension View {
     }
 }
 
-struct TargetPane: View {
+/// One editable text row in a grouped form.
+///
+/// Hand-built rather than letting the form label the `TextField`, and both halves
+/// of that are load-bearing:
+///
+/// - `.roundedBorder`: a bare `TextField` in a `.grouped` form draws **no bezel**,
+///   so it is pixel-identical to the read-only `LabeledContent` rows it sits next
+///   to. The row reads as a label, and nobody types into a label.
+/// - The `HStack`: a form-labelled field — and a `LabeledContent` wrapping one —
+///   puts its text in the value column *right-aligned*, and neither
+///   `.multilineTextAlignment` nor `.labelsHidden` reaches it. Both measured on
+///   macOS 26. An `HStack` opts out of that column, so the field reads from the
+///   left like every other editable field on the platform.
+private struct ConfigField: View {
+    let label: String
+    let prompt: String
+    @Binding var text: String
+    /// Return commits, so changing one field does not need a trip to the bottom
+    /// bar. Saving with nothing dirty is a no-op that just reports "没有改动".
+    let onCommit: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(label)
+                .frame(width: 72, alignment: .leading)
+            TextField(label, text: $text, prompt: Text(prompt))
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(onCommit)
+        }
+    }
+}
+
+/// The image host: the three `github.*` keys that say where uploads land, and a
+/// read-only connectivity test against them.
+struct HostPane: View {
     @Bindable var model: AppModel
 
     var body: some View {
         Form {
             if let draft = Binding($model.draft) {
                 Section("仓库") {
-                    TextField("Owner", text: draft.github.owner)
-                    TextField("Repo", text: draft.github.repo)
-                    TextField("Branch", text: draft.github.branch)
+                    row("Owner", "GitHub 用户名或组织", draft.github.owner)
+                    row("Repo", "仓库名，或 owner/name", draft.github.repo)
+                    row("Branch", "分支名，例如 main", draft.github.branch)
                 }
                 Section {
-                    Text("Repo 可以填 `name` 或 `owner/name`；填后者会同时改写 Owner，"
+                    Text("改完按 Return 或 ⌘S 保存，窗口底部会先列出要写入哪几个键。\n"
+                         + "Repo 可以填 `name` 或 `owner/name`；填后者会同时改写 Owner，"
                          + "保存后这里会显示实际落盘的值。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -162,12 +198,24 @@ struct TargetPane: View {
                         Text("\(e.code)：\(e.message)")
                             .font(.caption).foregroundStyle(.orange)
                     }
+                } else {
+                    // Says what the button will do before it is pressed. The three
+                    // probes behind it are all GET (`/user`, the repo, the branch),
+                    // so this is safe to run against a real image host at any time.
+                    Text("还没测过。测试只读取 GitHub 上的账号、仓库权限和分支，不会写入任何东西。")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                Button("运行体检") { Task { await model.runDoctor() } }
+                Button("连通性测试") { Task { await model.runDoctor() } }
                     .disabled(model.busy)
             }
         }
         .formChrome()
+    }
+
+    private func row(_ label: String, _ prompt: String, _ text: Binding<String>) -> some View {
+        ConfigField(label: label, prompt: prompt, text: text) {
+            Task { await model.save() }
+        }
     }
 
     private func mark(_ b: Bool?) -> some View {
@@ -188,7 +236,10 @@ struct UploadPane: View {
         Form {
             if let draft = Binding($model.draft) {
                 Section("路径") {
-                    TextField("模板", text: draft.upload.pathTemplate)
+                    ConfigField(label: "模板", prompt: "images/{year}/{month}/{hash8}-{name}.{ext}",
+                                text: draft.upload.pathTemplate) {
+                        Task { await model.save() }
+                    }
                     Text("可用占位符：{year} {month} {day} {hash} {hash8} {name} {ext}")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -328,8 +379,9 @@ struct HistoryPane: View {
         }
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.setString(text, forType: .string)
-        model.statusLine = "已复制 \(format.label)：\(r.name)"
+        model.statusLine = pb.setString(text, forType: .string)
+            ? "已复制 \(format.label)：\(r.name)"
+            : "写剪贴板失败：\(r.name)"
     }
 
     private func byteText(_ n: Int) -> String {
