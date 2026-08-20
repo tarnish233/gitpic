@@ -1,0 +1,37 @@
+{
+  "fill": {
+    "automatic-gradient": "extended-gray:0.98000,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "mark.png",
+          "name": "mark",
+          "position": {
+            "scale": 1.16,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.16
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.18
+      }
+    }
+  ],
+  "supported-platforms": {
+    "circles": [
+      "watchOS"
+    ],
+    "squares": "shared"
+  }
+}
