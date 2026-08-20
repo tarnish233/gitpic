@@ -80,7 +80,7 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
         return Err(AppError::usage("--stdin cannot be combined with `paste`"));
     }
 
-    let inputs = if is_paste {
+    let mut inputs = if is_paste {
         vec![read_clipboard(cli)?]
     } else if cli.stdin {
         vec![read_stdin(cli)?]
@@ -94,7 +94,16 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
         ));
     }
 
+    apply_explicit_name(&mut inputs, cli.name.as_deref(), is_paste, cli.stdin)?;
+
     cfg.require_target()?;
+
+    let kind = cli.link.unwrap_or_else(|| {
+        link::parse_link_kind_strict(&cfg.upload.link_kind).unwrap_or(crate::cli::LinkKind::Cdn)
+    });
+    // Deliberately ahead of `auth::token` and every PUT: nothing may be committed
+    // for a link this cannot produce.
+    reject_dead_cdn_link(kind, &cfg.github.branch)?;
 
     // Resolved here, after the inputs are in hand: a credential helper may take
     // a moment, and there is no point paying for it to upload a broken image.
@@ -107,19 +116,8 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
         &cfg.github.branch,
     )?;
 
-    let kind = cli
-        .link
-        .unwrap_or_else(|| link::parse_link_kind(&cfg.upload.link_kind));
     let template = cli.path.as_deref().unwrap_or(&cfg.upload.path_template);
     let dedup = cfg.upload.dedup;
-
-    if crate::link::cdn_branch_is_ambiguous(kind, &cfg.github.branch) {
-        eprintln!(
-            "warning: branch {:?} contains '/', which makes the jsDelivr CDN URL ambiguous; \
-             consider --link raw",
-            cfg.github.branch
-        );
-    }
 
     let compress = resolve_compress(cli, cfg);
 
@@ -154,10 +152,11 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
         // Checked on the rendered result, the single point every template source
         // funnels into — `config set`, `--path`, and a hand-edited config.toml.
         if !naming::is_safe_remote_path(&remote_path) {
-            return Err(AppError::usage(format!(
-                "path template produced an unusable remote path {remote_path:?}: \
+            failure = Some(AppError::usage(format!(
+                "{name}: path template produced an unusable remote path {remote_path:?}: \
                  it must be repo-relative with no empty or `..` segments"
             )));
+            break;
         }
         let message = format!("gitpic: upload {remote_path}");
 
@@ -254,6 +253,101 @@ fn classify(failure: Option<AppError>, uploaded: usize) -> Report {
     }
 }
 
+/// Refuse to run when the link the caller asked for cannot be built.
+///
+/// This used to print `warning:` on stderr and upload anyway, so the run
+/// committed the file, printed a jsDelivr link that 404s (see
+/// [`crate::link::cdn_branch_is_ambiguous`] for why `repo@feat/x/a.png` cannot be
+/// parsed back), and then reported `ok: true`. Two things made the warning
+/// insufficient: a `--json` consumer never sees stderr at all — the macOS app
+/// parses stdout only (`apps/GitPic/Sources/GitPicCore/GitpicRunner.swift:92-102`)
+/// — and even on a terminal, a warning that precedes a successful-looking result
+/// is not a result.
+///
+/// Refusing beats the two alternatives. Quietly emitting a raw link instead is the
+/// "accepted, then silently something else" shape `parse_link_kind_strict` exists
+/// to close, and `--link raw` is a one-word fix the caller can make deliberately.
+/// And this has to happen *before* the upload, which is why it is checked ahead of
+/// `auth::token` rather than where the URL is built: once the bytes are in a
+/// commit, the only shape left that carries an error is the partial envelope, and
+/// that one promises live links (see [`classify`]).
+///
+/// Split out of `run` so it can be tested at all — `run` past this point needs a
+/// token and the network.
+fn reject_dead_cdn_link(kind: LinkKind, branch: &str) -> Result<()> {
+    if link::cdn_branch_is_ambiguous(kind, branch) {
+        return Err(AppError::usage(format!(
+            "branch {branch:?} contains '/', which jsDelivr cannot tell apart from the \
+             file path in `repo@branch/path`, so the CDN link would 404; use --link raw, \
+             or `gitpic config set upload.link_kind raw`"
+        )));
+    }
+    Ok(())
+}
+
+/// Apply `--name` to a file upload. Paste and stdin already consume it in
+/// their readers; a multi-file upload cannot honour a single name, so that is
+/// a usage error rather than a silent drop.
+///
+/// Only the stem is taken from it — see [`renamed_file`] for why the extension is
+/// not the user's to set.
+fn apply_explicit_name(
+    inputs: &mut [InputImage],
+    name: Option<&str>,
+    is_paste: bool,
+    stdin: bool,
+) -> Result<()> {
+    if is_paste || stdin {
+        return Ok(());
+    }
+    let Some(name) = name else {
+        return Ok(());
+    };
+    if inputs.len() != 1 {
+        return Err(AppError::usage(
+            "--name can only be used with a single file, --stdin, or paste",
+        ));
+    }
+    let renamed = renamed_file(&inputs[0].name, &inputs[0].bytes, name);
+    inputs[0].name = renamed;
+    Ok(())
+}
+
+/// Re-name a file upload without letting `--name` change what the bytes are.
+///
+/// `--name` replaced the whole filename, extension included, so `gitpic photo.jpg
+/// --name shot.png` published JPEG bytes at a `.png` path — and `--name shot`
+/// published them at `.png` too, because `render_path` defaults `{ext}` when the
+/// name carries none (`src/naming.rs:80-84`) — which GitHub and jsDelivr then
+/// serve as `image/png`. That is the same defect 9ee5320 fixed for `paste --name
+/// shot.jpg` and [`stdin_name`] fixed for `--stdin`, on the third and last
+/// `--name` consumer. The rule is theirs, unchanged: the stem is the user's, the
+/// extension is the content's.
+///
+/// Authority runs bytes, then `original`, then `explicit`. The bytes are the only
+/// real evidence; the extension the file arrived with is what an upload *without*
+/// `--name` would have used, so preferring it keeps `--name` a pure rename; and
+/// `--name`'s own extension is a wish, taken only when nothing else knows. That
+/// last fallback is why this cannot fail the way [`stdin_name`] must — a file
+/// upload always has a filename to fall back on, so an SVG (or anything else the
+/// `image` crate cannot decode) keeps its extension instead of erroring.
+fn renamed_file(original: &str, bytes: &[u8], explicit: &str) -> String {
+    let original = Path::new(original);
+    let stem = explicit_stem(Some(explicit))
+        .or_else(|| original.file_stem().and_then(|s| s.to_str()))
+        // What `render_path` and `alt_text` call a nameless input.
+        .unwrap_or("image");
+    match sniffed_ext(bytes)
+        .or_else(|| original.extension().and_then(|s| s.to_str()))
+        .or_else(|| Path::new(explicit).extension().and_then(|s| s.to_str()))
+    {
+        Some(ext) => format!("{stem}.{ext}"),
+        // Nothing here knows what these bytes are; leaving the extension off lets
+        // `render_path` default it, exactly as it does without `--name` at all.
+        None => stem.to_string(),
+    }
+}
+
 fn read_files(files: &[std::path::PathBuf]) -> Result<Vec<InputImage>> {
     let mut out = Vec::with_capacity(files.len());
     for f in files {
@@ -301,16 +395,24 @@ fn read_stdin(cli: &Cli) -> Result<InputImage> {
 /// was given there is nothing to guess from, so it is a usage error rather than a
 /// wrong `.png`; with a `--name`, the user has asserted an extension and it stands.
 fn stdin_name(explicit: Option<&str>, bytes: &[u8]) -> Result<String> {
-    let sniffed = image::guess_format(bytes)
-        .ok()
-        .and_then(|f| f.extensions_str().first().copied());
-    match (sniffed, explicit) {
+    match (sniffed_ext(bytes), explicit) {
         (Some(ext), _) => Ok(content_name(explicit, ext)),
         (None, Some(name)) => Ok(name.to_string()),
         (None, None) => Err(AppError::usage(
             "cannot tell what kind of image this is from the bytes; pass --name to set the filename",
         )),
     }
+}
+
+/// The canonical extension for whatever these bytes actually are, if the format is
+/// one the `image` crate recognises.
+///
+/// Shared by stdin and the `--name` rename so the two cannot drift into different
+/// answers about the same bytes.
+fn sniffed_ext(bytes: &[u8]) -> Option<&'static str> {
+    image::guess_format(bytes)
+        .ok()
+        .and_then(|f| f.extensions_str().first().copied())
 }
 
 fn read_clipboard(cli: &Cli) -> Result<InputImage> {
@@ -349,16 +451,22 @@ fn read_clipboard(cli: &Cli) -> Result<InputImage> {
 ///
 /// Shared by the clipboard path (always PNG, since it re-encodes) and stdin (the
 /// sniffed format), because they had the same bug and only one of them was fixed.
+/// The file path applies the same rule through [`renamed_file`], which differs only
+/// in having a real filename to fall back on instead of `clipboard`.
 fn content_name(explicit: Option<&str>, ext: &str) -> String {
-    let stem = explicit
+    format!("{}.{ext}", explicit_stem(explicit).unwrap_or("clipboard"))
+}
+
+/// The stem `--name` asks for, when it carries a usable one.
+///
+/// A leading dot makes the whole name the "stem" (`.png` -> `.png`), so those are
+/// rejected rather than emitted as `.png.png`.
+fn explicit_stem(explicit: Option<&str>) -> Option<&str> {
+    explicit
         .map(Path::new)
         .and_then(|p| p.file_stem())
         .and_then(|s| s.to_str())
-        // A leading dot makes the whole name the "stem" (`.png` -> `.png`), so
-        // reject those rather than emitting `.png.png`.
         .filter(|s| !s.is_empty() && !s.starts_with('.'))
-        .unwrap_or("clipboard");
-    format!("{stem}.{ext}")
 }
 
 fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
@@ -430,6 +538,90 @@ mod tests {
         assert_eq!(content_name(Some(".png"), "png"), "clipboard.png");
     }
 
+    fn file_input(name: &str) -> InputImage {
+        InputImage {
+            name: name.to_string(),
+            bytes: b"x".to_vec(),
+        }
+    }
+
+    /// An input whose bytes really are a JPEG, so the sniffing is exercised rather
+    /// than mocked.
+    fn jpeg_input(name: &str) -> InputImage {
+        InputImage {
+            name: name.to_string(),
+            bytes: jpeg_bytes(),
+        }
+    }
+
+    fn renamed(input: InputImage, name: &str) -> String {
+        let mut inputs = vec![input];
+        apply_explicit_name(&mut inputs, Some(name), false, false).expect("a single file");
+        inputs.remove(0).name
+    }
+
+    #[test]
+    fn name_renames_a_single_file_but_never_its_type() {
+        // Regression: `--name` replaced the whole filename, extension included, so
+        // every one of these published JPEG bytes under a name GitHub and jsDelivr
+        // serve as image/png — `--name shot.png` outright, and bare `--name shot`
+        // via the `{ext}` default in `render_path`.
+        assert_eq!(renamed(jpeg_input("photo.jpg"), "shot"), "shot.jpg");
+        assert_eq!(renamed(jpeg_input("photo.jpg"), "shot.png"), "shot.jpg");
+        assert_eq!(renamed(jpeg_input("photo.jpg"), "shot.jpg"), "shot.jpg");
+        // The rename itself still happens, and a directory in `--name` is dropped
+        // exactly as it is for stdin.
+        assert_eq!(renamed(jpeg_input("photo.jpg"), "dir/shot.gif"), "shot.jpg");
+    }
+
+    #[test]
+    fn a_renamed_file_reaches_the_remote_path_as_what_it_is() {
+        // The wrong extension only becomes a wrong content type once `{ext}` is
+        // rendered, so follow it all the way to the path that gets committed.
+        let name = renamed(jpeg_input("photo.jpg"), "shot.png");
+        assert_eq!(
+            naming::render_path("{name}.{ext}", &name, &"a".repeat(64)),
+            "shot.jpg"
+        );
+    }
+
+    #[test]
+    fn a_renamed_file_of_an_unknown_format_keeps_the_extension_it_arrived_with() {
+        // `image::guess_format` knows nothing about SVG, and a file upload — unlike
+        // stdin — always has a filename to believe instead of erroring out.
+        assert_eq!(renamed(file_input("diagram.svg"), "shot"), "shot.svg");
+        assert_eq!(renamed(file_input("diagram.svg"), "shot.png"), "shot.svg");
+        // With nothing else claiming a type, `--name`'s own extension is all that
+        // is left; with not even that, `render_path` defaults it as it always did.
+        assert_eq!(renamed(file_input("blob"), "shot.bin"), "shot.bin");
+        assert_eq!(renamed(file_input("blob"), "shot"), "shot");
+    }
+
+    #[test]
+    fn an_unusable_name_keeps_the_original_stem_instead_of_clipboard() {
+        // `clipboard` is the right default for bytes that never had a filename; it
+        // would be a strange thing to rename a real file to.
+        assert_eq!(renamed(jpeg_input("photo.jpg"), ""), "photo.jpg");
+        assert_eq!(renamed(jpeg_input("photo.jpg"), ".png"), "photo.jpg");
+    }
+
+    #[test]
+    fn name_on_two_files_is_usage() {
+        let mut inputs = vec![file_input("a.png"), file_input("b.png")];
+        let err = apply_explicit_name(&mut inputs, Some("shot.png"), false, false)
+            .expect_err("must be rejected");
+        assert_eq!(err.code, crate::error::ErrorCode::Usage);
+        assert_eq!(inputs[0].name, "a.png", "rejected --name must not rename");
+    }
+
+    #[test]
+    fn name_is_left_to_the_reader_for_stdin_and_paste() {
+        let mut inputs = vec![file_input("clipboard.png")];
+        apply_explicit_name(&mut inputs, Some("shot.png"), true, false).unwrap();
+        apply_explicit_name(&mut inputs, Some("shot.png"), false, true).unwrap();
+        assert_eq!(inputs[0].name, "clipboard.png");
+    }
+
     #[test]
     fn a_clean_run_is_reported_as_success() {
         assert!(matches!(classify(None, 3), Report::Success));
@@ -451,6 +643,27 @@ mod tests {
             classify(Some(AppError::network("boom")), 0),
             Report::Total(_)
         ));
+    }
+
+    #[test]
+    fn a_cdn_link_that_would_404_is_refused_instead_of_warned_about() {
+        // Regression: this printed a warning to stderr and uploaded anyway, so the
+        // file really was committed, the printed jsDelivr link 404ed, and the
+        // envelope said `ok: true`. `--json` callers never saw the warning at all.
+        let err = reject_dead_cdn_link(LinkKind::Cdn, "feat/x").expect_err("must be refused");
+        assert_eq!(err.code, crate::error::ErrorCode::Usage);
+        // The alternative that works has to be in the message, since this is now
+        // the only thing the caller gets.
+        assert!(err.message.contains("--link raw"), "{}", err.message);
+    }
+
+    #[test]
+    fn every_link_and_branch_pair_that_works_is_left_alone() {
+        // Only the one combination jsDelivr cannot parse is refused: `raw` gives the
+        // branch its own path segments, and a branch without `/` is unambiguous.
+        reject_dead_cdn_link(LinkKind::Raw, "feat/x").expect("raw handles a slash");
+        reject_dead_cdn_link(LinkKind::Cdn, "main").expect("no slash, no ambiguity");
+        reject_dead_cdn_link(LinkKind::Raw, "main").expect("nothing wrong here");
     }
 
     /// Real magic bytes, so `image::guess_format` is exercised rather than mocked.

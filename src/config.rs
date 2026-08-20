@@ -130,6 +130,38 @@ fn check_segment(what: &str, value: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// A git ref may contain `/` (`feat/x`). It must not contain empty segments,
+/// `.` / `..`, or whitespace — those deform `/branches/{branch}` even after
+/// percent-encoding.
+fn check_branch(value: &str) -> std::result::Result<(), String> {
+    if value != value.trim() {
+        return Err(format!(
+            "github.branch {value:?} has leading or trailing whitespace"
+        ));
+    }
+    if value.starts_with('/') || value.ends_with('/') {
+        return Err(format!(
+            "github.branch {value:?} must not start or end with '/'"
+        ));
+    }
+    for seg in value.split('/') {
+        if seg.is_empty() {
+            return Err(format!(
+                "github.branch {value:?} must not contain empty segments"
+            ));
+        }
+        if seg == "." || seg == ".." {
+            return Err(format!("github.branch cannot contain {seg:?}"));
+        }
+        if seg.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(format!(
+                "github.branch {value:?} must not contain whitespace or control characters"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Config {
     /// Check every value, whatever produced it.
     ///
@@ -150,7 +182,7 @@ impl Config {
         if self.github.branch.trim().is_empty() {
             return Err("github.branch must not be empty".to_string());
         }
-        check_segment("github.branch", &self.github.branch)?;
+        check_branch(&self.github.branch)?;
         if crate::link::parse_link_kind_strict(&self.upload.link_kind).is_none() {
             return Err(format!(
                 "upload.link_kind must be \"cdn\" or \"raw\", not {:?}",
@@ -384,6 +416,32 @@ impl Config {
         }
         Ok(())
     }
+
+    /// [`Config::require_target`] asked of the configuration a *later* command
+    /// will resolve — this file plus the environment.
+    ///
+    /// For a writer, the file on its own is the wrong thing to judge. `upload`
+    /// applies the environment before it calls `require_target`, so `GITPIC_OWNER=me`
+    /// with `repo = "pics"` is a working setup; `init` checking only what it is
+    /// about to write refused it, contradicting the very case its repo-prompt
+    /// default was written to support. Reading is unaffected: nothing here is
+    /// stored, so a variable never gets baked into the file.
+    pub(crate) fn require_effective_target(&self) -> Result<()> {
+        self.require_effective_target_with(|key| std::env::var(key).ok())
+    }
+
+    /// Same split as [`Config::apply_env_with`], for the same reason: the rule is
+    /// testable without mutating the environment out from under a parallel test.
+    fn require_effective_target_with(&self, get: impl Fn(&str) -> Option<String>) -> Result<()> {
+        let mut effective = self.clone();
+        // A variable this rejects is deliberately not fatal here. `init` is the way
+        // *out* of a broken setup and must stay able to write a good file while
+        // `GITPIC_LINK` is a typo; whatever the environment did contribute is still
+        // in `effective`, and the command that resolves it for real is the one that
+        // reports the rest, with a message naming the field.
+        let _ = effective.apply_env_with(get);
+        effective.require_target()
+    }
 }
 
 fn temporary_path(path: &Path) -> PathBuf {
@@ -615,6 +673,66 @@ mod tests {
     }
 
     #[test]
+    fn a_target_the_environment_completes_is_usable() {
+        // Regression: `init` judged the file it was about to write, and refused a
+        // bare `pics` answer under GITPIC_OWNER — the case its own repo-prompt
+        // default was written for, and one `upload` accepts because it applies the
+        // environment before `require_target`.
+        let mut cfg = Config::default();
+        cfg.set_repo_spec("pics").unwrap();
+        assert_eq!(
+            cfg.require_target().unwrap_err().code,
+            ErrorCode::ConfigMissing,
+            "the file alone is half-configured"
+        );
+        cfg.require_effective_target_with(env_of(&[("GITPIC_OWNER", "me")]))
+            .expect("the environment supplies the owner");
+        // Nothing was stored, so `init` cannot bake a variable into the file.
+        assert_eq!(cfg.github.owner, "");
+    }
+
+    #[test]
+    fn a_half_configured_target_is_still_refused_with_an_empty_environment() {
+        // The check `init` needs on `owner/` and on a bare name with no owner
+        // anywhere: unusable is unusable, whichever half is missing.
+        for spec in ["owner/", "pics"] {
+            let mut cfg = Config::default();
+            cfg.set_repo_spec(spec).unwrap();
+            assert_eq!(
+                cfg.require_effective_target_with(env_of(&[]))
+                    .unwrap_err()
+                    .code,
+                ErrorCode::ConfigMissing,
+                "for {spec:?}"
+            );
+        }
+        let mut cfg = Config::default();
+        cfg.set_repo_spec("owner/pics").unwrap();
+        cfg.require_effective_target_with(env_of(&[]))
+            .expect("a complete target needs no environment");
+    }
+
+    #[test]
+    fn a_broken_variable_does_not_block_a_writer_from_saving_a_good_file() {
+        // `init` is the way out of a bad setup. GITPIC_LINK=raw2 is a usage error
+        // wherever the environment is really applied, but it must not turn into
+        // "a target repo is required" and leave the user with no way to write one.
+        let mut cfg = Config::default();
+        cfg.set_repo_spec("owner/pics").unwrap();
+        cfg.require_effective_target_with(env_of(&[("GITPIC_LINK", "raw2")]))
+            .expect("a broken variable is the next command's report, not init's");
+        // Same for the variable that would have supplied the missing half: it is
+        // applied before the validation that rejects it, so the target still counts.
+        let mut cfg = Config::default();
+        cfg.set_repo_spec("pics").unwrap();
+        cfg.require_effective_target_with(env_of(&[
+            ("GITPIC_OWNER", "me"),
+            ("GITPIC_LINK", "raw2"),
+        ]))
+        .expect("the owner still arrived");
+    }
+
+    #[test]
     fn the_default_config_passes_its_own_validation() {
         // If it did not, every fresh install would refuse to start.
         Config::default()
@@ -665,6 +783,15 @@ mod tests {
             .expect_err("must be rejected");
         assert_eq!(err.code, ErrorCode::ConfigInvalid);
         assert!(err.message.contains("branch"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_branch_with_a_slash_is_a_legal_git_ref() {
+        Config::parse("[github]\nbranch = \"feat/x\"\n", "/tmp/c.toml")
+            .expect("feat/x is a legal branch");
+        let err = Config::parse("[github]\nbranch = \"feat//x\"\n", "/tmp/c.toml")
+            .expect_err("empty segments are not a ref");
+        assert_eq!(err.code, ErrorCode::ConfigInvalid);
     }
 
     #[test]

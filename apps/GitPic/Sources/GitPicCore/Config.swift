@@ -74,11 +74,63 @@ public enum ConfigKey: String, Sendable, CaseIterable {
         case .quality:      return String(c.upload.quality)
         }
     }
+    /// Copies one key's value from one config into another — the mirror of
+    /// `value(in:)`, and deliberately field-to-field rather than through the string
+    /// form so `dedup`/`max_width` need no parsing back.
+    ///
+    /// Read and write live side by side for the reason the comment above gives: the
+    /// UI has to rebuild a config one key at a time after a save, because
+    /// `config set` normalises `github.repo` and what landed differs from what was
+    /// typed. A second copy of this mapping in the UI layer is exactly how the two
+    /// drift apart.
+    public func copy(from source: GitpicConfig, into target: inout GitpicConfig) {
+        switch self {
+        case .owner:        target.github.owner = source.github.owner
+        case .repo:         target.github.repo = source.github.repo
+        case .branch:       target.github.branch = source.github.branch
+        case .pathTemplate: target.upload.pathTemplate = source.upload.pathTemplate
+        case .linkKind:     target.upload.linkKind = source.upload.linkKind
+        case .dedup:        target.upload.dedup = source.upload.dedup
+        case .autoCopy:     target.upload.autoCopy = source.upload.autoCopy
+        case .compress:     target.upload.compress = source.upload.compress
+        case .maxWidth:     target.upload.maxWidth = source.upload.maxWidth
+        case .quality:      target.upload.quality = source.upload.quality
+        }
+    }
 }
 
 /// Which keys differ between two configs, in a stable order.
 public func changedKeys(from old: GitpicConfig, to new: GitpicConfig) -> [ConfigKey] {
     ConfigKey.allCases.filter { $0.value(in: old) != $0.value(in: new) }
+}
+
+/// Merge a freshly-read config into an in-progress draft, key by key.
+///
+/// Field by field rather than all-or-nothing on the whole struct, because comparing
+/// whole structs forces a choice between two wrong answers. Replace the draft and
+/// edits typed while the read was in flight are lost. Keep it and every key the CLI
+/// normalised is stranded: a `repo` typed as `me/pics` is stored as
+/// `owner=me repo=pics`, so the typed form never equals the file again and the form
+/// reports it unsaved forever — with `revert()` the only way out and nothing in the
+/// UI saying so.
+///
+/// `baseline` is what the draft was diffed against before the round trip, so a key
+/// where `current` still equals `baseline` is one the user never touched and the
+/// file's value can be adopted. `keys` narrows that to a subset: after a partly
+/// failed save only the keys the file actually moved on may be adopted, or the
+/// values whose writes failed would be overwritten with the old ones the user still
+/// needs in the form to retry.
+public func reconcile(
+    draft current: GitpicConfig,
+    toward fresh: GitpicConfig,
+    untouchedSince baseline: GitpicConfig,
+    keys: [ConfigKey] = ConfigKey.allCases
+) -> GitpicConfig {
+    var merged = current
+    for key in keys where key.value(in: current) == key.value(in: baseline) {
+        key.copy(from: fresh, into: &merged)
+    }
+    return merged
 }
 
 /// Mirrors one `history::Record` as returned by `list --json`.
@@ -110,12 +162,10 @@ public struct HistoryRecord: Codable, Sendable, Hashable, Identifiable {
     /// The raw.githubusercontent form, rebuilt from the configured target.
     /// Percent-encoding matches `naming::encode_path`, which preserves `/`.
     public func rawURL(config: GitpicConfig) -> String {
-        let encoded = path
-            .split(separator: "/", omittingEmptySubsequences: false)
-            .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
-            .joined(separator: "/")
-        return "https://raw.githubusercontent.com/\(config.github.owner)/"
-             + "\(config.github.repo)/\(config.github.branch)/\(encoded)"
+        "https://raw.githubusercontent.com/\(GitHubEncoding.encodePath(config.github.owner))/"
+            + "\(GitHubEncoding.encodePath(config.github.repo))/"
+            + "\(GitHubEncoding.encodePath(config.github.branch))/"
+            + "\(GitHubEncoding.encodePath(path))"
     }
 
     public func markdown(config: GitpicConfig) -> String { "![\(name)](\(url))" }
@@ -124,4 +174,28 @@ public struct HistoryRecord: Codable, Sendable, Hashable, Identifiable {
 public struct HistoryEnvelope: Codable, Sendable {
     public let ok: Bool
     public let results: [HistoryRecord]
+}
+
+/// Percent-encoding that matches `naming::encode_path` (`src/naming.rs`).
+///
+/// Foundation's `.urlPathAllowed` leaves `+` intact, which is not what the CLI
+/// emits and is not what GitHub's raw URL needs. Unreserved characters and `/`
+/// stay literal; every other byte is `%XX`.
+public enum GitHubEncoding {
+    public static func encodePath(_ s: String) -> String {
+        var out = ""
+        out.reserveCapacity(s.utf8.count)
+        for b in s.utf8 {
+            switch b {
+            case 0x2F, // /
+                 0x41...0x5A, 0x61...0x7A, // A-Z a-z
+                 0x30...0x39, // 0-9
+                 0x2D, 0x2E, 0x5F, 0x7E: // - . _ ~
+                out.append(Character(UnicodeScalar(b)))
+            default:
+                out.append(String(format: "%%%02X", b))
+            }
+        }
+        return out
+    }
 }

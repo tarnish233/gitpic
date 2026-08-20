@@ -117,11 +117,27 @@ pub fn alt_text(original_name: &str) -> String {
 /// A path template may legitimately contain spaces or non-ASCII characters
 /// (e.g. `图片/{hash8}.{ext}`), which GitHub accepts as a path but which must be
 /// encoded before they reach either the API URL or the generated public link.
+/// Use this for file paths and for `?ref=` (GitHub wants `feat/x` as one query
+/// value). Use [`encode_segment`] when the value occupies a single URL path slot.
 pub fn encode_path(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    for b in path.bytes() {
+    encode_bytes(path, true)
+}
+
+/// Percent-encode one URL path segment, including `/` as `%2F`.
+///
+/// Owner, repo, and a branch sitting in `/branches/{branch}` are each one slot.
+/// Leaving `/` intact in that slot (`feat/x`) would add path segments and hit
+/// the wrong endpoint.
+pub fn encode_segment(s: &str) -> String {
+    encode_bytes(s, false)
+}
+
+fn encode_bytes(s: &str, keep_slash: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+            b'/' if keep_slash => out.push('/'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
                 out.push(b as char)
             }
             _ => {
@@ -201,6 +217,13 @@ mod tests {
         assert_eq!(encode_path("\u{56fe}/a.png"), "%E5%9B%BE/a.png");
         // Characters that would otherwise change URL structure.
         assert_eq!(encode_path("a#b/c?d.png"), "a%23b/c%3Fd.png");
+    }
+
+    #[test]
+    fn encode_segment_encodes_a_slash_so_it_cannot_add_path_slots() {
+        assert_eq!(encode_segment("feat/x"), "feat%2Fx");
+        assert_eq!(encode_segment("main"), "main");
+        assert_eq!(encode_path("feat/x"), "feat/x");
     }
 
     #[test]

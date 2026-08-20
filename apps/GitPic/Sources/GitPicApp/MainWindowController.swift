@@ -37,17 +37,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// One `enter()` for the life of this window. Calling `showWindow` again
+    /// while it is already on screen (or miniaturised) used to increment depth
+    /// without a matching `leave`, so closing the window left the app `.regular`
+    /// with a Dock icon.
+    private var holdingActivation = false
+
     override func showWindow(_ sender: Any?) {
         // An .accessory app cannot own a focused, title-barred window, so become
         // .regular for as long as this window is open.
-        AppActivationPolicy.enter()
+        if !holdingActivation {
+            AppActivationPolicy.enter()
+            holdingActivation = true
+        }
         super.showWindow(sender)
+        window?.deminiaturize(nil)
         window?.makeKeyAndOrderFront(nil)
         Task { await AppModel.shared.reload() }
     }
 
     func windowWillClose(_ notification: Notification) {
-        AppActivationPolicy.leave()
+        if holdingActivation {
+            AppActivationPolicy.leave()
+            holdingActivation = false
+        }
         Self.shared = nil
     }
 }

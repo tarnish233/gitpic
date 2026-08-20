@@ -49,7 +49,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub stdin: bool,
 
-    /// Filename for stdin/clipboard uploads (e.g. shot.png)
+    /// Filename stem for stdin, clipboard, or a single-file upload; the extension
+    /// follows the image bytes, not this (e.g. `--name shot` on a JPEG → shot.jpg)
     #[arg(long, global = true)]
     pub name: Option<String>,
 

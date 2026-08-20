@@ -14,7 +14,8 @@ use crate::naming::encode_path;
 ///
 /// `/` is preserved by `encode_path`, which is what `raw` needs: the branch there
 /// legitimately spans several path segments. For `cdn` that same `/` is what makes
-/// the ref ambiguous — see [`cdn_branch_is_ambiguous`], which warns about it.
+/// the ref ambiguous — see [`cdn_branch_is_ambiguous`], which `reject_dead_cdn_link`
+/// refuses the upload on before anything is committed.
 pub fn raw_url(owner: &str, repo: &str, branch: &str, path: &str) -> String {
     format!(
         "https://raw.githubusercontent.com/{}/{}/{}/{}",
@@ -111,6 +112,12 @@ pub fn render(format: OutputFormat, alt: &str, url: &str) -> String {
 }
 
 /// Parse a config string into a LinkKind (defaults to Cdn).
+///
+/// Kept as the documented counter-example of the silent default that
+/// [`parse_link_kind_strict`] exists to close. Production paths all go through
+/// the strict parser: `Config::validate` refuses anything else before it can
+/// reach an upload.
+#[cfg(test)]
 pub fn parse_link_kind(s: &str) -> LinkKind {
     match s.trim().to_ascii_lowercase().as_str() {
         "raw" => LinkKind::Raw,
@@ -120,10 +127,9 @@ pub fn parse_link_kind(s: &str) -> LinkKind {
 
 /// Parse a link kind, rejecting anything unrecognized.
 ///
-/// `parse_link_kind` is deliberately lenient because it reads an already-stored
-/// value at upload time. Wherever a value is *accepted* from the user, use this
-/// instead: otherwise `config set upload.link_kind raw2` reports success and
-/// then silently serves CDN links forever.
+/// The previous reader defaulted anything it did not recognise to CDN, so
+/// `config set upload.link_kind raw2` reported success and then silently served
+/// CDN links forever. Every entry point that accepts a value uses this instead.
 pub fn parse_link_kind_strict(s: &str) -> Option<LinkKind> {
     match s.trim().to_ascii_lowercase().as_str() {
         "cdn" => Some(LinkKind::Cdn),

@@ -78,6 +78,74 @@ struct ConfigTests {
         b.upload.compress = false
         #expect(ConfigKey.compress.value(in: b) == "false")
     }
+
+    @Test("every key can be written as well as read, so a config can be rebuilt")
+    func copyIsTheMirrorOfValue() throws {
+        let source = try decode(Self.live, ConfigEnvelope.self).config
+        var target = GitpicConfig(
+            github: .init(owner: "", repo: "", branch: ""),
+            upload: .init(pathTemplate: "", linkKind: "raw", dedup: false,
+                          autoCopy: false, compress: true, maxWidth: 9, quality: 1))
+        for key in ConfigKey.allCases { key.copy(from: source, into: &target) }
+        // Read and write have to stay symmetrical: a key `copy` forgot would leave
+        // the UI silently unable to adopt what `config set` normalised.
+        #expect(target == source)
+        #expect(changedKeys(from: target, to: source).isEmpty)
+    }
+
+    @Test("a normalised key is adopted even when another field is being edited")
+    func normalisationSurvivesAConcurrentEdit() throws {
+        // The regression this pins: `github.repo` typed as `owner/name` is stored
+        // split, so the typed form never equals the file again. Comparing whole
+        // structs meant one edit elsewhere suppressed the whole re-read and the form
+        // reported `github.repo` unsaved forever, however many times it was saved.
+        let baseline = try decode(Self.live, ConfigEnvelope.self).config
+        var typed = baseline
+        typed.github.repo = "someone/pics"          // what the user typed
+        var fresh = baseline
+        fresh.github.owner = "someone"              // what `config set` stored
+        fresh.github.repo = "pics"
+
+        var edited = typed
+        edited.upload.quality = 55                  // typed during the round trip
+
+        let merged = reconcile(draft: edited, toward: fresh, untouchedSince: typed)
+        #expect(merged.github.repo == "pics")       // adopted, not stranded
+        #expect(merged.github.owner == "someone")
+        #expect(merged.upload.quality == 55)        // the live edit survives
+        #expect(changedKeys(from: fresh, to: merged) == [.quality])
+    }
+
+    @Test("an edit made while the read was in flight is never overwritten by it")
+    func aLiveEditOutranksTheFile() throws {
+        let baseline = try decode(Self.live, ConfigEnvelope.self).config
+        var edited = baseline
+        edited.github.branch = "gh-pages"           // typed during the await
+        var fresh = baseline
+        fresh.github.branch = "main"                // what the file still says
+
+        let merged = reconcile(draft: edited, toward: fresh, untouchedSince: baseline)
+        #expect(merged.github.branch == "gh-pages")
+    }
+
+    @Test("after a partly failed save, only the keys the file moved on are adopted")
+    func aFailedKeyKeepsTheValueNeededToRetryIt() throws {
+        // Adopting everything here would overwrite the value whose write just
+        // failed — the one thing the user needs left in the form to try again.
+        let before = try decode(Self.live, ConfigEnvelope.self).config
+        var attempted = before
+        attempted.github.branch = "gh-pages"        // landed
+        attempted.upload.quality = 55               // failed
+        var fresh = before
+        fresh.github.branch = "gh-pages"
+
+        let merged = reconcile(
+            draft: attempted, toward: fresh, untouchedSince: attempted,
+            keys: changedKeys(from: before, to: fresh))
+        #expect(merged.github.branch == "gh-pages")
+        #expect(merged.upload.quality == 55)
+        #expect(changedKeys(from: fresh, to: merged) == [.quality])
+    }
 }
 
 @Suite("History records")
@@ -137,5 +205,12 @@ struct HistoryTests {
         let raw = r.rawURL(config: cfg)
         #expect(raw.hasSuffix("/images/a%20b/c.png"))
         #expect(raw.contains("/main/images/"))
+    }
+
+    @Test("encoding matches the CLI: + # ? are escaped, slashes are not")
+    func encodingMatchesCLI() {
+        #expect(GitHubEncoding.encodePath("images/a+b#c?.png") == "images/a%2Bb%23c%3F.png")
+        #expect(GitHubEncoding.encodePath("feat/x") == "feat/x")
+        #expect(GitHubEncoding.encodePath("a b") == "a%20b")
     }
 }

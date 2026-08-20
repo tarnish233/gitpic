@@ -245,4 +245,14 @@ struct ToolDiscoveryTests {
     func missingGH() {
         #expect(GHProbe.status(gh: nil) == .notInstalled)
     }
+
+    @Test("a hung child is killed rather than blocking forever")
+    func processTimeout() throws {
+        let out = try ChildProcess.run(
+            executable: URL(fileURLWithPath: "/bin/sleep"),
+            args: ["10"],
+            timeout: 0.3)
+        #expect(out.timedOut)
+        #expect(out.status != 0)
+    }
 }
