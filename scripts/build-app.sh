@@ -9,14 +9,24 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG="$ROOT/apps/GitPic"
-# Deliberately NOT $ROOT/dist: the CLI release job asserts `ls gitpic-*.sha256`
-# counts exactly 4 there, so an app artifact landing beside it fails the release.
+# Still not $ROOT/dist. The release workflow stages the CLI archives there and
+# asserts the exact set before publishing; keeping the bundle out of that
+# directory means a local build can never be mistaken for a CLI artifact.
 OUT="${OUT:-$ROOT/dist-app}"
 APP="$OUT/GitPic.app"
-# Single source of truth for the app version, deliberately separate from
-# Cargo.toml: the app and the CLI version independently. check_manifests.py welds
-# the Cargo version to the plugin manifests, so the app must never appear there.
-APP_VERSION="${APP_VERSION:-$(tr -d '[:space:]' < "$PKG/VERSION")}"
+# The app and the CLI share one version, and Cargo.toml is where it lives.
+#
+# Read only out of the [package] section: a `version = ` line appears under
+# plenty of `[dependencies.*]` tables too, and a whole-file grep would pick up
+# whichever came first. Same parse as check_manifests.py's cargo_version().
+APP_VERSION="${APP_VERSION:-$(
+  awk '/^\[package\]/ { inpkg = 1; next }
+       /^\[/          { inpkg = 0 }
+       inpkg && /^version[[:space:]]*=/ {
+         gsub(/^version[[:space:]]*=[[:space:]]*"|"[[:space:]]*$/, ""); print; exit
+       }' "$ROOT/Cargo.toml"
+)}"
+[[ -n "$APP_VERSION" ]] || { echo "error: no [package] version in Cargo.toml" >&2; exit 1; }
 
 echo "==> building Swift app (release)"
 ( cd "$PKG" && swift build -c release )
@@ -36,6 +46,18 @@ if [[ -z "$GITPIC_BIN" ]]; then
 fi
 [[ -x "$GITPIC_BIN" ]] || { echo "error: gitpic binary not found at $GITPIC_BIN" >&2; exit 1; }
 CLI_VERSION="$("$GITPIC_BIN" --version | awk '{print $2}')"
+# The one runtime check that the merged version is real rather than asserted.
+#
+# APP_VERSION comes from Cargo.toml; CLI_VERSION comes from asking the binary
+# that is about to be copied into the bundle. Those two agreeing is the whole
+# claim of a unified release, and nothing else verifies it — a stale
+# target/release/gitpic (or a GITPIC_BIN pointing somewhere else) would otherwise
+# ship silently inside an app stamped with a version it does not contain.
+if [[ "$CLI_VERSION" != "$APP_VERSION" ]]; then
+  echo "error: embedded gitpic is $CLI_VERSION but this build is $APP_VERSION" >&2
+  echo "       $GITPIC_BIN is stale — rebuild it (cargo build --release) or set GITPIC_BIN" >&2
+  exit 1
+fi
 echo "    embedding gitpic $CLI_VERSION from $GITPIC_BIN"
 
 echo "==> assembling $APP"

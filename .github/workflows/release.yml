@@ -1,11 +1,34 @@
+# Release gitpic — the CLI and GitPic.app, one version, one Release.
+#
+# Both used to have their own workflow and their own version file. They are now
+# unified, and three constraints keep that honest:
+#
+#  1. `Cargo.toml`'s `[package] version` is the only version. The `version` job
+#     reads it and, on a tag build, asserts the tag is exactly `v<that version>`.
+#     `scripts/build-app.sh` reads the same field and asserts the `gitpic` binary
+#     it embeds reports that version too.
+#  2. One publisher. Four matrix jobs each calling action-gh-release used to race
+#     on the same tag's Release; see the comment above `publish`. The app job
+#     therefore builds and verifies, then hands its zip over as an artifact
+#     instead of publishing anything itself.
+#  3. This is a **normal release, never a prerelease**, even though the app is
+#     ad-hoc signed and not notarised. `repos/.../releases/latest` skips
+#     prereleases, and the Homebrew tap's updater polls exactly that endpoint on a
+#     cron that does not fail — so a prerelease flag here would stop the formula
+#     updating, silently and indefinitely. The notarisation caveat lives in the
+#     release notes instead, next to the app asset.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  # Build and verify everything without publishing. There was no non-tag entry
+  # point for the CLI side before, which meant the only way to find out whether a
+  # release would build was to tag one.
+  workflow_dispatch:
 
-# Only the publishing job writes to the repository; the four build jobs get
-# read-only tokens.
+# Only the publishing job writes to the repository; every build job gets a
+# read-only token.
 permissions:
   contents: read
 
@@ -13,8 +36,46 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # One place resolves the version, so no job re-derives it and drifts.
+  version:
+    name: Resolve the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read Cargo.toml and check the tag agrees
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Only the [package] section: `version = ` also appears under
+          # [dependencies.*] tables, and a whole-file match would take whichever
+          # came first. Same parse as check_manifests.py and build-app.sh.
+          version="$(awk '
+            /^\[package\]/ { inpkg = 1; next }
+            /^\[/          { inpkg = 0 }
+            inpkg && /^version[[:space:]]*=/ {
+              gsub(/^version[[:space:]]*=[[:space:]]*"|"[[:space:]]*$/, ""); print; exit
+            }' Cargo.toml)"
+          if [[ -z "$version" ]]; then
+            echo "no [package] version in Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml version: $version"
+          # The CLI side never checked this: it derived the version from the tag
+          # and compared it to nothing, so a tag could disagree with Cargo.toml and
+          # publish anyway. The app side did check, and this keeps the stricter half.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag: $GITHUB_REF_NAME expected: v$version"
+            test "$GITHUB_REF_NAME" = "v$version"
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -42,7 +103,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package (unix)
         if: runner.os != 'Windows'
@@ -89,17 +150,104 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # A single job creates the Release and uploads every archive at once.
+  # GitPic.app. Builds and verifies here, publishes nowhere: the zip travels to
+  # `publish` as an artifact so there is still exactly one publisher.
+  #
+  # Must stay on macOS — `ditto`, `codesign`, `plutil`, and `actool` are all
+  # required, and the embedded CLI has to be a native build.
+  app:
+    name: Build GitPic.app
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the CLI that gets embedded
+        run: cargo build --release --locked
+
+      - name: Swift tests (offline only)
+        working-directory: apps/GitPic
+        # GITPIC_LIVE is intentionally unset: the live suite uploads to a real
+        # repository and needs a gh credential, neither of which belongs in CI.
+        run: swift test
+
+      # This also re-checks the unified version: the script fails if the binary it
+      # is about to embed does not report the Cargo.toml version.
+      - name: Build the app bundle
+        run: ./scripts/build-app.sh
+
+      - name: Package
+        id: package
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          name="GitPic-${VERSION}-macos-arm64"
+          ( cd dist-app && ditto -c -k --sequesterRsrc --keepParent GitPic.app "${name}.zip" )
+          ( cd dist-app && shasum -a 256 "${name}.zip" > "${name}.zip.sha256" )
+          echo "asset=$name.zip" >> "$GITHUB_OUTPUT"
+          # The bundle must carry the version this job was told to build, not
+          # whatever happened to be on disk.
+          got="$(plutil -extract CFBundleShortVersionString raw dist-app/GitPic.app/Contents/Info.plist)"
+          echo "bundle version: $got expected: $VERSION"
+          test "$got" = "$VERSION"
+
+      - name: Verify the packaged app
+        run: |
+          set -euo pipefail
+          cd dist-app
+          shasum -c "${{ steps.package.outputs.asset }}.sha256"
+          rm -rf verify && mkdir verify
+          ditto -x -k "${{ steps.package.outputs.asset }}" verify
+          test -x verify/GitPic.app/Contents/MacOS/GitPic
+          # The embedded CLI is the whole reason a Finder-launched app works.
+          test -x verify/GitPic.app/Contents/Resources/gitpic
+          # Both halves of what actool emits, because they serve different macOS
+          # versions: Assets.car carries every Tahoe appearance, the icns is the
+          # flattened fallback for macOS 14-25. A build that dropped either would
+          # still launch and would still show *an* icon, so only an assertion
+          # catches it.
+          test -s verify/GitPic.app/Contents/Resources/AppIcon.icns
+          test -s verify/GitPic.app/Contents/Resources/Assets.car
+          verify/GitPic.app/Contents/Resources/gitpic --version
+          codesign --verify --deep --strict verify/GitPic.app
+          plutil -lint verify/GitPic.app/Contents/Info.plist
+          # CFBundleIconName resolves the Assets.car icon; CFBundleIconFile is what
+          # older macOS reads. Both, or the icon silently falls back to the generic
+          # executable one on one OS or the other.
+          test "$(plutil -extract CFBundleIconFile raw verify/GitPic.app/Contents/Info.plist)" = "AppIcon"
+          test "$(plutil -extract CFBundleIconName raw verify/GitPic.app/Contents/Info.plist)" = "AppIcon"
+
+      # Deliberately NOT named `dist-*`: `publish` downloads that pattern with
+      # `merge-multiple: true` into `dist/`, so an artifact called `dist-app` would
+      # be poured in beside the CLI archives and confuse every guard downstream.
+      - name: Upload the app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-bundle
+          path: |
+            dist-app/${{ steps.package.outputs.asset }}
+            dist-app/${{ steps.package.outputs.asset }}.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  # A single job creates the Release and uploads every artifact at once.
   #
   # Previously each of the four matrix jobs called action-gh-release itself, so
   # four jobs raced to create the same tag's Release: whichever lost could fail
   # with "already_exists", and the release body was written four times over. One
-  # publisher also means the Release either has all four platforms or does not
-  # exist — it can no longer appear half-populated while other builds are still
-  # running.
+  # publisher also means the Release either has every platform and the app, or
+  # does not exist — it can no longer appear half-populated while other builds are
+  # still running.
   publish:
     name: Publish release
-    needs: build
+    needs: [version, build, app]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -109,9 +257,11 @@ jobs:
       - name: Prepare release title and changelog
         id: release_notes
         shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="$VERSION"
           if ! awk -v version="$version" '
             BEGIN { heading = "## [" version "]" }
             $0 == heading || index($0, heading " ") == 1 { found = 1; next }
@@ -135,7 +285,7 @@ jobs:
           # being used for is an error, not a silently wrong default.
           case "$subtitle" in
             Added|Changed|Deprecated|Removed|Fixed|Security|Performance|Documentation|Testing|Packaging|CI|\
-            新增|变更|弃用|移除|修复|安全|性能|文档|测试|打包)
+            CLI|App|新增|变更|弃用|移除|修复|安全|性能|文档|测试|打包|发布方式|本版未包含)
               echo "The first '### ' heading in the ${version} changelog section is the category" >&2
               echo "'${subtitle}', which would become the public release title. Add a theme line" >&2
               echo "(a one-line '### <what this release is about>') above the categories." >&2
@@ -146,35 +296,82 @@ jobs:
             echo "The ${version} changelog section has no '### ' heading to use as a subtitle" >&2
             exit 1
           fi
-          echo "name=gitpic ${GITHUB_REF_NAME} — ${subtitle}" >> "$GITHUB_OUTPUT"
+          echo "name=gitpic v${version} — ${subtitle}" >> "$GITHUB_OUTPUT"
 
-      - name: Download every build artifact
+          # The app ships in this release too, and it is not notarised. Stated
+          # here, next to its asset, rather than encoded in a prerelease flag the
+          # Homebrew tap's updater would trip over (see the header comment).
+          cat >> RELEASE_NOTES.md <<'NOTES'
+
+          ## GitPic.app
+
+          `GitPic-<version>-macos-arm64.zip` in this release is the macOS menu-bar
+          app, same version as the CLI and with that CLI embedded.
+
+          It is ad-hoc signed and **not notarised**, so macOS refuses to open it
+          after download until you clear the quarantine flag:
+
+          ```sh
+          xattr -dr com.apple.quarantine /Applications/GitPic.app
+          ```
+
+          Apple Silicon only. Requires GitHub CLI (`brew install gh`) and
+          `gh auth login`.
+          NOTES
+
+      - name: Download the CLI artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: dist-*
           merge-multiple: true
           path: dist
 
-      # Guards against publishing a partial set: four archives, four sidecars.
-      # Each sidecar is re-verified here, against the bytes that will actually be
-      # uploaded rather than the ones the build job happened to have on disk.
+      - name: Download the app bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: app-bundle
+          path: dist-app
+
+      # Guards against publishing a partial set. Every expected file is named
+      # explicitly rather than counted through a glob: with both artifact families
+      # in play, `ls gitpic-*` also matches `GitPic-…zip` on any case-insensitive
+      # filesystem, so the old `-eq 4` count was correct only by virtue of this job
+      # running on Linux. Each sidecar is re-verified against the bytes that will
+      # actually be uploaded rather than the ones a build job had on disk.
       - name: Verify the full artifact set
         shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          cd dist
-          ls -l
-          archives=$(ls gitpic-*.tar.gz gitpic-*.zip 2>/dev/null | wc -l | tr -d ' ')
-          sidecars=$(ls gitpic-*.sha256 2>/dev/null | wc -l | tr -d ' ')
-          echo "archives=$archives sidecars=$sidecars"
-          test "$archives" -eq 4
-          test "$sidecars" -eq 4
-          for f in gitpic-*.sha256; do shasum -a 256 -c "$f"; done
+          ls -l dist dist-app
+          expected=(
+            dist/gitpic-aarch64-apple-darwin.tar.gz
+            dist/gitpic-x86_64-apple-darwin.tar.gz
+            dist/gitpic-x86_64-unknown-linux-gnu.tar.gz
+            dist/gitpic-x86_64-pc-windows-msvc.zip
+            "dist-app/GitPic-${VERSION}-macos-arm64.zip"
+          )
+          for archive in "${expected[@]}"; do
+            test -s "$archive"
+            test -s "$archive.sha256"
+            ( cd "$(dirname "$archive")" && shasum -a 256 -c "$(basename "$archive").sha256" )
+          done
+          # Nothing beyond the expected set may reach the upload, in either
+          # directory — an unexpected file here means a build job changed its
+          # output and this list was not updated with it.
+          found=$(find dist dist-app -maxdepth 1 -type f | wc -l | tr -d ' ')
+          echo "files=$found expected=$(( ${#expected[@]} * 2 ))"
+          test "$found" -eq "$(( ${#expected[@]} * 2 ))"
 
       - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ steps.release_notes.outputs.name }}
           body_path: RELEASE_NOTES.md
-          files: dist/gitpic-*
+          # Never `prerelease: true` — see constraint 3 in the header comment.
+          files: |
+            dist/gitpic-*
+            dist-app/GitPic-*
           fail_on_unmatched_files: true
