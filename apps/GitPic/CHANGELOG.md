@@ -1,15 +1,18 @@
-# Changelog — GitPic.app
+# Changelog — GitPic.app (frozen at 0.1.2)
 
-The macOS app versions independently of the `gitpic` CLI. Each app release pins
-the CLI build it embeds; that version is recorded in the bundle's
-`GitPicEmbeddedCLIVersion` key and shown in the app's About pane.
+**This file is history.** Up to 0.1.2 the app versioned and released independently
+of the `gitpic` CLI, and its entries lived here. From 0.6.0 the two share one
+version and one GitHub Release, so app changes are recorded in the repository-root
+`CHANGELOG.md` and `CHANGELOG.zh-CN.md` under each version's `### App` section.
 
-The CLI's own changelogs are `CHANGELOG.md` and `CHANGELOG.zh-CN.md` at the
-repository root.
+Nothing new goes in this file. The versions below are the app's own numbering and
+do not correspond to any CLI release; `app-v0.1.0` and `app-v0.1.1` remain as tags.
 
-## [0.1.2] — 2026-08-20
+## [0.1.2] — never released independently
 
-### Editable fields, a clipboard that takes a copied file, and an Icon Composer icon
+The work in this section shipped as part of **0.6.0**, the first unified release —
+see the root changelogs. It is kept here so the app's own history reads
+continuously.
 
 ### Fixed
 

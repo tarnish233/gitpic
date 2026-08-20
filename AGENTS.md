@@ -15,6 +15,15 @@ usage), `CHANGELOG.zh-CN.md` (中文, Release source), and `CHANGELOG.md` (Engli
 both changelogs aligned for every release. CI lives in `.github/workflows/`.
 The Homebrew formula lives in the separate `tarnish233/homebrew-tap` repo.
 
+`apps/GitPic/` is a macOS menu-bar app (SwiftUI) that drives the CLI over its
+`--json` contract; `scripts/build-app.sh` builds the bundle with the `gitpic`
+binary embedded. It is **not** a separate product with its own version: the app and
+the CLI share `Cargo.toml`'s version and ship in the same GitHub Release. App
+changes go in each version's `### App` subsection of the two root changelogs;
+`apps/GitPic/CHANGELOG.md` is frozen at 0.1.2 as history. The app must never be
+added to the plugin manifests — `check_manifests.py` asserts exactly one plugin
+entry, and that entry is the CLI's skill.
+
 The skill at `skills/gitpic/SKILL.md` is the single source shipped three ways:
 embedded into the binary via `include_str!` for `gitpic skill install`, and
 referenced by the Claude Code marketplace (`.claude-plugin/marketplace.json`) and
@@ -43,7 +52,7 @@ renderer, which a unit test cannot reach. It runs against a temporary
 it up with everything else.
 
 ## Commit & Pull Request Guidelines
-Follow Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`. PRs need a clear description, linked issues, and green CI (fmt, clippy, test on Linux/macOS/Windows). Releases are cut by pushing a `vX.Y.Z` tag, which triggers multi-platform binaries.
+Follow Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`. PRs need a clear description, linked issues, and green CI (fmt, clippy, test on Linux/macOS/Windows). Releases are cut by pushing a `vX.Y.Z` tag, which builds the four platform binaries **and** GitPic.app and publishes them in one Release. The tag must equal `v` plus `Cargo.toml`'s version — the release workflow asserts it. The `app-v*` tags are historical, from when the app versioned separately; do not create new ones.
 
 ## Security & Configuration Tips
 Never commit tokens. Credentials come exclusively from `gh auth token`, so nothing secret is written to `~/.config/gitpic/config.toml`. `GITPIC_TOKEN` and the removed `github.token` key are not accepted; CI must authenticate GitHub CLI before invoking gitpic.
