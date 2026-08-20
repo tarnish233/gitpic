@@ -127,11 +127,21 @@ jobs:
           test -x verify/GitPic.app/Contents/MacOS/GitPic
           # The embedded CLI is the whole reason a Finder-launched app works.
           test -x verify/GitPic.app/Contents/Resources/gitpic
-          test -s verify/GitPic.app/Contents/Resources/GitPic.icns
+          # Both halves of what actool emits, because they serve different macOS
+          # versions: Assets.car carries every Tahoe appearance, the icns is the
+          # flattened fallback for macOS 14-25. A build that dropped either would
+          # still launch and would still show *an* icon, so only an assertion
+          # catches it.
+          test -s verify/GitPic.app/Contents/Resources/AppIcon.icns
+          test -s verify/GitPic.app/Contents/Resources/Assets.car
           verify/GitPic.app/Contents/Resources/gitpic --version
           codesign --verify --deep --strict verify/GitPic.app
           plutil -lint verify/GitPic.app/Contents/Info.plist
-          test "$(plutil -extract CFBundleIconFile raw verify/GitPic.app/Contents/Info.plist)" = "GitPic.icns"
+          # CFBundleIconName resolves the Assets.car icon; CFBundleIconFile is what
+          # older macOS reads. Both, or the icon silently falls back to the generic
+          # executable one on one OS or the other.
+          test "$(plutil -extract CFBundleIconFile raw verify/GitPic.app/Contents/Info.plist)" = "AppIcon"
+          test "$(plutil -extract CFBundleIconName raw verify/GitPic.app/Contents/Info.plist)" = "AppIcon"
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
