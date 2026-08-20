@@ -139,7 +139,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
-    /// Builds the status-bar menu.
+    /// Builds one status-bar menu item.
+    ///
+    /// **No key equivalents, deliberately.** A status-bar menu is not in the main
+    /// menu chain, and this app is `.accessory` and so never the active app, so a
+    /// `keyEquivalent` here fires only while the menu is already open — never from
+    /// another app. The menu used to advertise `⌘⇧V`, `⌘O`, `⌘,` and `⌘Q`, which
+    /// read as global hotkeys and are not: pressing `⌘⇧V` with another app frontmost
+    /// leaves no trace in the log at all (measured). Showing a shortcut the app
+    /// cannot honour is worse than showing none. Adding them back means registering
+    /// real hotkeys (`RegisterEventHotKey`) first.
     ///
     /// Every item carries an image on purpose. macOS reserves the icon column
     /// per *section* (the runs between separators), and the system attaches its
@@ -147,11 +156,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the Quit section has an icon renders that section indented relative to the
     /// others. Giving every item an icon keeps one alignment for the whole menu.
     private static func item(_ title: String, _ symbol: String,
-                            _ action: Selector?, key: String = "",
-                            modifiers: NSEvent.ModifierFlags? = nil) -> NSMenuItem {
-        let mi = NSMenuItem(title: title, action: action, keyEquivalent: key)
+                            _ action: Selector?) -> NSMenuItem {
+        let mi = NSMenuItem(title: title, action: action, keyEquivalent: "")
         mi.image = Self.menuIcon(symbol)
-        if let modifiers { mi.keyEquivalentModifierMask = modifiers }
         return mi
     }
 
@@ -218,13 +225,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
 
         let paste = Self.item("上传剪贴板图片", "doc.on.clipboard",
-                              #selector(uploadClipboard), key: "v",
-                              modifiers: [.command, .shift])
+                              #selector(uploadClipboard))
         paste.target = self
         menu.addItem(paste)
 
-        let pick = Self.item("选择文件上传…", "folder",
-                             #selector(pickFiles), key: "o")
+        let pick = Self.item("选择文件上传…", "folder", #selector(pickFiles))
         pick.target = self
         menu.addItem(pick)
 
@@ -264,17 +269,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        let win = Self.item("打开主窗口…", "macwindow",
-                            #selector(openMainWindow), key: ",")
+        let win = Self.item("打开主窗口…", "macwindow", #selector(openMainWindow))
         win.target = self
         menu.addItem(win)
 
-        let doc = Self.item("体检 (doctor)…", "stethoscope", #selector(runDoctor))
+        let doc = Self.item("连通性测试…", "network", #selector(runDoctor))
         doc.target = self
         menu.addItem(doc)
 
         menu.addItem(Self.item("退出 GitPic", "power",
-                               #selector(NSApplication.terminate(_:)), key: "q"))
+                               #selector(NSApplication.terminate(_:))))
 
         statusItem.menu = menu
     }
@@ -289,8 +293,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func copyRecent(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String,
               let r = recent.first(where: { $0.id == id }) else { return }
-        copy(format.snippet(r))
-        report(.done(summary: "已复制 \(format.label)"))
+        if copy(format.snippet(r)) {
+            report(.done(summary: "已复制 \(format.label)"))
+        } else {
+            report(.failed(summary: "写剪贴板失败"), seconds: 4)
+        }
     }
 
     @objc private func pickFiles() {
@@ -298,9 +305,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         p.allowsMultipleSelection = true
         p.canChooseDirectories = false
         p.allowedContentTypes = [.image]
-        // An accessory app has no windows to attach a sheet to, and the panel
-        // needs to come forward on its own.
-        NSApp.activate(ignoringOtherApps: true)
+        // Become .regular for the life of the panel, the same way the main window
+        // does — an .accessory app cannot own a focused, title-barred window, and
+        // that includes a modal panel. `AppActivationPolicy` is reference-counted
+        // for exactly this: the panel can hold .regular alongside the main window.
+        //
+        // This replaces a bare `NSApp.activate(ignoringOtherApps:)`, which is
+        // deprecated as of macOS 14 and does not do what its name says any more:
+        // under cooperative activation a background app cannot pull itself in front
+        // of the active one. Measured here — with the menu item driven
+        // programmatically, the panel still opens *behind* the frontmost app's
+        // windows. A real click on the status item grants the app activation
+        // rights that a synthetic one does not, so this is the correct policy but
+        // not, on its own, a guarantee the panel lands in front.
+        AppActivationPolicy.enter()
+        defer { AppActivationPolicy.leave() }
         guard p.runModal() == .OK, !p.urls.isEmpty else { return }
         upload(paths: p.urls)
     }
@@ -339,40 +358,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // own clipboard write (`src/commands/upload.rs:205` requires Mode::Human),
         // and reading here avoids the `paste` subcommand's arboard dependency
         // entirely.
-        guard let data = Self.clipboardPNG() else {
-            report(.failed(summary: "剪贴板里没有图片"))
+        guard let offer = Self.clipboardImages() else {
+            // Logged, not just flashed. This is the one failure that leaves no
+            // other trace — no upload runs, so without a line here the log shows
+            // nothing at all and "GitPic 没反应" is undiagnosable.
+            let types = NSPasteboard.general.types?.map(\.rawValue).joined(separator: ", ") ?? "none"
+            Diagnostics.log("clipboard upload requested: no image on pasteboard; types=[\(types)]")
+            report(.failed(summary: "剪贴板里没有图片：复制图片本身或图片文件后再试"), seconds: 5)
             return
         }
-        Diagnostics.log("clipboard upload requested: \(data.count) bytes")
-        if dryRun {
-            Diagnostics.log("  DRY RUN: skipping upload")
-            report(.done(summary: "DRY RUN 收到剪贴板图片 \(data.count) 字节"))
-            return
-        }
-        report(.uploading(count: 1))
-        Task { @MainActor in
-            do {
-                let env = try await runner.upload(pngData: data)
-                self.present(env)
-            } catch {
-                self.present(error)
+        switch offer {
+        case .files(let urls):
+            // Already on disk, so this is an ordinary file upload — same code path,
+            // and the original bytes, extension, and filename all survive.
+            upload(paths: urls)
+        case .data(let data):
+            Diagnostics.log("clipboard upload requested: \(data.count) bytes")
+            if dryRun {
+                Diagnostics.log("  DRY RUN: skipping upload")
+                report(.done(summary: "DRY RUN 收到剪贴板图片 \(data.count) 字节"))
+                return
+            }
+            report(.uploading(count: 1))
+            Task { @MainActor in
+                do {
+                    let env = try await runner.upload(pngData: data)
+                    self.present(env)
+                } catch {
+                    self.present(error)
+                }
             }
         }
     }
 
-    private static func clipboardPNG() -> Data? {
+    /// What the clipboard is offering, in whichever form it has it.
+    private enum ClipboardOffer {
+        /// Image files that already exist on disk — what a Finder ⌘C puts on the
+        /// pasteboard, and what most file managers and browsers put there too.
+        case files([URL])
+        /// Loose bitmap data, with no file behind it — a screenshot, or an app that
+        /// copied pixels rather than a file.
+        case data(Data)
+    }
+
+    /// Read whatever image the clipboard holds.
+    ///
+    /// File URLs are checked **first**, and that ordering is the whole point of
+    /// this function: copying an image in Finder puts only `public.file-url` on the
+    /// pasteboard — no `.png`, no `.tiff`, and `NSImage` does not read it back
+    /// either (measured). A bitmap-only reader therefore reports "剪贴板里没有图片"
+    /// for the most ordinary way there is to copy an image on macOS.
+    ///
+    /// Preferring the file is also the better upload: the original bytes,
+    /// extension, and name all survive, instead of every paste landing as a
+    /// re-encoded `clipboard.png`.
+    private static func clipboardImages() -> ClipboardOffer? {
         let pb = NSPasteboard.general
-        if let png = pb.data(forType: .png) { return png }
+        if let urls = pb.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true,
+                      .urlReadingContentsConformToTypes: [UTType.image.identifier]]
+        ) as? [URL], !urls.isEmpty {
+            return .files(urls)
+        }
+        if let png = pb.data(forType: .png) { return .data(png) }
         // TIFF is what a screenshot-to-clipboard usually lands as.
         if let tiff = pb.data(forType: .tiff),
-           let rep = NSBitmapImageRep(data: tiff) {
-            return rep.representation(using: .png, properties: [:])
+           let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            return .data(png)
         }
         if let objs = pb.readObjects(forClasses: [NSImage.self]) as? [NSImage],
            let img = objs.first,
            let tiff = img.tiffRepresentation,
-           let rep = NSBitmapImageRep(data: tiff) {
-            return rep.representation(using: .png, properties: [:])
+           let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            return .data(png)
         }
         return nil
     }
@@ -393,13 +454,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func finish(_ results: [ItemResult], failure: ErrorBody?) {
+        guard !results.isEmpty else {
+            // `ok:true` with an empty result list. Nothing uploaded, so there is
+            // nothing to copy — and copying "" would replace whatever the user had
+            // on the clipboard with nothing, which is worse than doing nothing.
+            report(.failed(summary: failure.map { "\($0.code)：\($0.message)" }
+                                    ?? "上传没有返回任何结果"), seconds: 5)
+            return
+        }
         recent = results.reversed() + recent
         rebuildMenu()
         let joined = results.map { format.snippet($0) }.joined(separator: "\n")
-        copy(joined)
+        let copied = copy(joined)
         if let failure {
             report(.failed(
                 summary: "\(results.count) 张成功，之后失败：\(failure.code)"), seconds: 4)
+        } else if !copied {
+            // The upload is done and the link is real; only the clipboard write
+            // failed. Say exactly that instead of reporting a success the user
+            // cannot paste.
+            report(.failed(summary: "上传成功，但写剪贴板失败。链接在「最近上传」里"), seconds: 6)
         } else {
             let dd = results.filter(\.deduped).count
             let extra = dd > 0 ? "（\(dd) 张已存在）" : ""
@@ -441,10 +515,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func copy(_ s: String) {
+    /// Write to the clipboard, and say whether it landed.
+    ///
+    /// The result is not decoration: `setString` can fail, and reporting "已复制"
+    /// anyway is worse than not copying — the user pastes stale content and never
+    /// learns why.
+    @discardableResult
+    private func copy(_ s: String) -> Bool {
+        guard !s.isEmpty else { return false }
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.setString(s, forType: .string)
+        return pb.setString(s, forType: .string)
     }
 
     // MARK: - Doctor
@@ -464,10 +545,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 text = "doctor 调用失败：\(String(describing: error))"
             }
             let a = NSAlert()
-            a.messageText = "GitPic 体检"
+            a.messageText = "GitPic 连通性测试"
             a.informativeText = text
             a.alertStyle = .informational
-            NSApp.activate(ignoringOtherApps: true)
+            // Same reason as the open panel: an .accessory app's modal would come
+            // up behind whatever is frontmost.
+            AppActivationPolicy.enter()
+            defer { AppActivationPolicy.leave() }
             a.runModal()
         }
     }
