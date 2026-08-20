@@ -45,6 +45,31 @@ cp "$BIN" "$APP/Contents/MacOS/GitPic"
 cp "$GITPIC_BIN" "$APP/Contents/Resources/gitpic"
 chmod +x "$APP/Contents/Resources/gitpic"
 
+echo "==> building the app icon"
+ICON_SOURCE="$PKG/Resources/AppIcon-1024.png"
+[[ -f "$ICON_SOURCE" ]] || { echo "error: $ICON_SOURCE missing" >&2; exit 1; }
+ICON_TMP="$(mktemp -d)"
+trap 'rm -rf "$ICON_TMP"' EXIT
+ICONSET="$ICON_TMP/GitPic.iconset"
+mkdir -p "$ICONSET"
+for spec in \
+  "16 icon_16x16.png" \
+  "32 icon_16x16@2x.png" \
+  "32 icon_32x32.png" \
+  "64 icon_32x32@2x.png" \
+  "128 icon_128x128.png" \
+  "256 icon_128x128@2x.png" \
+  "256 icon_256x256.png" \
+  "512 icon_256x256@2x.png" \
+  "512 icon_512x512.png" \
+  "1024 icon_512x512@2x.png"
+do
+  read -r side name <<< "$spec"
+  sips --resampleHeightWidth "$side" "$side" "$ICON_SOURCE" \
+    --out "$ICONSET/$name" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/GitPic.icns"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -54,6 +79,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>dev.gitpic.app</string>
   <key>CFBundleName</key><string>GitPic</string>
   <key>CFBundleDisplayName</key><string>GitPic</string>
+  <key>CFBundleIconFile</key><string>GitPic.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$APP_VERSION</string>
   <key>CFBundleVersion</key><string>$APP_VERSION</string>

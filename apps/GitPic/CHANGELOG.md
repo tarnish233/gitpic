@@ -7,6 +7,19 @@ the CLI build it embeds; that version is recorded in the bundle's
 The CLI's own changelogs are `CHANGELOG.md` and `CHANGELOG.zh-CN.md` at the
 repository root.
 
+## [0.1.1] — 2026-08-20
+
+### A monochrome icon that belongs on macOS
+
+### Changed
+
+- Added a dedicated GitPic application icon: a black, rounded double-photo mark
+  on a clean white field, derived from the menu-bar app's stacked-photo concept.
+- The app build now creates a complete multi-resolution `.icns` from the checked-in
+  1024 px source and declares it through `CFBundleIconFile`, so Finder, Settings,
+  and other macOS surfaces use the GitPic icon instead of the generic executable
+  icon.
+
 ## [0.1.0] — 2026-08-19
 
 First version. Menu-bar app driving the bundled CLI over its `--json` contract.
