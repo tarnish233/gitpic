@@ -66,7 +66,7 @@ Xcode 26.6 / Swift 6.3.3 / macOS 26.5.2 (Tahoe, build 25F84)，本机有刘海�
 理由：
 - **契约只有一份。** JSON envelope 是你花了 v0.4.0/v0.5.0/v0.5.1 三个版本硬化的东西——10 个错误码由 `src/error.rs:124` 的契约测试锁死，partial-success 用 `results` 字段是否存在来判别，`doctor` 的 `error` 字段有 `ok==false` 的不变量断言。GUI 复用它，等于免费继承这些保证。
 - **绕开 C1 的一半。** bundle 内绝对路径，不依赖 PATH。
-- **独立版本号天然成立。** app 有自己的版本，内部钉住一个 gitpic 版本。
+- **独立版本号天然成立。** app 有自己的版本，内部钉住一个 gitpic 版本。（0.6.0 起改为与 CLI 共用一个版本号，见 §7。）
 - 一次上传拿全链接形态：`ItemResult` 带 `url`/`raw_url`/`markdown`/`html`/`path`/`sha`/`size`/`deduped`（`src/output.rs:31-43`），所以 GUI 切 md/raw/html/cdn **零重传**。
 
 否决的方案：
@@ -195,17 +195,37 @@ gitpic-cli/
 
 ## 7. 版本与发布
 
-**独立版本号，tag 前缀隔离。** 已核实隔离是真的：
+> **已过时（0.6.0 起）。** 本节记录的是 app 独立版本号、`app-v*` tag 前缀隔离的设计。
+> 从 0.6.0 起 CLI 与 app **共用一个版本号、发在同一个 Release**：`Cargo.toml` 是唯一版本源，
+> `apps/GitPic/VERSION` 与 `release-app.yml` 都已删除，`app-v0.1.0` / `app-v0.1.1` 作为历史
+> tag 保留。原设计与现状的差异见下方"合并后"小节；原文保留，因为它记录了当初为什么要隔离，
+> 以及隔离一旦拆掉会踩到什么。
+
+**（原设计）独立版本号，tag 前缀隔离。** 已核实隔离是真的：
 
 - `release.yml:5` 触发器只有 `tags: ["v*"]`。`app-v0.1.0` **不匹配** `v*`（glob 从头匹配），所以 app tag 不会触发 CLI 发布。
 - 新增 `.github/workflows/release-app.yml`，触发 `tags: ["app-v*"]`。
 
 **两条红线**（踩了会把现有 CLI 发布搞坏）：
 
-1. **app 产物绝不能叫 `gitpic-*` 且绝不能进 CLI 的 `dist/`。** `release.yml:168-171` 是 `sidecars=$(ls gitpic-*.sha256 | wc -l)` 然后 `test "$sidecars" -eq 4`；多一个 `gitpic-x.dmg.sha256` 就变 5，**发布直接失败**。且 `files: dist/gitpic-*` 会把 dmg 一并收走。→ app 产物命名 `GitPic-<ver>.dmg`，走独立 dist 目录。
+1. **app 产物绝不能叫 `gitpic-*` 且绝不能进 CLI 的 `dist/`。** 当时 `release.yml` 的守卫是 `sidecars=$(ls gitpic-*.sha256 | wc -l)` 然后 `test "$sidecars" -eq 4`；多一个 `gitpic-x.dmg.sha256` 就变 5，**发布直接失败**。且 `files: dist/gitpic-*` 会把 dmg 一并收走。→ app 产物命名 `GitPic-<ver>.dmg`，走独立 dist 目录。
 2. **绝不把 app 加进插件清单。** `check_manifests.py` 把 `Cargo.toml` 版本焊死等于 `.claude-plugin/marketplace.json` 两处 + `.codex-plugin/plugin.json` 一处，并断言 `len(plugins) == 1`（第 87、114 行），还要求两份 changelog 都有该版本段。app 版本与 Cargo 版本不同，塞进去必然红。→ app 的 changelog 另开 `apps/GitPic/CHANGELOG.md`。
 
 **分发形态（受 C4 限制，按你「暂时本机签名」的决定）**：`scripts/build-app.sh` 用有效的那张 Apple Development 证书签名，产物是本机可运行的 `.app`。这**不是**可公开下载的公证包——别人下载后会被 Gatekeeper 拦。所以 `app-v0.1.0` 定位为**源码构建 / 本机安装**，Release 页面写明构建方式，不承诺开箱可用。等有 Developer ID 再补公证与 DMG 分发。
+
+### 合并后（0.6.0 起的实际做法）
+
+- **一个版本源**：`Cargo.toml` 的 `[package] version`。`build-app.sh` 读它，并断言即将嵌入的
+  `gitpic --version` 与之相等 —— 版本合一是每次构建都被验证的事实，不是承诺。
+- **一个 tag、一个 Release、一个发布者**：`release.yml` 里 app 作为 macOS job 构建与自检，
+  然后把 zip 作为 artifact 交给唯一的 publish job。artifact **不能**叫 `dist-*`，否则会被
+  `pattern: dist-*` + `merge-multiple` 扫进 CLI 的 `dist/`。
+- **红线 1 换了形式，没有消失**：两类产物现在确实在同一个 Release 里，所以宽松的 `gitpic-*`
+  计数被换成**按确切名字逐个断言**。宽松 glob 之所以一直没出事，只因为 publish job 跑在
+  Linux —— `ls gitpic-*` 在大小写不敏感的文件系统上会匹配到 `GitPic-*`。
+- **红线 2 依然有效**：app 永远不进插件清单，`len(plugins) == 1` 保持不变。
+- **不能标 prerelease**：Homebrew tap 的更新流程读 `releases/latest`，该端点跳过 prerelease，
+  且它的 cron 失败时不报错。所以未公证这件事写进 release notes，而不是写进 prerelease 标记。
 
 ---
 
@@ -235,7 +255,7 @@ gitpic-cli/
 | M2 | `ToolDiscovery` + `GitpicRunner` + Envelope 解码 | Finder 启动下跑通一次真实上传 |
 | M3 | 菜单栏 popover（落区 / 剪贴板 / 格式切换 / 最近） | 三种格式零重传切换正确 |
 | M4 | 主窗口（历史 + 设置） | 设置改动落到 config，串行无丢更新 |
-| M5 | 构建脚本 + 签名 + 独立 tag 发布流水线 | `app-v0.1.0` 不触发 CLI 发布，CLI 的 4-sidecar 断言不受影响 |
+| M5 | 构建脚本 + 签名 + 独立 tag 发布流水线 | `app-v0.1.0` 不触发 CLI 发布，CLI 的 4-sidecar 断言不受影响（0.6.0 起改为合并发布，验收标准见 §7「合并后」） |
 
 M1 原本排在功能之前——它是唯一一个失败就要改设计的里程碑（兜底见 §4.3）。
 

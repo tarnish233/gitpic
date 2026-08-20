@@ -61,6 +61,26 @@ chmod +x ./gitpic && mv ./gitpic ~/.local/bin/  # ensure ~/.local/bin is on PATH
 cargo install --git https://github.com/tarnish233/gitpic-cli
 ```
 
+### GitPic.app (optional macOS menu-bar app)
+
+Every [release](https://github.com/tarnish233/gitpic-cli/releases) includes a
+`GitPic-<version>-macos-arm64.zip`. It carries the same version as the CLI and
+embeds that same `gitpic` build, so installing the app does not also require
+installing the CLI (and vice versa).
+
+Upload the clipboard image or pick files from the menu-bar icon; the link lands on
+your clipboard. The main window edits the image-host repository and the upload
+settings, and browses history.
+
+```bash
+unzip GitPic-<version>-macos-arm64.zip -d /Applications/
+# Ad-hoc signed and not notarised by Apple — clear the quarantine flag to open it:
+xattr -dr com.apple.quarantine /Applications/GitPic.app
+```
+
+> Apple Silicon only. Still needs GitHub CLI, logged in:
+> `brew install gh && gh auth login`.
+
 ## Setup
 
 Credentials come only from the [GitHub CLI](https://cli.github.com), so

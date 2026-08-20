@@ -126,6 +126,11 @@ def check_changelogs(version: str) -> None:
     Nothing checked the English one, which meant a release could ship with it left
     at ``## [Unreleased]`` and CI would stay green, even though AGENTS.md requires
     the two to stay aligned for every release.
+
+    These two are now the only changelogs. The CLI and GitPic.app share one version
+    and one Release, so app changes go in each version's ``### App`` subsection
+    here; ``apps/GitPic/CHANGELOG.md`` is frozen at 0.1.2 as history and is
+    deliberately not checked.
     """
     heading = re.compile(r"^## \[" + re.escape(version) + r"\]", flags=re.M)
     for path in CHANGELOGS:

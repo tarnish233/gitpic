@@ -58,6 +58,22 @@ chmod +x ./gitpic && mv ./gitpic ~/.local/bin/  # 确保 ~/.local/bin 在 PATH
 cargo install --path .
 ```
 
+### GitPic.app（macOS 菜单栏应用，可选）
+
+每个 [发布](https://github.com/tarnish233/gitpic-cli/releases) 里都有一个
+`GitPic-<版本>-macos-arm64.zip`。它和 CLI 同版本，并且内嵌了同一版本的 `gitpic`，所以装了
+App 不必再单独装 CLI（反之也不必装 App）。
+
+从菜单栏图标上传剪贴板图片或选文件，链接自动进剪贴板；主窗口可以改图床仓库、上传设置，看历史。
+
+```bash
+unzip GitPic-<版本>-macos-arm64.zip -d /Applications/
+# 本机签名、未经 Apple 公证，下载后必须解除隔离才能打开：
+xattr -dr com.apple.quarantine /Applications/GitPic.app
+```
+
+> 仅 Apple Silicon。仍然需要 GitHub CLI 且已登录：`brew install gh && gh auth login`。
+
 ## 初始化与设置
 
 凭据只取自 [GitHub CLI](https://cli.github.com)，配置文件里**不保存任何密钥**：
