@@ -4,7 +4,141 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-08-20
+
+### The invariants the comments claimed, now actually held
+
+Most of the fixes in this release share one shape: a comment, a doc, or the previous
+changelog already declared an invariant that the code did not keep. The actor claimed
+it serialised `gitpic` invocations (it did not); the 8 s bound claimed it bounded the
+probe (it did not); `skill.rs` claimed a closed stdin is not consent, while a closed
+stdout made a blind install look consented; and the last changelog claimed the draft
+and status-line fixes were in (they were not). All of them hold now, each with a test
+that fails if it stops holding.
+
+One stretch of never-executed code went with them. The previous entry claimed a fix
+for dedup and overwrite of images over 1 MB, but that path was never reached —
+GitHub returns 200 for a 4 MB file and `ContentsGet` already parsed it. Dedup and
+overwrite always worked; those 45 lines were dead, and they are gone along with the
+claim.
+
+### CLI
+
+- **`--name` sets the filename stem, never the file type.** `gitpic photo.jpg
+  --name shot` published JPEG bytes at `shot.png`, and `--name shot.png` did the
+  same, because the name replaced the extension outright and `render_path`
+  defaults `{ext}` to `png`. The extension now follows the bytes, matching what
+  `--stdin` and `paste` already did: both spellings publish `shot.jpg`. A format
+  the decoder cannot identify keeps the extension the input file arrived with, so
+  `diagram.svg --name shot` is `shot.svg` rather than a usage error.
+- **A cdn link that would 404 is refused before anything is committed.** jsDelivr
+  encodes the ref as `repo@branch/path`, so a branch containing `/` makes the
+  branch/path boundary ambiguous and no encoding can repair it. `--link cdn` (or
+  the default) on such a branch is now a `USAGE` error raised before the
+  credential and before any PUT, so nothing is uploaded and `--link raw` re-runs
+  cleanly. It used to warn on stderr and then report `ok: true` with a dead URL —
+  and `--json` consumers never see stderr.
+- **A closed stdout can no longer answer a question the user never saw.**
+  `printf '…' | gitpic init | true` wrote a complete config to disk: every prompt
+  write was discarded while stdin was still consumed, so the answers landed
+  without one question being shown. `gitpic skill install` was worse — it writes
+  files into agent directories and its prompt defaults to "all". A prompt whose
+  text could not be delivered now refuses to read an answer at all.
+- **A closed stdout no longer turns a failing run into exit 0.** `gitpic config
+  get no.such.key --json | true` used to exit 0 because the broken-pipe handler
+  called `process::exit(0)` from inside `print_error`. A closed reader on a
+  successful write is still a normal end; the process now returns the status it
+  already decided.
+- **`gitpic init` validates the config the next command will resolve, not only the
+  file it is about to write.** `GITPIC_OWNER=me gitpic init` answering just `pics`
+  was refused with "a target repo is required", even though owner-from-environment
+  plus repo-from-file is exactly what every upload accepts — and the repo prompt's
+  own default was written for that case, so `init` was refusing a default it had
+  just offered. Nothing environment-derived is written to the file. `owner/` is
+  still refused and still leaves nothing on disk, and `gitpic config edit` still
+  re-parses after `$EDITOR` exits so a typo is `CONFIG_INVALID` rather than a
+  silent ok that every later command then refuses.
+- **`feat/x` is a legal branch again**, with one boundary. `check_branch` used to
+  reject `/` even though the comments described `feat/x` as the example. `/` is
+  allowed in a git ref; empty segments, `.` / `..`, and a leading or trailing
+  slash are still refused. The `/branches/{branch}` lookup percent-encodes `/` as
+  `%2F` so it cannot add a path slot, while `?ref=` keeps `/` intact because that
+  is what GitHub expects in the query. Raw links give the branch its own path
+  segment and work; cdn links cannot express it and are refused (above).
+- `--name` on two or more files is a `USAGE` error instead of being silently
+  ignored. It still applies to stdin, paste, and a single file.
+- Uploads larger than 100 MB are rejected locally. The Contents API PUT cannot
+  accept them; encoding a payload that cannot land was wasted work and a confusing
+  remote error.
+- GitHub 409 (ref conflict) and 422 (unprocessable, including branch protection)
+  are classified instead of falling through as an unlabelled 4xx. They remain
+  `GENERAL` because neither is uniquely actionable, but the message now names the
+  status.
+
+### App
+
+- **Two `gitpic` invocations can no longer run at once.** The type was an actor and
+  its comments claimed that serialised them; actors are reentrant, so every `await`
+  admitted the next caller. Measured on this exact shape: two overlapping
+  `applyConfig` calls put two `gitpic` processes on the machine together, and
+  `config set` is load → mutate one key → write the whole file with no lock, so one
+  of the two changes was silently dropped. Uploads had the same hole, which is the
+  GitHub 409 branch-ref race the comment said the actor prevented. A serial queue
+  now gates every invocation.
+- **The 8 s bound on `gh auth status` and the login-shell lookup is real now.** The
+  drain waited for EOF, which needs *every* write end of the pipe closed — and a
+  login shell whose profile starts ssh-agent, gpg-agent or nvm leaves one open, so
+  killing the child did not produce EOF and the wait never returned at all. A
+  `poll` loop bounded by the deadline replaces it, and the child exiting now ends
+  the drain instead of EOF: that turns the ssh-agent case from an 8 s kill into a
+  complete answer in about 0.1 s. A call that does time out still hands back
+  everything it drained.
+- **A killed child can no longer crash the app.** `Process.terminationStatus` raises
+  an Objective-C exception on a process that has not exited, which `try` cannot
+  catch, and after SIGKILL the wait for it could itself expire. The status is read
+  only once the termination handler has fired; a child that never reports is
+  described as SIGKILLed rather than asked.
+- **`gh` is found on machines whose shell profile prints something.** The
+  login-shell probe trimmed the *whole* of stdout and treated it as one path, so
+  nvm/conda chatter or a motd ahead of `command -v`'s answer made the lookup fail
+  and the app said "找不到 gh，请 brew install gh" with gh installed. Lines are now
+  scanned for one that is an absolute path whose last component is the tool and
+  which is executable — which also stops a stray executable path in a profile from
+  being spawned as `gh` — and non-UTF-8 noise no longer discards the answer.
+- **The config form no longer reports a saved value as unsaved.** A `repo` typed as
+  `owner/name` is stored split, so the typed form never equalled the file again,
+  and the draft was reconciled all-or-nothing: one edit elsewhere suppressed the
+  whole re-read and that key stayed dirty however often it was saved, with
+  `revert()` the only way out. Reconciliation is per key now — the file wins for
+  anything the user is not editing, the user wins for anything they touched during
+  the round trip, and after a partly failed save only the keys that actually landed
+  are adopted, so the value whose write failed stays in the form to retry.
+- **Nothing on screen claims a check that did not run.** A failed `doctor` left the
+  previous report standing, so "仓库可写 ✓" was rendered beside "doctor 失败". The
+  panes now distinguish three tool states instead of two: while discovery is still
+  running they say so rather than latching "读取配置中…", and "找不到 gitpic" is only
+  said once the search has finished — a drop in the first seconds after launch used
+  to get it for a binary that was merely not located yet. The form also loads itself
+  as soon as discovery completes instead of waiting for the user to find retry.
+- **A status message is cleared by whoever wrote it.** One line was shared by four
+  writers and none could clear another's, so a failed save's "写入失败" outlived the
+  successful reload that disproved it, "没有改动" was cleared by nothing at all, and
+  the history pane's "写剪贴板失败" was stranded the same way. Entering an upload also
+  retires any reset still pending, which is what used to wipe "上传中…" mid-upload.
+- Tool discovery no longer blocks a cooperative thread. `Task.detached` does not come
+  with a thread of its own and the probe blocks for up to 8 s per tool; it runs on a
+  dedicated queue now, with the cooperative pool only ever waiting on a continuation.
+- Nested reload/save/doctor work no longer lets the first `defer { busy = false }`
+  clear the spinner of work still running. Re-opening the main window no longer
+  leaks `.regular` activation: `showWindow` takes one `enter()` for the life of the
+  window, so closing it returns the app to `.accessory` even if the menu item was
+  clicked while the window was already visible or miniaturised.
+- Successful uploads refresh the history pane and keep only the eight most recent
+  items the menu actually shows. The notch overlay no longer auto-idles an
+  in-progress upload. The menu-bar "连通性测试" item opens the 图床 pane and runs the
+  same probe the window button uses, instead of a second NSAlert copy of the report.
+  History "Raw URL" encoding matches the CLI (`+` `#` `?` are escaped; `/` is not).
+  An undecodable CLI process includes stderr in the error shown to the user.
 
 ## [0.6.0] - 2026-08-20
 
@@ -658,7 +792,9 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.7.0
+[0.6.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.6.0
 [0.5.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.5.1
 [0.5.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.4.0
