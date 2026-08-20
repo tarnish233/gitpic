@@ -392,21 +392,45 @@ struct HistoryPane: View {
 struct AboutPane: View {
     @Bindable var model: AppModel
 
-    private var appVersion: String {
-        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
-        return v
+    /// `nil` when there is no bundle to read it out of — a `swift run` build
+    /// rather than a packaged `.app`. Kept optional rather than defaulted so the
+    /// note below can tell "no bundle" apart from "the two really disagree";
+    /// defaulting them to "dev"/"未知" made an ordinary dev run look like a
+    /// mismatched build.
+    private var appVersion: String? {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
     }
-    private var embeddedCLI: String {
-        Bundle.main.infoDictionary?["GitPicEmbeddedCLIVersion"] as? String ?? "未知"
+    private var embeddedCLI: String? {
+        Bundle.main.infoDictionary?["GitPicEmbeddedCLIVersion"] as? String
+    }
+
+    /// The three honest states, kept apart rather than collapsed into one string.
+    @ViewBuilder private var versionNote: some View {
+        switch (appVersion, embeddedCLI) {
+        case (let app?, let cli?) where app == cli:
+            Text("App 与 CLI 同版本发布，内嵌的就是这个版本的 gitpic。")
+                .font(.caption).foregroundStyle(.secondary)
+        case (_?, _?):
+            Text("版本不一致——这份 App 内嵌的 gitpic 与 App 自身版本不符，请重新构建。")
+                .font(.caption).foregroundStyle(.orange)
+        default:
+            Text("开发构建：没有打包成 .app，读不到版本信息。App 与 CLI 同版本发布，"
+                 + "由 scripts/build-app.sh 在构建时校验。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 
     var body: some View {
         Form {
             Section("版本") {
-                LabeledContent("App") { Text(appVersion).monospacedDigit() }
-                LabeledContent("内嵌 gitpic") { Text(embeddedCLI).monospacedDigit() }
-                Text("App 与 CLI 各自独立发版；这里显示的是这份 App 里实际打包的 CLI。")
-                    .font(.caption).foregroundStyle(.secondary)
+                LabeledContent("App") { Text(appVersion ?? "dev").monospacedDigit() }
+                LabeledContent("内嵌 gitpic") { Text(embeddedCLI ?? "未知").monospacedDigit() }
+                // Both rows stay even though a real build always makes them agree:
+                // the second is read back out of the bundle, so it is the only
+                // place that shows what was *actually* packaged rather than what
+                // the build intended. A mismatch means build-app.sh's equality
+                // assertion was bypassed.
+                versionNote
             }
             Section("工具位置") {
                 LabeledContent("gitpic") {
