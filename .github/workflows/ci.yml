@@ -112,9 +112,40 @@ jobs:
         working-directory: apps/GitPic
         run: swift test
 
-      - name: App version and changelog agree
+      # The bundle path, not just the Swift package.
+      #
+      # This job used to stop at `swift build` / `swift test`, so the bundle, the
+      # icon compile, the signing, and the version stamping were only ever
+      # exercised by a tag. That gap is not theoretical: after the icon moved to
+      # `actool`, a release guard still looking for `Resources/GitPic.icns` stayed
+      # green in CI and would have failed at the one moment it mattered.
+      #
+      # It also re-checks the unified version for free — build-app.sh refuses to
+      # embed a `gitpic` whose `--version` disagrees with Cargo.toml.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the app bundle
+        run: ./scripts/build-app.sh
+
+      - name: The bundle carries the Cargo.toml version and a complete icon
         run: |
           set -euo pipefail
-          ver="$(tr -d '[:space:]' < apps/GitPic/VERSION)"
-          grep -qE "^## \\[${ver}\\]" apps/GitPic/CHANGELOG.md \
-            || { echo "apps/GitPic/CHANGELOG.md has no '## [$ver]' section" >&2; exit 1; }
+          plist=dist-app/GitPic.app/Contents/Info.plist
+          want="$(awk '
+            /^\[package\]/ { inpkg = 1; next }
+            /^\[/          { inpkg = 0 }
+            inpkg && /^version[[:space:]]*=/ {
+              gsub(/^version[[:space:]]*=[[:space:]]*"|"[[:space:]]*$/, ""); print; exit
+            }' Cargo.toml)"
+          echo "Cargo.toml version: $want"
+          test "$(plutil -extract CFBundleShortVersionString raw "$plist")" = "$want"
+          # The embedded CLI's own version, read back out of the bundle rather than
+          # taken from the build's intent.
+          test "$(plutil -extract GitPicEmbeddedCLIVersion raw "$plist")" = "$want"
+          test -s dist-app/GitPic.app/Contents/Resources/AppIcon.icns
+          test -s dist-app/GitPic.app/Contents/Resources/Assets.car
+          test -x dist-app/GitPic.app/Contents/Resources/gitpic
