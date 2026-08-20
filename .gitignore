@@ -3,3 +3,9 @@
 .DS_Store
 /dist-app
 /apps/GitPic/.build
+# Per-agent worktrees and the scratch config/env they get, so one agent's
+# isolation never surfaces as untracked files in another agent's checkout.
+# `.claude/worktrees/` is where Claude Code's own worktree tooling puts them;
+# scripts/new-worktree.sh deliberately uses a sibling directory instead.
+/.claude/worktrees/
+/.local/
