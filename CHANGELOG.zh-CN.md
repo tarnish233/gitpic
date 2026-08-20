@@ -6,6 +6,74 @@
 
 ## [未发布]
 
+## [0.6.0] - 2026-08-20
+
+### 一个版本号，一次发布 —— CLI 与 App 从此一起发
+
+从这一版起，`gitpic` CLI 和 GitPic.app 使用同一个版本号，并发布在同一个 GitHub Release 里。
+`Cargo.toml` 是唯一的版本来源；`apps/GitPic/VERSION` 和 `app-v*` tag 命名空间都已移除。
+以后每次发布只打一个 `vX.Y.Z` tag。
+
+### 发布方式
+
+- **两个版本号合一，而且由构建来证明，不是靠承诺。** `scripts/build-app.sh` 从
+  `Cargo.toml` 的 `[package]` 段读版本，然后断言即将嵌入的 `gitpic` 二进制自报的版本与之
+  相等。以前一个过期的 `target/release/gitpic` 会静默打进一个版本号与内容不符的 bundle；
+  现在构建会停下来，并指明该重建哪个二进制。
+- 删除 `.github/workflows/release-app.yml`，它的构建、校验、打包步骤并入 `release.yml`
+  的一个 macOS job。由**唯一**的发布者把全部产物（四个 CLI 归档 + app 的 zip）附到同一个
+  Release，所以这个 Release 要么齐全，要么不存在。
+- 发布走**正常 release**，不再是 prerelease。app 仍是本机 ad-hoc 签名、未公证，这个前提写在
+  release notes 里紧挨 app 资源说明，而不是塞进 prerelease 标记。这个标记留不住：
+  `releases/latest` 会跳过 prerelease，而 Homebrew tap 的更新流程读的正是这个端点 ——
+  合并后的 Release 一旦标成 prerelease，formula 就再也不会更新，且**静默无声**，因为它的
+  cron 不会报错。
+- 发布流程新增一条断言：tag 必须与 `Cargo.toml` 的版本一致。以前只有 app 侧校验自己的 tag，
+  CLI 侧是从 tag 反推版本，从不和任何东西比对。
+- 发布前的产物守卫不再用宽松的 `gitpic-*` glob 计数，改为断言确切的产物集合。两类产物进同一
+  个目录后，`ls gitpic-*` 在任何大小写不敏感的文件系统上都会匹配到 `GitPic-…zip` ——
+  之前之所以没出事，只是因为发布 job 恰好跑在 Linux 上。
+- 两份 changelog 现在每个版本段内分 `### CLI` 与 `### App` 两节。
+  `apps/GitPic/CHANGELOG.md` 冻结在 0.1.2，作为历史保留。
+
+### CLI
+
+- 无功能变更。版本从 0.5.1 跳到 0.6.0 是因为 CLI 与 app 开始共用一个版本号，
+  不是因为 CLI 的行为有任何变化。
+
+### App
+
+- **在 Finder 里 ⌘C 复制图片文件后上传，不再报"剪贴板里没有图片"。** 原来的读取只认位图数据
+  （`.png`、`.tiff`、`NSImage`），而 Finder 复制放上剪贴板的这三样都没有 —— 只有
+  `public.file-url`，`NSImage` 也读不出来。实测得出，不是推断。现在优先识别文件 URL 并按文件
+  上传，原始字节、扩展名、文件名都得以保留，不再一律变成重新编码的 `clipboard.png`。剪贴板上
+  没有可用内容时也会记日志 —— 这曾是唯一一种什么痕迹都不留的失败，导致"GitPic 没反应"无法
+  诊断。
+- 写剪贴板失败不再被报成"已复制"。`setString` 的返回值原先被丢弃，于是失败也宣告成功，用户
+  粘出来的是旧内容却不知为何。结果为空时也不再用空字符串清空剪贴板。
+- **Owner / Repo / Branch 和路径模板现在看得出来可以编辑。** grouped Form 里裸的 `TextField`
+  不画边框、还把文字右对齐，在 macOS 26 上与旁边的只读行逐像素一致 —— 这些字段一直是可写的，
+  只是屏幕上没有任何东西这么说。现在它们有边框、从左侧起排、带占位符，按 Return 即保存。
+- 「目标仓库」页改名为 **图床**，其 `doctor` 按钮改为 **连通性测试**，状态栏菜单里那条同步
+  改名。该按钮的三次探测全部是读操作，页面在按下之前就会这么说明。
+- **状态栏菜单不再显示它兑现不了的快捷键。** `⌘⇧V`、`⌘O`、`⌘,`、`⌘Q` 原本像全局热键一样列在
+  菜单里，但 App 没有注册任何热键，而状态栏菜单不在主菜单链上，所以它们只在菜单已经打开时
+  才生效 —— 实测：让 Finder 在前台按 `⌘⇧V`，日志里一点痕迹都没有。标识已移除，点击照常可用。
+- 文件选择框和连通性测试弹窗现在在显示期间持有 `.regular`，与主窗口一致，不再调用
+  `NSApp.activate(ignoringOtherApps:)` —— 后者自 macOS 14 起废弃，而且在协作式激活下，
+  后台 App 无法把自己拉到活动 App 前面。
+- 应用图标改为 Icon Composer 文档：把菜单栏用的 SF Symbol `photo.on.rectangle.angled` 放大，
+  作为白底上的黑色标记。Tahoe 会依据 `AppIcon.icon` 施加高光玻璃与阴影，更老的 macOS 用压平
+  后的 `.icns`。`scripts/build-app.sh` 用 `actool` 编译（icns + `Assets.car`），并同时声明
+  `CFBundleIconFile` 与 `CFBundleIconName`。旧 `sips` 流水线缩放用的那张 1024 px PNG 已删除。
+- CI 现在会在 macOS 上跑 `scripts/build-app.sh` 与那套 bundle 断言。以前只跑 `swift build`
+  和 `swift test`，bundle、图标、签名这条路径直到打 tag 才会被走一次 —— 这正是一条仍在找
+  `Resources/GitPic.icns` 的发布守卫能在改用 `actool` 之后一直存活的原因。
+
+### 本版未包含
+
+- **全局热键。** 不打开菜单就上传剪贴板图片需要 `RegisterEventHotKey`，目前还没有注册。
+
 ## [0.5.1] - 2026-08-19
 
 ### 声明 MSRV，并让 CI 替你守住它

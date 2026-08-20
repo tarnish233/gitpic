@@ -6,6 +6,100 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-20
+
+### One version, one release — the CLI and the app ship together
+
+From this release the `gitpic` CLI and GitPic.app carry the same version number
+and are published in the same GitHub Release. `Cargo.toml` is the single source of
+truth; `apps/GitPic/VERSION` and the `app-v*` tag namespace are gone. Every
+release is cut by one `vX.Y.Z` tag.
+
+### Release process
+
+- **The two versions are unified, and the build proves it rather than promising
+  it.** `scripts/build-app.sh` reads the version out of `Cargo.toml`'s `[package]`
+  section and then asserts that the `gitpic` binary it is about to embed reports
+  that same version. A stale `target/release/gitpic` used to ship silently inside
+  a bundle stamped with a version it did not contain; now the build stops and says
+  which binary to rebuild.
+- `.github/workflows/release-app.yml` is deleted and its build, verification, and
+  packaging steps move into `release.yml` as a macOS job. One publisher attaches
+  every artifact — the four CLI archives and the app zip — to a single Release, so
+  the release either has everything or does not exist.
+- The release is a normal release, not a prerelease. The app is still ad-hoc
+  signed and not notarised; that caveat is stated in the release notes next to the
+  app asset instead of being encoded in the prerelease flag. The flag could not
+  stay: `releases/latest` skips prereleases, and the Homebrew tap's updater reads
+  exactly that endpoint, so marking the unified release as a prerelease would have
+  stopped the formula from ever updating again — silently, since its cron does not
+  fail.
+- The release workflow now asserts that the tag matches `Cargo.toml`. Only the app
+  side checked its tag against its version before; the CLI derived the version from
+  the tag and never compared it to anything.
+- The pre-publish artifact guard no longer counts a loose `gitpic-*` glob. It
+  asserts the exact expected set instead, because with both artifact families in
+  one directory `ls gitpic-*` matches `GitPic-…zip` on any case-insensitive
+  filesystem — the guard passed only because the publish job happens to run on
+  Linux.
+- Both changelogs now carry `### CLI` and `### App` subsections per version.
+  `apps/GitPic/CHANGELOG.md` is frozen at 0.1.2 and kept as history.
+
+### CLI
+
+- No functional changes. The version jumps 0.5.1 → 0.6.0 because the CLI and the
+  app now share one number, not because anything in the CLI behaves differently.
+
+### App
+
+- **Copying an image *file* — the ordinary Finder ⌘C — no longer reports "剪贴板里
+  没有图片".** The clipboard reader only looked for bitmap data (`.png`, `.tiff`,
+  an `NSImage`), and a Finder copy puts none of those on the pasteboard: it puts
+  `public.file-url`, which `NSImage` does not read back either. Measured, not
+  assumed. File URLs are now checked first and uploaded as files, so the original
+  bytes, extension, and name survive instead of every paste landing as a
+  re-encoded `clipboard.png`. A clipboard with nothing usable on it now also logs
+  the pasteboard's types — it was the one failure that left no trace at all, which
+  made "GitPic 没反应" undiagnosable.
+- A failed clipboard write is no longer reported as "已复制". `setString`'s result
+  was discarded, so a failure claimed success and the user pasted stale content
+  with no explanation. An empty result list no longer clears the clipboard either.
+- **Owner / Repo / Branch and the path template read as editable, because they now
+  look editable.** A bare `TextField` in a `.grouped` form draws no bezel and
+  right-aligns its text, which on macOS 26 is pixel-identical to the read-only
+  rows beside it — the fields have always been writable, but nothing on screen
+  said so. They now carry a bezel, read from the left, and show a placeholder;
+  Return saves.
+- The target-repository pane is now called **图床**, and its `doctor` button
+  **连通性测试** — the status-bar item's entry is renamed to match. The button's
+  three probes are all reads, and the pane now says so before it is pressed.
+- **The status-bar menu no longer advertises shortcuts it cannot honour.** `⌘⇧V`,
+  `⌘O`, `⌘,` and `⌘Q` were shown as if they were global hotkeys. Nothing in the app
+  registers one, and a status-bar menu is not in the main menu chain, so they fired
+  only while the menu was already open — measured: pressing `⌘⇧V` with Finder
+  frontmost leaves no trace in the log at all. The labels are gone; the items work
+  by clicking.
+- The file picker and the connectivity-test alert now hold `.regular` for as long
+  as they are on screen, the way the main window does, instead of calling
+  `NSApp.activate(ignoringOtherApps:)` — deprecated since macOS 14, and under
+  cooperative activation a background app cannot pull itself in front of the
+  active one.
+- The application icon is an Icon Composer document: the menu-bar SF Symbol
+  `photo.on.rectangle.angled`, enlarged, as a black mark on a white Icon Composer
+  fill. Tahoe applies specular glass and shadow from `AppIcon.icon`; older macOS
+  gets the flattened `.icns`. `scripts/build-app.sh` compiles it with `actool`
+  (icns + `Assets.car`) and declares both `CFBundleIconFile` and
+  `CFBundleIconName`. The 1024 px PNG the old `sips` pipeline resized is gone.
+- CI now runs `scripts/build-app.sh` and the bundle assertions on macOS. It used
+  to run only `swift build` and `swift test`, so the bundle, icon, and signing path
+  was never exercised until a tag — which is how a release guard that still looked
+  for `Resources/GitPic.icns` survived the move to `actool`.
+
+### Not in this version
+
+- **Global hotkeys.** Uploading from the clipboard without opening the menu would
+  need `RegisterEventHotKey`; nothing registers one yet.
+
 ## [0.5.1] - 2026-08-19
 
 ### Declare an MSRV, and let CI hold it for you
