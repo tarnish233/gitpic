@@ -47,6 +47,38 @@ jobs:
           grep -qE "^## \[${ver}\]" apps/GitPic/CHANGELOG.md \
             || { echo "apps/GitPic/CHANGELOG.md has no '## [$ver]' section" >&2; exit 1; }
 
+      - name: Prepare release title and notes
+        id: release_notes
+        run: |
+          set -euo pipefail
+          ver="$(tr -d '[:space:]' < apps/GitPic/VERSION)"
+          awk -v version="$ver" '
+            BEGIN { heading = "## [" version "]" }
+            index($0, heading) == 1 { found = 1; next }
+            found && index($0, "## [") == 1 { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' apps/GitPic/CHANGELOG.md > APP_RELEASE_NOTES.md
+          test -s APP_RELEASE_NOTES.md
+          theme="$(awk '/^### / { sub(/^### /, ""); print; exit }' APP_RELEASE_NOTES.md)"
+          test -n "$theme"
+          echo "name=GitPic.app v${ver} — ${theme}" >> "$GITHUB_OUTPUT"
+
+          cat >> APP_RELEASE_NOTES.md <<'NOTES'
+
+          ## Distribution notes
+
+          This build is ad-hoc signed and not notarised. macOS will refuse to
+          open it after download until you clear the quarantine flag:
+
+          ```sh
+          xattr -dr com.apple.quarantine /Applications/GitPic.app
+          ```
+
+          Apple Silicon only. Requires GitHub CLI (`brew install gh`) and
+          `gh auth login`.
+          NOTES
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -95,39 +127,21 @@ jobs:
           test -x verify/GitPic.app/Contents/MacOS/GitPic
           # The embedded CLI is the whole reason a Finder-launched app works.
           test -x verify/GitPic.app/Contents/Resources/gitpic
+          test -s verify/GitPic.app/Contents/Resources/GitPic.icns
           verify/GitPic.app/Contents/Resources/gitpic --version
           codesign --verify --deep --strict verify/GitPic.app
           plutil -lint verify/GitPic.app/Contents/Info.plist
+          test "$(plutil -extract CFBundleIconFile raw verify/GitPic.app/Contents/Info.plist)" = "GitPic.icns"
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          name: GitPic.app v${{ steps.package.outputs.version }}
+          name: ${{ steps.release_notes.outputs.name }}
           # Not notarisable yet, so this ships as a prerelease with the caveat
           # stated up front rather than buried.
           prerelease: true
-          body: |
-            macOS menu-bar app for gitpic. Embeds gitpic ${{ steps.package.outputs.cli }}.
-
-            **This build is ad-hoc signed and not notarised.** macOS will refuse to
-            open it after download until you clear the quarantine flag:
-
-            ```
-            xattr -dr com.apple.quarantine /Applications/GitPic.app
-            ```
-
-            Building from source avoids that entirely:
-
-            ```
-            ./scripts/build-app.sh && open dist-app/GitPic.app
-            ```
-
-            Apple Silicon only. Requires GitHub CLI (`brew install gh`) and
-            `gh auth login` — the app finds `gh` itself, since a Finder-launched
-            app does not inherit your shell `PATH`.
-
-            See `apps/GitPic/CHANGELOG.md` for details.
+          body_path: APP_RELEASE_NOTES.md
           files: |
             dist-app/${{ steps.package.outputs.asset }}
             dist-app/${{ steps.package.outputs.asset }}.sha256
