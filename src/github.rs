@@ -1,7 +1,7 @@
 //! Minimal GitHub REST client for the Contents API + health checks.
 
 use crate::error::{AppError, ErrorCode, Result};
-use crate::naming::encode_path;
+use crate::naming::{encode_path, encode_segment};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -9,6 +9,9 @@ use std::time::Duration;
 
 const API: &str = "https://api.github.com";
 const UA: &str = concat!("gitpic/", env!("CARGO_PKG_VERSION"));
+/// GitHub's Contents API PUT rejects bodies over 100 MB. Checking locally
+/// avoids base64-encoding a payload that cannot land.
+const CONTENTS_PUT_MAX: usize = 100 * 1024 * 1024;
 
 /// Whole-request ceiling. Uploads of a few MB over a slow link must still fit,
 /// but a half-open connection must not hang the CLI forever.
@@ -39,6 +42,17 @@ pub struct PutOutcome {
     pub size: usize,
 }
 
+/// The two things an upload needs from a Contents GET: the git blob sha (for
+/// dedup, and for the `sha` an overwrite PUT must carry) and the size.
+///
+/// Reading *only* those two is what makes large files work. For a blob over
+/// 1 MB the Contents API still answers **200**, with `sha` and `size` populated
+/// but `content: ""` and `encoding: "none"` — verified against a 1.4 MB and a
+/// 7.2 MB file with this exact `Accept` and API version. Since `content` and
+/// `encoding` are never read and this struct is deliberately not
+/// `deny_unknown_fields`, that response parses like any other, so dedup and
+/// overwrite behave identically at every size. Adding a required `content`
+/// field, or `deny_unknown_fields`, would break every image over 1 MB.
 #[derive(Deserialize)]
 struct ContentsGet {
     sha: String,
@@ -135,8 +149,8 @@ impl GitHub {
         format!(
             "{}/repos/{}/{}",
             self.api,
-            encode_path(&self.owner),
-            encode_path(&self.repo)
+            encode_segment(&self.owner),
+            encode_segment(&self.repo)
         )
     }
 
@@ -152,6 +166,10 @@ impl GitHub {
             404 => AppError::remote_not_found(format!(
                 "GitHub repository, branch, or remote path not found ({status}): {body}"
             )),
+            409 => AppError::general(format!(
+                "GitHub ref conflict ({status}): {body}; retry the upload"
+            )),
+            422 => AppError::general(format!("GitHub rejected the request ({status}): {body}")),
             429 => AppError::rate_limited(format!("GitHub rate limit reached ({status}): {body}")),
             500..=599 => AppError::network(format!("GitHub server error ({status}): {body}")),
             _ => AppError::general(format!("GitHub error ({status}): {body}")),
@@ -221,6 +239,7 @@ impl GitHub {
         message: &str,
         dedup: bool,
     ) -> Result<PutOutcome> {
+        reject_oversize(path, bytes.len())?;
         let existing = self.get_existing(path).await?;
 
         if let Some(ref e) = existing {
@@ -289,7 +308,7 @@ impl GitHub {
         let url = format!(
             "{}/branches/{}",
             self.repo_base(),
-            encode_path(&self.branch)
+            encode_segment(&self.branch)
         );
         match self
             .send_json::<BranchInfo>(self.req(reqwest::Method::GET, url), "branch")
@@ -312,6 +331,15 @@ fn git_blob_sha(bytes: &[u8]) -> String {
 
 fn content_matches(existing_blob_sha: &str, bytes: &[u8]) -> bool {
     existing_blob_sha.eq_ignore_ascii_case(&git_blob_sha(bytes))
+}
+
+fn reject_oversize(path: &str, len: usize) -> Result<()> {
+    if len > CONTENTS_PUT_MAX {
+        return Err(AppError::usage(format!(
+            "{path} is {len} bytes; the GitHub Contents API rejects uploads over 100 MB"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -354,6 +382,14 @@ mod tests {
         assert_eq!(
             GitHub::map_status(reqwest::StatusCode::BAD_GATEWAY, "upstream").code,
             ErrorCode::Network
+        );
+        assert_eq!(
+            GitHub::map_status(reqwest::StatusCode::CONFLICT, "is at sha but expected").code,
+            ErrorCode::General
+        );
+        assert_eq!(
+            GitHub::map_status(reqwest::StatusCode::UNPROCESSABLE_ENTITY, "protected").code,
+            ErrorCode::General
         );
     }
 
@@ -502,13 +538,84 @@ mod tests {
     #[tokio::test]
     async fn a_branch_with_a_slash_still_reaches_the_ref_intact() {
         // `/` is legal in a query value and is what GitHub expects for `feat/x`,
-        // so encoding must not touch it.
-        let (addr, handle) = stub(vec![http("200 OK", r#"{"sha":"s","size":1}"#)]);
+        // so encoding must not touch it. Stub both GET and PUT so the client
+        // cannot hang waiting for a second accept after the listing.
+        let (addr, handle) = stub(vec![
+            http("404 Not Found", r#"{"message":"Not Found"}"#),
+            http("201 Created", r#"{"content":{"sha":"newsha"}}"#),
+        ]);
         let gh = GitHub::with_api(&addr, "tok", "o", "r", "feat/x").unwrap();
 
-        let _ = gh.put_file("a.png", b"x", "msg", false).await;
+        gh.put_file("a.png", b"bytes", "msg", true).await.unwrap();
 
         let reqs = handle.join().unwrap();
         assert!(reqs[0].contains("?ref=feat/x"), "GET: {}", reqs[0]);
+    }
+
+    #[tokio::test]
+    async fn branch_lookup_encodes_a_slash_as_one_path_segment() {
+        let (addr, handle) = stub(vec![http("200 OK", r#"{"protected":false}"#)]);
+        let gh = GitHub::with_api(&addr, "t", "o", "r", "feat/x").unwrap();
+        gh.branch_info().await.unwrap();
+        let reqs = handle.join().unwrap();
+        assert!(
+            reqs[0].contains("/branches/feat%2Fx"),
+            "slash must not add a path slot: {}",
+            reqs[0]
+        );
+        assert!(
+            !reqs[0].contains("/branches/feat/x"),
+            "raw slash survived: {}",
+            reqs[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_works_for_a_blob_the_contents_api_will_not_inline() {
+        // A blob over 1 MB comes back 200 with `sha` and `size` populated but
+        // `content: ""` and `encoding: "none"` (verified live against a 1.4 MB
+        // and a 7.2 MB file). `ContentsGet` reads only sha+size and is not
+        // `deny_unknown_fields`, so this parses like any other hit and dedup
+        // still fires. Adding a required `content` field, or tightening the
+        // struct, would break every image over 1 MB — this test is the tripwire.
+        let bytes = b"same";
+        let sha = git_blob_sha(bytes);
+        let big = format!(
+            r#"{{"name":"a.png","path":"dir/a.png","sha":"{sha}","size":1408345,"type":"file","content":"","encoding":"none","download_url":"https://raw.example/a.png"}}"#
+        );
+        let (addr, handle) = stub(vec![http("200 OK", &big)]);
+        let gh = GitHub::with_api(&addr, "t", "o", "r", "main").unwrap();
+
+        let out = gh.put_file("dir/a.png", bytes, "msg", true).await.unwrap();
+
+        assert!(out.deduped, "a large blob must still dedup");
+        assert_eq!(out.content_sha, sha);
+        // `size` is taken from the response, not from the local byte count.
+        assert_eq!(out.size, 1408345);
+        let reqs = handle.join().unwrap();
+        assert_eq!(reqs.len(), 1, "dedup must not issue a PUT");
+    }
+
+    #[tokio::test]
+    async fn a_real_403_on_contents_get_is_still_permission_denied() {
+        let (addr, handle) = stub(vec![http(
+            "403 Forbidden",
+            r#"{"message":"Resource not accessible by integration"}"#,
+        )]);
+        let gh = GitHub::with_api(&addr, "t", "o", "r", "main").unwrap();
+        let err = gh
+            .put_file("a.png", b"x", "msg", true)
+            .await
+            .expect_err("must fail");
+        assert_eq!(err.code, ErrorCode::PermissionDenied);
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn rejects_a_payload_the_contents_api_cannot_accept() {
+        let err = reject_oversize("a.png", CONTENTS_PUT_MAX + 1).expect_err("must fail");
+        assert_eq!(err.code, ErrorCode::Usage);
+        assert!(err.message.contains("100"), "{}", err.message);
+        reject_oversize("a.png", CONTENTS_PUT_MAX).expect("at the limit is accepted");
     }
 }

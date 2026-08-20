@@ -196,10 +196,23 @@ final class NotchPanel: NSPanel {
         }
     }
 
-    /// Show a terminal state briefly, then fall back to idle.
+    /// Show a state on the overlay.
+    ///
+    /// `.uploading` is held until a later call replaces it — auto-idling after
+    /// `seconds` made a slow upload look finished while the PUT was still in
+    /// flight. Terminal states (done/failed) still fall back to idle.
     func flash(_ phase: NotchModel.Phase, seconds: TimeInterval = 2.6) {
         model.phase = phase
-        setOpen(true)
+        switch phase {
+        case .uploading:
+            setOpen(true)
+            return
+        case .idle:
+            setOpen(false)
+            return
+        default:
+            setOpen(true)
+        }
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
             guard let self else { return }

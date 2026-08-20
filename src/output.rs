@@ -3,6 +3,7 @@
 use owo_colors::{OwoColorize, Stream};
 use serde::Serialize;
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -78,6 +79,35 @@ pub struct PartialEnvelope<'a> {
     pub error: ErrorBody,
 }
 
+/// Set once a stdout write was thrown away because the reader had gone, and never
+/// cleared: output that was lost stays lost for the rest of the run.
+///
+/// Global rather than a return value from `line`/`raw` because those are called
+/// from every subcommand and return `()`. Handing them a result would put the
+/// decision at dozens of call sites where there is nothing to decide — a one-way
+/// stream has already done its whole job when the reader leaves. One process, one
+/// stdout, so one flag is the entire truth.
+///
+/// Atomic rather than a `Cell` only because `main` is a multi-threaded tokio
+/// runtime and a write can land on whichever worker is running the task.
+/// `Relaxed` is enough: the flag publishes no other data, and the load that has
+/// to see the store — `prompt_opt`'s, right after its own write — is sequenced
+/// after it on the same thread.
+static STDOUT_LOST: AtomicBool = AtomicBool::new(false);
+
+fn note_stdout_lost() {
+    STDOUT_LOST.store(true, Ordering::Relaxed);
+}
+
+/// Whether any stdout write has been discarded because the reader closed the pipe.
+///
+/// The caller that must ask is an interactive prompt: a question the user could
+/// not read has no answer, however many lines stdin still offers. See
+/// [`crate::commands::prompt_opt`].
+pub fn stdout_lost() -> bool {
+    STDOUT_LOST.load(Ordering::Relaxed)
+}
+
 /// Write a line to stdout, treating a vanished reader as a normal end.
 ///
 /// `println!` panics when the write fails, and with `panic = "abort"` in the
@@ -86,6 +116,10 @@ pub struct PartialEnvelope<'a> {
 /// `gitpic completion zsh | true`, `gitpic *.png -q | head -1`: any reader that
 /// closes early produced that. A closed pipe is not an error — the reader got what
 /// it asked for — so the process exits 0, which is what `head` and friends expect.
+///
+/// The discarded text is remembered rather than forgotten, via [`stdout_lost`].
+/// One-way output never has to look; a caller that expects the reader to answer
+/// does, because for it a dropped write is not the end of a successful run.
 ///
 /// Other write errors (a full disk, a closed descriptor) still abort loudly rather
 /// than being silently dropped: those *are* failures, and pretending output
@@ -102,9 +136,36 @@ pub fn raw(text: &str) {
 fn write_stdout(write: impl FnOnce(&mut dyn Write) -> io::Result<()>) {
     let stdout = io::stdout();
     let mut lock = stdout.lock();
-    match write(&mut lock) {
+    record_write(write(&mut lock));
+}
+
+/// The broken-pipe rule for one finished stdout write.
+///
+/// Split out of [`write_stdout`] so the rule can be exercised without a real pipe:
+/// the test binary's stdout is the harness's, and breaking it would break the
+/// harness.
+fn record_write(result: io::Result<()>) {
+    match result {
         Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(0),
+        // The rule, both halves: a closed reader ends a one-way stream normally,
+        // and it must not be able to fake consent for an interactive one.
+        //
+        // Do not `exit(0)`. `print_error` writes stdout too (the `--json`
+        // envelopes), so exiting on its broken pipe reported success for a
+        // failure: `gitpic --json --nope | true` is a USAGE error and owes the
+        // caller exit 2. The write that vanished was the *report* of the failure,
+        // not the failure, and `main` still returns the intended status.
+        //
+        // But not exiting means the writer stops learning that its output went
+        // nowhere, and one writer must know. `printf 'someone/pics\nmain\ncdn\n' |
+        // gitpic init | true` discarded every prompt, read the piped answers
+        // anyway, and saved a config for questions the user never saw;
+        // `gitpic skill install` did the same with a numbered target list and an
+        // `a=all` default, installing files nobody was shown. So the loss is
+        // recorded instead of acted on: `list`/`completion` ignore it and still
+        // exit 0, while `prompt`/`prompt_opt` refuse to read an answer to a
+        // question that was never delivered.
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => note_stdout_lost(),
         Err(e) => panic!("failed printing to stdout: {e}"),
     }
 }
@@ -114,11 +175,49 @@ fn write_stdout(write: impl FnOnce(&mut dyn Write) -> io::Result<()>) {
 /// Needed because a locked-and-dropped `Stdout` flushes on drop and swallows the
 /// result, so a broken pipe on the very last buffered write would otherwise be
 /// reported by the runtime as a panic at exit.
+///
+/// It has to record the loss too, and for a prompt's own text it is the only place
+/// that can: `Stdout` is a `LineWriter` whatever it points at, and `raw("Branch
+/// [main]: ")` carries no newline, so the `write(2)` that earns the EPIPE happens
+/// at this flush and nowhere else. An empty arm here would let `gitpic init` be
+/// answered by a reader that left after the banner — every write so far succeeded,
+/// so nothing else in this module ever saw a broken pipe.
 pub fn finish() {
     match io::stdout().flush() {
         Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(0),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => note_stdout_lost(),
+        // Any other flush failure has nowhere left to be reported: `main` calls
+        // this after the exit code is decided, and panicking would replace a real
+        // code with 134.
         Err(_) => {}
+    }
+}
+
+/// Serialised access to [`STDOUT_LOST`] for tests, which puts it back afterwards.
+///
+/// The flag is process-global and in production is never cleared, while
+/// `cargo test` runs these tests as threads in one process: a leaked `true` would
+/// make an unrelated test believe stdout had vanished, and an interleaved `false`
+/// would make the prompt test pass for the wrong reason.
+#[cfg(test)]
+pub(crate) fn stdout_lost_test_guard(lost: bool) -> StdoutLostGuard {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A failing test poisons the lock; the next one still needs to run and set the
+    // flag itself, so the poison carries no information worth stopping for.
+    let held = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    STDOUT_LOST.store(lost, Ordering::Relaxed);
+    StdoutLostGuard { _held: held }
+}
+
+#[cfg(test)]
+pub(crate) struct StdoutLostGuard {
+    _held: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for StdoutLostGuard {
+    fn drop(&mut self) {
+        STDOUT_LOST.store(false, Ordering::Relaxed);
     }
 }
 
@@ -259,6 +358,52 @@ mod tests {
         assert!(json.contains(r#""ok":false"#));
         assert!(json.contains(r#""name":"one""#));
         assert!(json.contains(r#""code":"RATE_LIMITED""#));
+    }
+
+    /// Swallowing a dropped write and saying nothing about it is what let
+    /// `gitpic init | true` answer its own questions, so the record is the fix.
+    #[test]
+    fn a_dropped_stdout_write_is_recorded_and_a_delivered_one_is_not() {
+        let _serialised = stdout_lost_test_guard(false);
+        record_write(Ok(()));
+        assert!(!stdout_lost(), "a write that arrived must not look lost");
+        record_write(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
+        assert!(
+            stdout_lost(),
+            "a write a closed reader threw away must be recorded"
+        );
+    }
+
+    /// Every broken-pipe arm in this module has to record the loss, and one of them
+    /// cannot be reached from a test: `finish` flushes the *harness's* stdout,
+    /// which never breaks. It is also the arm a prompt depends on — `Stdout` is a
+    /// `LineWriter`, so `raw("Branch [main]: ")` earns its EPIPE at that flush and
+    /// nowhere else. Reading the source is the only way to catch the next writer
+    /// that adds an empty arm.
+    #[test]
+    fn every_broken_pipe_arm_records_the_loss() {
+        // Assembled at runtime so this test's own source lines do not match it.
+        let needle = format!("{}{}", "ErrorKind::BrokenPipe", " =>");
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/output.rs"),
+        )
+        .expect("this module is readable");
+        let arms: Vec<&str> = src
+            .lines()
+            .map(str::trim_start)
+            .filter(|l| !l.starts_with("//") && l.contains(&needle))
+            .collect();
+        assert!(
+            arms.len() >= 2,
+            "expected the write arm and the flush arm; the scan has gone blind: {arms:?}"
+        );
+        for arm in &arms {
+            assert!(
+                arm.contains("note_stdout_lost"),
+                "this arm drops output without recording it, so a prompt cannot \
+                 tell it was never seen: {arm}"
+            );
+        }
     }
 
     /// Every stdout write in the crate has to go through this module, or a

@@ -49,7 +49,7 @@ public struct UploadEnvelope: Codable, Sendable {
 
     public enum Outcome: Sendable, Equatable {
         case success([ItemResult])
-        /// Some files landed, then one failed. `src/commands/upload.rs:249-255`
+        /// Some files landed, then one failed. `src/commands/upload.rs:248-254`
         /// makes the presence of `results` the partial-vs-total discriminator.
         case partial([ItemResult], ErrorBody)
         case failure(ErrorBody)

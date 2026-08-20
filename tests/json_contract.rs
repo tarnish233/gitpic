@@ -35,16 +35,36 @@ impl Sandbox {
     }
 
     fn run(&self, args: &[&str]) -> (String, String, i32) {
-        self.spawn(args, None)
+        self.spawn(args, None, &[])
     }
 
     /// Same, with `input` written to the child's stdin — needed for `init`, which
     /// is a conversation and cannot be driven any other way.
     fn run_with_stdin(&self, args: &[&str], input: &str) -> (String, String, i32) {
-        self.spawn(args, Some(input))
+        self.spawn(args, Some(input), &[])
     }
 
-    fn spawn(&self, args: &[&str], input: Option<&str>) -> (String, String, i32) {
+    /// [`Sandbox::run`] with extra variables for this one run.
+    fn run_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> (String, String, i32) {
+        self.spawn(args, None, env)
+    }
+
+    /// [`Sandbox::run_with_stdin`] with extra variables for this one run.
+    fn run_with_stdin_env(
+        &self,
+        args: &[&str],
+        input: &str,
+        env: &[(&str, &str)],
+    ) -> (String, String, i32) {
+        self.spawn(args, Some(input), env)
+    }
+
+    fn spawn(
+        &self,
+        args: &[&str],
+        input: Option<&str>,
+        env: &[(&str, &str)],
+    ) -> (String, String, i32) {
         use std::io::Write;
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_gitpic"));
         cmd.args(args)
@@ -56,6 +76,13 @@ impl Sandbox {
             .env_remove("GITPIC_LINK")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        // Applied after the removals, never instead of them: a test that needs one
+        // variable — `GITPIC_OWNER`, for the `init` case that only makes sense with
+        // it — gets that one and still inherits the isolation for the rest, which is
+        // what keeps every other test repeatable on a machine that exports them.
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
         let out = match input {
             None => {
                 cmd.stdin(std::process::Stdio::null());
@@ -253,6 +280,188 @@ fn a_closed_reader_is_not_a_crash() {
     }
 }
 
+/// Regression: `print_error` also writes stdout under `--json`. Exiting 0 on a
+/// broken pipe there turned USAGE/CONFIG_* into success as soon as the consumer
+/// went away — `gitpic config get no.such.key --json | true` printed 0.
+#[cfg(unix)]
+#[test]
+fn a_closed_reader_does_not_zero_an_error_exit() {
+    let sb = Sandbox::new("pipe-err");
+    let script = format!(
+        "'{}' config get no.such.key --json 2>/dev/null | true >/dev/null; exit ${{PIPESTATUS[0]}}",
+        env!("CARGO_BIN_EXE_gitpic")
+    );
+    let status = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .env("XDG_CONFIG_HOME", sb.dir.join("cfg"))
+        .env("XDG_DATA_HOME", sb.dir.join("data"))
+        .status()
+        .expect("bash runs");
+    let code = status.code().unwrap_or(-1);
+    assert_eq!(code, 2, "USAGE must survive a closed stdout, got {code}");
+}
+
+/// The complement of `a_closed_reader_does_not_zero_an_error_exit`: that one locks
+/// "a closed reader must not turn an error into 0", this one locks "a closed reader
+/// must not turn an unseen question into a yes".
+///
+/// `printf 'someone/pics\nmain\ncdn\n' | gitpic init | true` threw every prompt
+/// into the closed pipe, read the piped answers anyway, and wrote
+/// `owner="someone" repo="pics" branch="main"` to config.toml — a saved
+/// configuration for three questions the user was never shown one of.
+///
+/// Unix-only for both of its neighbours' reasons: EPIPE is what the write returns
+/// (Rust ignores SIGPIPE), and reading the *producer's* status out of a pipeline
+/// needs a shell with `PIPESTATUS`.
+#[cfg(unix)]
+#[test]
+fn a_closed_reader_never_answers_its_own_prompts() {
+    let sb = Sandbox::new("pipe-prompt");
+    let cfg_file = sb.dir.join("cfg/gitpic/config.toml");
+    // The sandbox ships a config; `init` writing one is the failure being watched
+    // for, so there must be nothing there to begin with.
+    std::fs::remove_file(&cfg_file).expect("start with nothing configured");
+
+    // The same answers down a stdout nobody closed. Load-bearing, not decoration:
+    // without it, "exit 1 and no file" is what *any* failure looks like, and the
+    // test below would pass just as happily on a broken sandbox or a rejected
+    // answer. This proves the only thing the run below changes is the reader.
+    let (stdout, stderr, code) = sb.run_with_stdin(&["init"], "someone/pics\nmain\ncdn\n");
+    assert_eq!(
+        code, 0,
+        "these are answers that save a config\n{stdout}\n{stderr}"
+    );
+    assert!(cfg_file.is_file(), "and they save it here");
+    std::fs::remove_file(&cfg_file).expect("back to nothing configured");
+
+    // `true` closes the read end immediately, and the EPIPE is a real one: `Stdout`
+    // is a `LineWriter`, so the banner's `writeln!` reaches the pipe at once, and
+    // the prompt text — which carries no newline — reaches it at `output::finish()`.
+    // `PIPESTATUS[1]` is gitpic's own status; `[0]` is printf's and `[2]` is true's.
+    let script = format!(
+        "printf 'someone/pics\\nmain\\ncdn\\n' | '{}' init | true >/dev/null; \
+         exit ${{PIPESTATUS[1]}}",
+        env!("CARGO_BIN_EXE_gitpic")
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .env("XDG_CONFIG_HOME", sb.dir.join("cfg"))
+        .env("XDG_DATA_HOME", sb.dir.join("data"))
+        .env_remove("GITPIC_REPO")
+        .env_remove("GITPIC_OWNER")
+        .env_remove("GITPIC_BRANCH")
+        .env_remove("GITPIC_LINK")
+        .output()
+        .expect("bash runs");
+    let code = out.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        code, 1,
+        "an undeliverable question must fail the run, got {code}\n{stderr}"
+    );
+    // Named so the 1 cannot come from somewhere else and still look like a pass.
+    assert!(
+        stderr.contains("stdout is closed"),
+        "the refusal must be about the question nobody saw: {stderr}"
+    );
+    assert!(
+        !cfg_file.exists(),
+        "answers to questions that were never delivered must not become a config"
+    );
+}
+
+#[test]
+fn name_with_two_files_is_usage_not_a_silent_drop() {
+    // `--name` used to be accepted on a multi-file upload and then ignored.
+    let sb = Sandbox::new("name-two");
+    let a = sb.dir.join("a.png");
+    let b = sb.dir.join("b.png");
+    std::fs::write(&a, b"x").unwrap();
+    std::fs::write(&b, b"y").unwrap();
+    let a_s = a.to_str().unwrap();
+    let b_s = b.to_str().unwrap();
+    let (stdout, _, code) = sb.run(&[a_s, b_s, "--name", "shot.png", "--json"]);
+    assert_eq!(code, 2);
+    let body = parse(&stdout, "two files --name");
+    assert_eq!(
+        body.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("USAGE")
+    );
+}
+
+/// A cdn link on a branch containing `/` used to be a stderr warning followed by a
+/// success envelope holding a jsDelivr URL that 404s: `repo@feat/x/a.png` cannot be
+/// split back into ref and path. The image was already committed by then, so the
+/// only output that mattered was the one nobody could use.
+///
+/// Exit **2** is what makes this test mean anything. The target is configured, so a
+/// run that got past the guard walks on to `auth::token()` and reports
+/// `CONFIG_MISSING` — exit 3 — which the `--link raw` half below shows happening
+/// for real. 2 therefore says the refusal came from the guard, and came before the
+/// credential was so much as asked for; 3 would say the guard is gone or this
+/// config was never read.
+///
+/// `PATH` is emptied so `gh` is unreachable: it keeps the 3 a deterministic local
+/// failure, and it means a future regression here fails the test instead of
+/// attempting a live upload to someone else's repository.
+#[test]
+fn a_cdn_link_that_would_404_is_refused_before_any_credential() {
+    let sb = Sandbox::new("cdn-branch");
+    // `GITPIC_BRANCH` and `GITPIC_LINK` are stripped from every run, so the two
+    // values under test have to come from the file the run reads.
+    std::fs::write(
+        sb.dir.join("cfg/gitpic/config.toml"),
+        "[github]\nowner = \"someone\"\nrepo = \"pics\"\nbranch = \"feat/x\"\n\n\
+         [upload]\nlink_kind = \"cdn\"\n",
+    )
+    .expect("write config");
+    let shot = sb.dir.join("shot.png");
+    std::fs::write(&shot, b"x").expect("write image");
+    let shot_arg = shot.to_str().expect("utf-8 path");
+    let empty_path = sb.dir.join("empty-path");
+    std::fs::create_dir_all(&empty_path).expect("mkdir empty-path");
+    let no_gh: &[(&str, &str)] = &[("PATH", empty_path.to_str().expect("utf-8 path"))];
+
+    let (stdout, _, code) = sb.run_with_env(&[shot_arg, "--json"], no_gh);
+    assert_eq!(
+        code, 2,
+        "a dead cdn link is a usage refusal, not a credential problem: {stdout}"
+    );
+    let body = parse(&stdout, "cdn upload on a branch with a slash");
+    assert_eq!(
+        body.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "{body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("USAGE")
+    );
+    // Agents tell a total failure from a partial one by the presence of `results`,
+    // and the old behaviour is exactly what would put a dead URL in there.
+    assert!(
+        body.get("results").is_none(),
+        "nothing was uploaded, so there is no results key: {body}"
+    );
+
+    // The same run with the one value the guard looks at changed. Reaching
+    // CONFIG_MISSING proves the config above was loaded and every check before
+    // `auth::token()` passed — so the 2 above came from the guard and nowhere else.
+    let (stdout, _, code) = sb.run_with_env(&[shot_arg, "--link", "raw", "--json"], no_gh);
+    assert_eq!(
+        code, 3,
+        "raw links are unambiguous, so this one runs on to the credential: {stdout}"
+    );
+    assert_eq!(
+        parse(&stdout, "raw upload on the same branch")
+            .pointer("/error/code")
+            .and_then(|v| v.as_str()),
+        Some("CONFIG_MISSING")
+    );
+}
+
 /// `init` writes the config file, so it is the one entry point whose validation
 /// gap persisted across runs. Needs the real binary: the prompts read stdin.
 #[test]
@@ -277,6 +486,24 @@ fn init_never_leaves_a_config_it_would_refuse_to_load() {
         "a rejected answer must not touch the file on disk"
     );
 
+    // `owner/` parses as a spec (`set_repo_spec` splits on the first `/`) but
+    // leaves an empty repo. That used to print "✓ saved config" for a file the
+    // next upload then refused with CONFIG_MISSING.
+    let (stdout, stderr, code) = sb.run_with_stdin(&["init"], "owner/\nmain\ncdn\n");
+    assert_eq!(
+        code, 2,
+        "empty repo half must be a usage error\n{stdout}\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("saved config"),
+        "must not claim success: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&cfg_file).expect("config still readable"),
+        before,
+        "a rejected answer must not touch the file on disk"
+    );
+
     // And the config is still loadable, so `init` can be re-run to fix the answer.
     let (_, _, code) = sb.run(&["config", "get"]);
     assert_eq!(code, 0, "the existing config must still load");
@@ -286,6 +513,64 @@ fn init_never_leaves_a_config_it_would_refuse_to_load() {
     assert!(stdout.contains("saved config"), "{stdout}");
     let (value, _, _) = sb.run(&["config", "get", "upload.link_kind"]);
     assert_eq!(value.trim(), "raw");
+}
+
+/// The other side of the rule above: what `init` must judge is the configuration
+/// the *next* command resolves — this file plus the environment — not the file on
+/// its own.
+///
+/// `GITPIC_OWNER=me gitpic init` answering a bare `pics` is a setup `upload`
+/// accepts, because `upload` applies the environment before it checks the target.
+/// `init` judging only the file it was about to write refused it as a usage error,
+/// contradicting its own repo prompt, whose default was written for exactly that
+/// case: the only way to configure a repo under an environment owner was to stop
+/// using `init`.
+///
+/// Both halves are asserted, because either one alone permits a wrong fix. Reading
+/// the variable must not turn into *storing* it — a file carrying `owner = "me"`
+/// would outlive the variable that justified it — and it must not turn into
+/// accepting a bare name from anyone, which is the `CONFIG_MISSING` on the next
+/// upload that this whole check exists to prevent.
+#[test]
+fn init_validates_the_target_the_next_command_will_resolve() {
+    let sb = Sandbox::new("init-env");
+    let cfg_file = sb.dir.join("cfg/gitpic/config.toml");
+    // The sandbox config already carries an owner, which would complete the answer
+    // by itself and hide both halves of this.
+    std::fs::remove_file(&cfg_file).expect("start with nothing configured");
+
+    let (stdout, stderr, code) =
+        sb.run_with_stdin_env(&["init"], "pics\nmain\ncdn\n", &[("GITPIC_OWNER", "me")]);
+    assert_eq!(
+        code, 0,
+        "the environment completes this target, so it must save\n{stdout}\n{stderr}"
+    );
+    assert!(stdout.contains("saved config"), "{stdout}");
+    let saved = std::fs::read_to_string(&cfg_file).expect("the config was written");
+    assert!(
+        saved.contains("repo = \"pics\""),
+        "the answer belongs in the file: {saved}"
+    );
+    assert!(
+        saved.contains("owner = \"\""),
+        "the variable is read to judge the answer and never written — baking it in \
+         would leave `owner = \"me\"` behind after it is unset: {saved}"
+    );
+
+    std::fs::remove_file(&cfg_file).expect("back to nothing configured");
+    let (stdout, stderr, code) = sb.run_with_stdin(&["init"], "pics\nmain\ncdn\n");
+    assert_eq!(
+        code, 2,
+        "with nothing to complete it, a bare repo name is still a usage error\n{stdout}\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("saved config"),
+        "must not claim success: {stdout}"
+    );
+    assert!(
+        !cfg_file.exists(),
+        "a rejected answer must leave nothing on disk"
+    );
 }
 
 /// `doctor` was the only subcommand whose failure reason lived solely in the

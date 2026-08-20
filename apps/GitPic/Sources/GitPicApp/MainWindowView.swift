@@ -142,6 +142,39 @@ extension View {
 ///   `.multilineTextAlignment` nor `.labelsHidden` reaches it. Both measured on
 ///   macOS 26. An `HStack` opts out of that column, so the field reads from the
 ///   left like every other editable field on the platform.
+/// Shown in the host and upload panes until the config arrives.
+///
+/// Three states, not two. `loadFailed` alone left the worst case unrepresented:
+/// while tool discovery is still running `reload()` returns early without ever
+/// setting it, so this sat on "读取配置中…" indefinitely with a retry button that
+/// could not appear — and when discovery *failed* it said the same thing about a
+/// config that was never going to be read at all.
+private struct ConfigPlaceholder: View {
+    var model: AppModel
+
+    var body: some View {
+        switch model.toolState {
+        case .resolving:
+            Section { Text("正在查找 gitpic…").foregroundStyle(.secondary) }
+        case .missing:
+            Section {
+                Text("找不到 gitpic 可执行文件，请重新安装 GitPic。")
+                    .foregroundStyle(.secondary)
+            }
+        case .ready:
+            if model.loadFailed {
+                Section {
+                    Text("读取配置失败。")
+                        .foregroundStyle(.secondary)
+                    Button("重试") { Task { await model.reload() } }
+                }
+            } else {
+                Section { Text("读取配置中…").foregroundStyle(.secondary) }
+            }
+        }
+    }
+}
+
 private struct ConfigField: View {
     let label: String
     let prompt: String
@@ -183,7 +216,7 @@ struct HostPane: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Section { Text("读取配置中…").foregroundStyle(.secondary) }
+                ConfigPlaceholder(model: model)
             }
 
             Section("连通性") {
@@ -304,7 +337,7 @@ struct UploadPane: View {
                     .disabled(!draft.upload.compress.wrappedValue)
                 }
             } else {
-                Section { Text("读取配置中…").foregroundStyle(.secondary) }
+                ConfigPlaceholder(model: model)
             }
         }
         .formChrome()
@@ -379,9 +412,10 @@ struct HistoryPane: View {
         }
         let pb = NSPasteboard.general
         pb.clearContents()
-        model.statusLine = pb.setString(text, forType: .string)
-            ? "已复制 \(format.label)：\(r.name)"
-            : "写剪贴板失败：\(r.name)"
+        model.post(pb.setString(text, forType: .string)
+                   ? "已复制 \(format.label)：\(r.name)"
+                   : "写剪贴板失败：\(r.name)",
+                   from: .window)
     }
 
     private func byteText(_ n: Int) -> String {

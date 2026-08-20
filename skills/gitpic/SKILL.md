@@ -188,7 +188,11 @@ instead — `results` is never present and empty.
   **rejects** `--no-copy` with a `USAGE` error (2), so never add it to `doctor`,
   `list`, `config`, `skill` or `completion`. The same goes for the other
   upload-only options (`--link`, `--format`, `--name`, `--path`, `--compress`,
-  `--no-compress`, `--max-width`, `--quality`, `--stdin`).
+  `--no-compress`, `--max-width`, `--quality`, `--stdin`). `--name` is for
+  stdin, paste, or a single file; with two or more files it is a `USAGE` error.
+  It supplies only the filename *stem* in all three cases — the extension always
+  follows the image bytes, so `--name shot` or `--name shot.png` on JPEG bytes
+  both publish `shot.jpg`. Never rely on `--name` to set the extension.
 - `--json` produces an `ok`-bearing envelope on stdout for every subcommand,
   failures included, with three exceptions — none of which an agent should call:
   `gitpic init` **rejects** `--json` (it is interactive; use `GITPIC_REPO` or
@@ -201,3 +205,8 @@ instead — `results` is never present and empty.
 - Prefer `--link cdn` (default) unless the user asks for raw GitHub links. A
   freshly uploaded file can take a moment to appear on jsDelivr; `raw_url` in the
   same result is served by GitHub immediately.
+- A cdn link cannot express a branch containing `/` (jsDelivr encodes the ref as
+  `repo@branch/path`, so the boundary becomes ambiguous). When `github.branch` has
+  a `/` and the link kind is cdn, the upload is refused with `USAGE` (2) **before
+  anything is committed** — retry with `--link raw`, which puts the branch in its
+  own path segment and works.

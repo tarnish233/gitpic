@@ -63,22 +63,74 @@ public enum ToolDiscovery {
     static func loginShellLookup(_ tool: String) -> URL? {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         guard FileManager.default.isExecutableFile(atPath: shell) else { return nil }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: shell)
-        p.arguments = ["-l", "-c", "command -v \(tool)"]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0,
-              let line = String(data: data, encoding: .utf8)?
-                  .trimmingCharacters(in: .whitespacesAndNewlines),
-              !line.isEmpty,
-              FileManager.default.isExecutableFile(atPath: line)
-        else { return nil }
-        return URL(fileURLWithPath: line)
+        let out: ProcessOutcome
+        do {
+            out = try ChildProcess.run(
+                executable: URL(fileURLWithPath: shell),
+                args: ["-l", "-c", "command -v \(tool)"],
+                timeout: 8)
+        } catch {
+            return nil
+        }
+        // Decoded leniently: `String(data:encoding: .utf8)` returns nil for the
+        // *whole* blob when one byte in it is not UTF-8, so a latin-1 motd
+        // (measured: `caf\xe9 welcome\n/opt/homebrew/bin/gh\n`) would discard an
+        // answer sitting right there. Repaired bytes become U+FFFD and fail
+        // `commandVPath` on their own line.
+        //
+        // `out.status` and `out.timedOut` deliberately do not gate the result;
+        // `commandVPath` proves the answer instead. Profile noise never moves the
+        // status — a profile that fails, or sets `err_exit`, still leaves the
+        // status of `command -v` (measured) — but both guards throw away a
+        // complete answer when a profile leaves a job holding stdout open
+        // (ssh-agent, gpg-agent, nvm): the pipe never reaches EOF, so the
+        // 8-second bound fires and kills the shell *after* the path was written.
+        // Measured: stdout already held `/opt/homebrew/bin/gh` at the moment the
+        // reader had to be killed.
+        return commandVPath(in: String(decoding: out.stdout, as: UTF8.self), tool: tool)
+    }
+
+    /// Pick a tool's path out of a login shell's stdout.
+    ///
+    /// Pure and separate from the spawn so it can be tested against real profile
+    /// noise rather than against a faked login shell.
+    ///
+    /// The blob is never trimmed and taken as one path. `-l` means the profile
+    /// has already spoken on stdout — nvm/conda/rbenv init chatter, a motd,
+    /// `fortune`, a stray `echo` in `.zprofile` — so joining it all tested
+    /// `"Using node v20.11.0\n/opt/homebrew/bin/gh"` as a filename, failed
+    /// `isExecutableFile`, and reported gh as missing (`GitPicApp.swift:510`) on
+    /// exactly the machines this probe exists for: nix, asdf, a custom prefix,
+    /// anything `ghCandidates` does not list.
+    ///
+    /// Lines are read last-first, since `command -v` answers after the profile
+    /// has finished talking, but position is never why a line is accepted. Each
+    /// candidate proves itself, in the same spirit as `GHProbe.account` below
+    /// anchoring on a full phrase rather than a bare word:
+    ///
+    /// - Its last component must be `tool`. `command -v` appends `/<tool>` to the
+    ///   PATH entry it found, so a real answer always matches, while a noise line
+    ///   naming some *other* real executable — a motd quoting `/bin/sh`, or a
+    ///   stdout cut short when the timeout killed the shell — cannot come back as
+    ///   `gh` and then be spawned.
+    /// - It must be absolute, or it would be resolved against this process's
+    ///   working directory, which for a Finder-launched `.app` is `/`.
+    /// - It must be an executable file, which is the actual proof.
+    ///
+    /// Passing all three means a real executable of that name exists at that
+    /// path, so the answer holds however the shell exited. The non-paths
+    /// `command -v` also prints — `gh` for a function, `alias gh='…'` for an
+    /// alias — fail, which is correct: neither can be spawned as a child.
+    static func commandVPath(in stdout: String, tool: String) -> URL? {
+        for line in stdout.split(whereSeparator: \.isNewline).reversed() {
+            let candidate = line.trimmingCharacters(in: .whitespaces)
+            guard candidate.hasPrefix("/"),
+                  URL(fileURLWithPath: candidate).lastPathComponent == tool,
+                  FileManager.default.isExecutableFile(atPath: candidate)
+            else { continue }
+            return URL(fileURLWithPath: candidate)
+        }
+        return nil
     }
 
     public static func resolve(bundleResourceURL: URL?) -> ToolPaths? {
@@ -103,21 +155,22 @@ public enum GHStatus: Sendable, Equatable {
 public enum GHProbe {
     public static func status(gh: URL?) -> GHStatus {
         guard let gh else { return .notInstalled }
-        let p = Process()
-        p.executableURL = gh
-        p.arguments = ["auth", "status", "--hostname", "github.com"]
-        let out = Pipe(), err = Pipe()
-        p.standardOutput = out
-        p.standardError = err
-        p.standardInput = FileHandle.nullDevice
-        do { try p.run() } catch { return .notInstalled }
-        let o = out.fileHandleForReading.readDataToEndOfFile()
-        let e = err.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        let text = [o, e].compactMap { String(data: $0, encoding: .utf8) }
+        let out: ProcessOutcome
+        do {
+            out = try ChildProcess.run(
+                executable: gh,
+                args: ["auth", "status", "--hostname", "github.com"],
+                timeout: 8)
+        } catch {
+            return .notInstalled
+        }
+        if out.timedOut {
+            return .failed(detail: "gh auth status timed out")
+        }
+        let text = [out.stdout, out.stderr].compactMap { String(data: $0, encoding: .utf8) }
             .joined()
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if p.terminationStatus == 0 {
+        if out.status == 0 {
             return .ready(account: Self.account(in: text))
         }
         // gh says "not logged in" / "not logged into any hosts" on stderr.
@@ -125,7 +178,7 @@ public enum GHProbe {
         if lowered.contains("not logged in") || lowered.contains("no accounts") {
             return .notLoggedIn(detail: text)
         }
-        return .failed(detail: text.isEmpty ? "gh auth status exited \(p.terminationStatus)" : text)
+        return .failed(detail: text.isEmpty ? "gh auth status exited \(out.status)" : text)
     }
 
     /// Pulls the account out of gh's prose. Best-effort by design: this is a

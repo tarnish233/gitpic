@@ -30,7 +30,9 @@ pub fn run() -> Result<()> {
 
     // An empty answer with nothing configured would otherwise "succeed" while
     // leaving the tool unusable — `set_repo_spec("")` clears the repo and `init`
-    // prints a checkmark.
+    // prints a checkmark. Not subsumed by the target check below, which reads the
+    // environment too: with `GITPIC_REPO` set, that one passes on the variable
+    // while the file this writes still holds an empty repo.
     if repo_spec.trim().is_empty() {
         return Err(AppError::usage(
             "a target repo is required (owner/name, or just the name to keep the current owner)",
@@ -59,6 +61,23 @@ pub fn run() -> Result<()> {
     // only way back was `gitpic config edit`. Failing here leaves nothing on disk,
     // so re-running `init` still works.
     cfg.validate_input()?;
+    // `set_repo_spec("owner/")` parses, and `validate_input` allows empty halves
+    // because they mean "unconfigured" — so neither catches an answer that leaves
+    // the target half-set, and `init` must not print "✓ saved config" for a file
+    // the next upload will refuse. The check is asked of the file *plus* the
+    // environment, not the file alone: `GITPIC_OWNER=me` with a bare `pics` answer
+    // is a setup `upload` accepts, and refusing it contradicted the prompt default
+    // above, which exists for exactly that case.
+    //
+    // Reported as a usage error, never as the `CONFIG_MISSING` `require_target`
+    // raises: that code's remedy is "run `gitpic init`", which coming from `init`
+    // is a loop for an agent (see `ErrorCode::ConfigInvalid`). The value came from
+    // an answer the user just typed, like every other rejection here.
+    cfg.require_effective_target().map_err(|_| {
+        AppError::usage(
+            "a target repo is required (owner/name, or just the name to keep the current owner)",
+        )
+    })?;
 
     let path = cfg.save()?;
     crate::output::line(&format!("\n\u{2713} saved config to {}", path.display()));

@@ -38,18 +38,21 @@ async fn main() -> ExitCode {
             // help/version already returned above, so every remaining clap error
             // is a usage error. Going through ErrorCode keeps the wire string and
             // the exit code under the contract test in error.rs.
+            output::finish();
             return ExitCode::from(ErrorCode::Usage.exit_code());
         }
     };
     let mode = Mode::from_flags(cli.json, cli.quiet);
 
-    match dispatch(&cli, mode).await {
+    let code = match dispatch(&cli, mode).await {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
             output::print_error(mode, e.code.as_str(), &e.message);
             ExitCode::from(e.code.exit_code())
         }
-    }
+    };
+    output::finish();
+    code
 }
 
 async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {

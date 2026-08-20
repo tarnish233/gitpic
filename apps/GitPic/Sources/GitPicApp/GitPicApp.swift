@@ -28,8 +28,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var runner: GitpicRunner?
     private var tools: ToolPaths?
     private var format: LinkFormat = .markdown
+    /// Bounded to the same 8 the menu shows. Unbounded growth used to keep every
+    /// upload of the session in memory for a status-item that only lists eight.
     private var recent: [ItemResult] = []
-    private var mainWindow: NSWindow?
 
     /// `GITPIC_APP_DRY_RUN=1` records what would be uploaded and skips the network
     /// entirely. Exists so the drag and clipboard plumbing can be verified without
@@ -44,7 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setUpStatusItem()
-        resolveTools()
+        Task { await resolveTools() }
 
         // The notch drop zone is parked, not deleted: opt in with
         // `defaults write dev.gitpic.app NotchDropZone -bool true`. The panel and
@@ -67,24 +68,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Tools
 
-    private func resolveTools() {
-        let resources = Bundle.main.resourceURL
-        guard let paths = ToolDiscovery.resolve(bundleResourceURL: resources) else {
+    /// Locating `gh` and probing `gh auth status` spawn processes and can block
+    /// on a login shell. Keep that off the main thread so a hung probe cannot
+    /// freeze the menu extra at launch.
+    private func resolveTools() async {
+        let discovered = await Self.discover(bundleResourceURL: Bundle.main.resourceURL)
+        let version = Bundle.main
+            .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        guard let paths = discovered.0 else {
             statusItem.button?.image = Self.icon(symbol: "exclamationmark.triangle.fill")
-            Diagnostics.recordLaunch(appVersion: "unknown", tools: nil, ghStatus: nil)
+            // The model has to be told the search *finished*, not just that there is
+            // no runner: until then every pane reads a nil runner as "still looking"
+            // and offers no way forward.
+            AppModel.shared.toolsUnavailable()
+            Diagnostics.recordLaunch(appVersion: version, tools: nil, ghStatus: nil)
             return
         }
         tools = paths
         let r = GitpicRunner(tools: paths)
         runner = r
         AppModel.shared.attach(runner: r, tools: paths)
-        let version = Bundle.main
-            .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        // The window can be open before discovery finishes, and the reload it fired
+        // on open no-ops while `runner` is nil. Without this the form sits on its
+        // placeholder until the user happens to find the retry button.
+        Task { await AppModel.shared.reload() }
         // Probing gh here costs one spawn at launch and makes the single most
         // confusing failure (no gh under a Finder launch) legible in the log.
         Diagnostics.recordLaunch(appVersion: version, tools: paths,
-                                 ghStatus: GHProbe.status(gh: paths.gh))
+                                 ghStatus: discovered.1)
         Diagnostics.log("  dryRun=\(dryRun)")
+    }
+
+    /// The one thread discovery is allowed to block.
+    ///
+    /// `ToolDiscovery.resolve` and `GHProbe.status` both spawn and wait, and
+    /// `ChildProcess.run` drains the pipes *on the calling thread*. `Task.detached`
+    /// does not come with a thread of its own — it runs on the cooperative pool — so
+    /// doing this there parks a cooperative thread for up to 8 s per tool, the one
+    /// thing `GitpicRunner`'s gate comment says never to do. Here the pool only ever
+    /// waits on the continuation.
+    ///
+    /// Its own queue rather than `GitpicRunner`'s gate: discovery is not a `gitpic`
+    /// invocation and must not queue behind an upload.
+    private static let discoveryQueue = DispatchQueue(label: "dev.gitpic.app.discovery")
+
+    private static func discover(bundleResourceURL: URL?) async -> (ToolPaths?, GHStatus?) {
+        await withCheckedContinuation { cont in
+            discoveryQueue.async {
+                let paths = ToolDiscovery.resolve(bundleResourceURL: bundleResourceURL)
+                cont.resume(returning: (paths, paths.map { GHProbe.status(gh: $0.gh) }))
+            }
+        }
+    }
+
+    /// What to say when `runner` is nil.
+    ///
+    /// "找不到 gitpic" while discovery is still running is a lie the user can act on
+    /// wrongly — reinstalling a binary that is present and merely not located yet.
+    private func missingToolSummary() -> String {
+        AppModel.shared.toolState == .resolving
+            ? "正在查找 gitpic，请稍候重试"
+            : "找不到 gitpic"
     }
 
     // MARK: - Feedback
@@ -110,18 +154,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         statusItem.button?.image = Self.icon(symbol: symbol)
         statusItem.button?.toolTip = message
-        AppModel.shared.statusLine = message
+        AppModel.shared.post(message, from: .upload)
 
+        // Retire any reset still pending before deciding whether to arm a new one:
+        // it belongs to an older phase. Skipping this for `.uploading` is what let a
+        // 2.6 s reset armed by the *previous* outcome fire mid-upload and wipe
+        // "上传中…" — breaking the very invariant the next line states.
+        feedbackToken += 1
         // An in-progress upload holds its icon until the outcome replaces it.
         if case .uploading = phase { return }
         if case .idle = phase { return }
-        feedbackToken += 1
         let token = feedbackToken
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
             guard let self, self.feedbackToken == token else { return }
             self.statusItem.button?.image = Self.icon(symbol: "photo.on.rectangle.angled")
             self.statusItem.button?.toolTip = nil
+            AppModel.shared.clearStatus(message, from: .upload)
         }
     }
 
@@ -331,7 +380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Diagnostics.log("drop received: \(paths.count) item(s) -> "
                         + paths.map(\.lastPathComponent).joined(separator: ", "))
         guard let runner else {
-            report(.failed(summary: "找不到 gitpic"))
+            report(.failed(summary: missingToolSummary()), seconds: 5)
             return
         }
         if dryRun {
@@ -352,7 +401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func uploadClipboard() {
         guard let runner else {
-            report(.failed(summary: "找不到 gitpic"))
+            report(.failed(summary: missingToolSummary()), seconds: 5)
             return
         }
         // The GUI owns the pasteboard on both ends: `--json` suppresses the CLI's
@@ -463,8 +512,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                     ?? "上传没有返回任何结果"), seconds: 5)
             return
         }
-        recent = results.reversed() + recent
+        recent = Array((results.reversed() + recent).prefix(8))
         rebuildMenu()
+        Task { await AppModel.shared.reload() }
         let joined = results.map { format.snippet($0) }.joined(separator: "\n")
         let copied = copy(joined)
         if let failure {
@@ -489,18 +539,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // collapses "gh missing", "gh not logged in", and "gh failed" into it and
         // throws gh's stderr away, so re-probe and say something actionable.
         if let code = GitpicErrorCode(wire: err.code), code.needsToolDiagnosis {
-            let status = GHProbe.status(gh: tools?.gh)
-            switch status {
-            case .notInstalled:
-                report(.failed(summary: "找不到 gh，请 brew install gh"), seconds: 5)
-            case .notLoggedIn:
-                report(.failed(summary: "gh 未登录，请 gh auth login"), seconds: 5)
-            case .failed(let detail):
-                report(.failed(summary: "gh 异常：\(detail.prefix(60))"), seconds: 5)
-            case .ready:
-                // gh is fine, so the credential problem is elsewhere — show what
-                // the CLI actually said rather than guessing.
-                report(.failed(summary: err.message), seconds: 5)
+            let gh = tools?.gh
+            Task { @MainActor in
+                let status = await Task.detached { GHProbe.status(gh: gh) }.value
+                switch status {
+                case .notInstalled:
+                    self.report(.failed(summary: "找不到 gh，请 brew install gh"), seconds: 5)
+                case .notLoggedIn:
+                    self.report(.failed(summary: "gh 未登录，请 gh auth login"), seconds: 5)
+                case .failed(let detail):
+                    self.report(.failed(summary: "gh 异常：\(detail.prefix(60))"), seconds: 5)
+                case .ready:
+                    // gh is fine, so the credential problem is elsewhere — show what
+                    // the CLI actually said rather than guessing.
+                    self.report(.failed(summary: err.message), seconds: 5)
+                }
             }
             return
         }
@@ -536,44 +589,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func runDoctor() {
-        guard let runner else { return }
-        Task { @MainActor in
-            let text: String
-            do {
-                let r = try await runner.doctor()
-                text = Self.describe(r, tools: self.tools)
-            } catch {
-                text = "doctor 调用失败：\(String(describing: error))"
-            }
-            let a = NSAlert()
-            a.messageText = "GitPic 连通性测试"
-            a.informativeText = text
-            a.alertStyle = .informational
-            // Same reason as the open panel: an .accessory app's modal would come
-            // up behind whatever is frontmost.
-            AppActivationPolicy.enter()
-            defer { AppActivationPolicy.leave() }
-            a.runModal()
-        }
-    }
-
-    private static func describe(_ r: DoctorReport, tools: ToolPaths?) -> String {
-        func mark(_ b: Bool?) -> String {
-            guard let b else { return "—" }
-            return b ? "✓" : "✗"
-        }
-        var lines = [
-            "配置        \(mark(r.configOK))",
-            "凭据有效     \(mark(r.tokenValid))",
-            "仓库可写     \(mark(r.repoWritable))",
-            "分支保护     \(r.branchProtected == true ? "是" : "否")",
-            "凭据来源     \(r.tokenSource ?? "无")",
-            "登录账号     \(r.login ?? "—")",
-        ]
-        lines.append("gitpic      \(tools?.gitpic.path ?? "未找到")")
-        lines.append("gh          \(tools?.gh?.path ?? "未找到")")
-        if let d = r.detail { lines.append("\n\(d)") }
-        if let e = r.error { lines.append("\n\(e.code)：\(e.message)") }
-        return lines.joined(separator: "\n")
+        MainWindowController.show(tab: .host)
+        Task { await AppModel.shared.runDoctor() }
     }
 }
