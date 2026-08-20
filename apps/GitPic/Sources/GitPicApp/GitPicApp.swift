@@ -313,11 +313,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // This replaces a bare `NSApp.activate(ignoringOtherApps:)`, which is
         // deprecated as of macOS 14 and does not do what its name says any more:
         // under cooperative activation a background app cannot pull itself in front
-        // of the active one. Measured here — with the menu item driven
-        // programmatically, the panel still opens *behind* the frontmost app's
-        // windows. A real click on the status item grants the app activation
-        // rights that a synthetic one does not, so this is the correct policy but
-        // not, on its own, a guarantee the panel lands in front.
+        // of the active one. What decides it is where the click came from — a real
+        // click on the status item grants the app activation rights and the panel
+        // comes up in front (confirmed by hand); the same menu item driven
+        // programmatically gets no such rights and the panel opens *behind* the
+        // frontmost app's windows (measured). So this is the policy that makes the
+        // real path work, not a guarantee for every caller.
         AppActivationPolicy.enter()
         defer { AppActivationPolicy.leave() }
         guard p.runModal() == .OK, !p.urls.isEmpty else { return }
