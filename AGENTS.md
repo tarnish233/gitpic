@@ -51,6 +51,40 @@ renderer, which a unit test cannot reach. It runs against a temporary
 `XDG_CONFIG_HOME`/`XDG_DATA_HOME` and never touches the network. `cargo test` picks
 it up with everything else.
 
+## Working in Parallel (one agent, one worktree)
+
+Several agents work this repo at once, and `git checkout` is per-*directory* state:
+in a shared checkout, one agent switching branches changes the files under all the
+others. **Never `git checkout` / `git switch` in a directory you did not create.**
+Run `git status -sb` before any git write and confirm the branch is yours, and stage
+by explicit path — `git add -A` or `git commit -a` in a shared checkout sweeps in
+whatever another agent had in flight.
+
+Get your own directory instead:
+
+```bash
+scripts/new-worktree.sh feat/my-thing        # sibling dir, own branch, own HEAD and index
+cd ../gitpic-feat-my-thing && . .local/env.sh
+```
+
+`git worktree list` shows who holds which branch, and git refuses to check out one
+branch in two worktrees — so once every agent has its own, the collision is
+impossible rather than merely discouraged. Clean up with `git worktree remove
+--force <dir>`; `--force` is needed because `.local/` is untracked.
+
+A worktree isolates the tree, not the machine. `.local/env.sh` redirects gitpic's
+config and history (`XDG_CONFIG_HOME` / `XDG_DATA_HOME`) and points every worktree
+at one shared `CARGO_TARGET_DIR`. What stays global no matter what:
+
+- **The image-host repo** — any successful upload is a real commit in it. The
+  scratch config starts empty, so `gitpic` reports `CONFIG_MISSING` instead of
+  uploading; pass `--seed-config` only when you mean to write for real.
+- The skills directory that `gitpic skill install` writes to.
+- `/Applications/GitPic.app` and `~/Library/Logs/GitPic.log` — one per machine.
+
+`cargo test` is safe regardless: `tests/json_contract.rs` builds its own temporary
+XDG directories and never reaches the network.
+
 ## Commit & Pull Request Guidelines
 Follow Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`. PRs need a clear description, linked issues, and green CI (fmt, clippy, test on Linux/macOS/Windows). Releases are cut by pushing a `vX.Y.Z` tag, which builds the four platform binaries **and** GitPic.app and publishes them in one Release. The tag must equal `v` plus `Cargo.toml`'s version — the release workflow asserts it. The `app-v*` tags are historical, from when the app versioned separately; do not create new ones.
 
