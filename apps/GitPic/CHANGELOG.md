@@ -54,7 +54,9 @@ repository root.
   gets the flattened `.icns`. This replaces the `sips`-generated iconset that 0.1.1
   shipped.
 - `scripts/build-app.sh` compiles `AppIcon.icon` with `actool` (icns + Assets.car)
-  and declares it through `CFBundleIconFile` / `CFBundleIconName`.
+  and declares it through `CFBundleIconFile` / `CFBundleIconName`. The 1024 px PNG
+  the old `sips` pipeline resized is gone with it — the mark now lives in
+  `AppIcon.icon/Assets/`.
 
 ### Not in this version
 
