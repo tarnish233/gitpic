@@ -82,10 +82,16 @@ struct SettingsWindowView: View {
     @State private var navigation = SettingsNavigation.shared
     @State private var model = AppModel.shared
 
+    /// Whether the sidebar is showing. A real binding, not `.constant(.all)`: the
+    /// toolbar's sidebar toggle writes to this, and against a constant it would be a
+    /// button that visibly does nothing. Kept in the view, so it lasts as long as the
+    /// window does — which is now the whole session.
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
     private var activeTab: SettingsTab { navigation.selectedTab ?? .host }
 
     var body: some View {
-        NavigationSplitView(columnVisibility: .constant(.all)) {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
         } detail: {
             detail
@@ -112,23 +118,35 @@ struct SettingsWindowView: View {
             }
 
             ToolbarItemGroup(placement: .primaryAction) {
-                // The bar's spinner, in the one place still worth having it: a save
-                // writes one `gitpic` process per changed key, so "nothing is
-                // happening" and "ten processes are queued" need telling apart.
+                // Progress goes *inside* the refresh button, in place of its glyph.
                 //
-                // Always in the toolbar, only sometimes visible. Inserting the item
-                // when work started and removing it when it stopped made AppKit
-                // relayout the toolbar, so 刷新 / 放弃 / 保存 all slid sideways and back
-                // every time the window opened — the spinner announced the work by
-                // moving the controls next to it. Reserving the space costs one
-                // spinner's width and nothing moves.
-                ProgressView()
-                    .controlSize(.small)
-                    .opacity(model.busy ? 1 : 0)
-                    .accessibilityHidden(!model.busy)
-
+                // Two earlier arrangements were wrong in opposite ways. A separate
+                // spinner item inserted when work started and removed when it stopped
+                // made AppKit relayout the toolbar, so 刷新 / 放弃 / 保存 slid sideways
+                // and back on every window open. Reserving the space for it instead —
+                // a hidden `ProgressView` next to the button — stopped the sliding but
+                // left the button and the invisible spinner sharing one glass capsule:
+                // a pill twice the width it needed, with the arrow sitting off-centre
+                // in it and nothing matching 放弃 / 保存 beside it.
+                //
+                // Swapping the glyph has neither problem. The button is one control in
+                // its own capsule, the same size busy or idle, and the thing that
+                // reports the work is the thing the work belongs to. A save writes one
+                // `gitpic` process per changed key, so "nothing is happening" and "ten
+                // processes are queued" still need telling apart — this says it in the
+                // space the button already occupies.
                 Button { Task { await model.reload() } } label: {
-                    Image(systemName: "arrow.clockwise")
+                    ZStack {
+                        if model.busy {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    // One box for both states, so the button is the same width busy or
+                    // idle — otherwise the spinner is a hair wider than the glyph and
+                    // the sliding toolbar comes back in miniature.
+                    .frame(width: 16, height: 16)
                 }
                 // Not disabled while a read is in flight. `reload()` is idempotent and
                 // every invocation goes through `GitpicRunner`'s serial gate, so a
@@ -181,7 +199,6 @@ struct SettingsWindowView: View {
         .navigationTitle("设置")
         .frame(width: 200)
         .navigationSplitViewColumnWidth(min: 200, ideal: 200, max: 200)
-        .toolbar(removing: .sidebarToggle)
     }
 
     // MARK: - Detail
