@@ -15,7 +15,7 @@ enum Main {
         delegate = d
         app.delegate = d
         // Menu-bar app: no Dock icon, never becomes the active app. That second
-        // part is why NotchDropView must return true from acceptsFirstMouse.
+        // part is why StatusItemDropView must return true from acceptsFirstMouse.
         app.setActivationPolicy(.accessory)
         app.run()
     }
@@ -24,7 +24,6 @@ enum Main {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private var notch: NotchPanel?
     private var runner: GitpicRunner?
     private var tools: ToolPaths?
     private var format: LinkFormat = .markdown
@@ -40,30 +39,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// from one path is worse than having no dry-run mode at all.
     private let dryRun = ProcessInfo.processInfo.environment["GITPIC_APP_DRY_RUN"] == "1"
 
-    /// Guards the icon-reset task so a slow earlier report cannot clear a newer one.
-    private var feedbackToken = 0
-
     func applicationDidFinishLaunching(_ notification: Notification) {
         setUpStatusItem()
         Task { await resolveTools() }
-
-        // The notch drop zone is parked, not deleted: opt in with
-        // `defaults write dev.gitpic.app NotchDropZone -bool true`. The panel and
-        // the platform constraints it encodes are still in NotchPanel.swift, and
-        // docs/macos-app-plan.md §C2 records why its interactive area has to hang
-        // below the menu bar.
-        if UserDefaults.standard.bool(forKey: "NotchDropZone") {
-            let panel = NotchPanel()
-            panel.onDrop = { [weak self] urls in self?.upload(paths: urls) }
-            panel.show()
-            notch = panel
-            // The notch lives on one specific screen; re-place it when the display
-            // arrangement changes.
-            NotificationCenter.default.addObserver(
-                forName: NSApplication.didChangeScreenParametersNotification,
-                object: nil, queue: .main
-            ) { _ in MainActor.assumeIsolated { panel.place() } }
-        }
+        // Ask at launch rather than at the first upload: the prompt is a modal
+        // interruption, and the moment a result is ready is the worst time to
+        // discover the app cannot show it.
+        Task { await Notifier.authorize() }
     }
 
     // MARK: - Tools
@@ -133,45 +115,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Feedback
 
-    /// Report an outcome without assuming any particular surface exists.
+    /// Report an outcome.
     ///
-    /// The notch panel used to be the only place results were shown; with it
-    /// parked, the status-item button carries them instead — its icon changes for
-    /// a few seconds and its tooltip holds the full message, which is longer than
-    /// an icon can say. The notch still gets the update when it is enabled.
-    private func report(_ phase: NotchModel.Phase, seconds: TimeInterval = 2.6) {
-        notch?.flash(phase, seconds: seconds)
-
-        let symbol: String
-        var message: String? = nil
-        switch phase {
-        case .idle:                 symbol = "photo.on.rectangle.angled"
-        case .hovering:             symbol = "arrow.down.circle"
-        case .uploading(let n):     symbol = "arrow.up.circle"
-                                    message = n == 1 ? "上传中…" : "上传 \(n) 张…"
-        case .done(let s):          symbol = "checkmark.circle.fill";        message = s
-        case .failed(let s):        symbol = "exclamationmark.triangle.fill"; message = s
+    /// Two surfaces, split by what each is good at. The status-item icon shows that
+    /// an upload is *in flight* — a state, held for exactly as long as the upload
+    /// runs. A system notification says what *happened* — an event the user may not
+    /// have been watching for.
+    ///
+    /// There is no timer here, and that is the point. The icon used to be reset by a
+    /// 2.6 s task, which needed a token to stop a stale reset from wiping a newer
+    /// message; now the outcome itself resets the icon, so both the timer and the
+    /// token are gone rather than merely tidied.
+    private func report(_ report: UploadReport) {
+        switch report {
+        case .started(let n):
+            statusItem.button?.image = Self.icon(symbol: "arrow.up.circle")
+            AppModel.shared.post(n == 1 ? "上传中…" : "上传 \(n) 张…", from: .upload)
+        case .succeeded(let summary), .failed(let summary):
+            statusItem.button?.image = Self.icon(symbol: "photo.on.rectangle.angled")
+            // Kept even though notifications are the result surface: this drives the
+            // main window's status line, and with notifications denied it is the only
+            // place an outcome is visible at all.
+            AppModel.shared.post(summary, from: .upload)
         }
-        statusItem.button?.image = Self.icon(symbol: symbol)
-        statusItem.button?.toolTip = message
-        AppModel.shared.post(message, from: .upload)
-
-        // Retire any reset still pending before deciding whether to arm a new one:
-        // it belongs to an older phase. Skipping this for `.uploading` is what let a
-        // 2.6 s reset armed by the *previous* outcome fire mid-upload and wipe
-        // "上传中…" — breaking the very invariant the next line states.
-        feedbackToken += 1
-        // An in-progress upload holds its icon until the outcome replaces it.
-        if case .uploading = phase { return }
-        if case .idle = phase { return }
-        let token = feedbackToken
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(seconds))
-            guard let self, self.feedbackToken == token else { return }
-            self.statusItem.button?.image = Self.icon(symbol: "photo.on.rectangle.angled")
-            self.statusItem.button?.toolTip = nil
-            AppModel.shared.clearStatus(message, from: .upload)
-        }
+        if let notice = report.notice { Notifier.post(notice) }
     }
 
     // MARK: - Status item
@@ -185,7 +152,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = Self.icon(symbol: "photo.on.rectangle.angled")
+        attachDropTarget()
         rebuildMenu()
+    }
+
+    /// Make the icon itself a drop target.
+    ///
+    /// Attached here rather than in `rebuildMenu()` on purpose: the menu is rebuilt
+    /// on every format change and after every successful upload, and it only ever
+    /// replaces `statusItem.menu` — the button, and so this subview, survive
+    /// untouched. Adding the view alongside the menu would re-add it each time.
+    ///
+    /// `docs/macos-app-plan.md` §C2 measured that no window at any level receives
+    /// events in the menu-bar strip, which is what parked the notch drop zone. This
+    /// route is not subject to that: the button belongs to the system's own status
+    /// bar window, so its subviews get the drag the strip would otherwise swallow.
+    private func attachDropTarget() {
+        guard let button = statusItem.button else { return }
+        let drop = StatusItemDropView(frame: button.bounds)
+        drop.autoresizingMask = [.width, .height]
+        drop.onDrop = { [weak self] url in self?.upload(paths: [url]) }
+        button.addSubview(drop)
     }
 
     /// Builds one status-bar menu item.
@@ -343,9 +330,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let id = sender.representedObject as? String,
               let r = recent.first(where: { $0.id == id }) else { return }
         if copy(format.snippet(r)) {
-            report(.done(summary: "已复制 \(format.label)"))
+            report(.succeeded(summary: "已复制 \(format.label)"))
         } else {
-            report(.failed(summary: "写剪贴板失败"), seconds: 4)
+            report(.failed(summary: "写剪贴板失败"))
         }
     }
 
@@ -380,15 +367,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Diagnostics.log("drop received: \(paths.count) item(s) -> "
                         + paths.map(\.lastPathComponent).joined(separator: ", "))
         guard let runner else {
-            report(.failed(summary: missingToolSummary()), seconds: 5)
+            report(.failed(summary: missingToolSummary()))
             return
         }
         if dryRun {
             Diagnostics.log("  DRY RUN: skipping upload")
-            report(.done(summary: "DRY RUN 收到 \(paths.count) 个文件"))
+            report(.succeeded(summary: "DRY RUN 收到 \(paths.count) 个文件"))
             return
         }
-        report(.uploading(count: paths.count))
+        report(.started(count: paths.count))
         Task { @MainActor in
             do {
                 let env = try await runner.upload(paths: paths)
@@ -401,7 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func uploadClipboard() {
         guard let runner else {
-            report(.failed(summary: missingToolSummary()), seconds: 5)
+            report(.failed(summary: missingToolSummary()))
             return
         }
         // The GUI owns the pasteboard on both ends: `--json` suppresses the CLI's
@@ -414,7 +401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // nothing at all and "GitPic 没反应" is undiagnosable.
             let types = NSPasteboard.general.types?.map(\.rawValue).joined(separator: ", ") ?? "none"
             Diagnostics.log("clipboard upload requested: no image on pasteboard; types=[\(types)]")
-            report(.failed(summary: "剪贴板里没有图片：复制图片本身或图片文件后再试"), seconds: 5)
+            report(.failed(summary: "剪贴板里没有图片：复制图片本身或图片文件后再试"))
             return
         }
         switch offer {
@@ -426,10 +413,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Diagnostics.log("clipboard upload requested: \(data.count) bytes")
             if dryRun {
                 Diagnostics.log("  DRY RUN: skipping upload")
-                report(.done(summary: "DRY RUN 收到剪贴板图片 \(data.count) 字节"))
+                report(.succeeded(summary: "DRY RUN 收到剪贴板图片 \(data.count) 字节"))
                 return
             }
-            report(.uploading(count: 1))
+            report(.started(count: 1))
             Task { @MainActor in
                 do {
                     let env = try await runner.upload(pngData: data)
@@ -504,34 +491,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func finish(_ results: [ItemResult], failure: ErrorBody?) {
-        guard !results.isEmpty else {
-            // `ok:true` with an empty result list. Nothing uploaded, so there is
-            // nothing to copy — and copying "" would replace whatever the user had
-            // on the clipboard with nothing, which is worse than doing nothing.
-            report(.failed(summary: failure.map { "\($0.code)：\($0.message)" }
-                                    ?? "上传没有返回任何结果"), seconds: 5)
-            return
+        // Copy before reporting, because whether the clipboard write landed is one of
+        // the things the wording depends on. An empty result list skips the copy: an
+        // `ok:true` envelope with no results uploaded nothing, and copying "" would
+        // replace whatever the user had on the clipboard with nothing.
+        var copied = false
+        if !results.isEmpty {
+            copied = copy(results.map { format.snippet($0) }.joined(separator: "\n"))
+            recent = Array((results.reversed() + recent).prefix(8))
+            rebuildMenu()
+            Task { await AppModel.shared.reload() }
         }
-        recent = Array((results.reversed() + recent).prefix(8))
-        rebuildMenu()
-        Task { await AppModel.shared.reload() }
-        let joined = results.map { format.snippet($0) }.joined(separator: "\n")
-        let copied = copy(joined)
-        if let failure {
-            report(.failed(
-                summary: "\(results.count) 张成功，之后失败：\(failure.code)"), seconds: 4)
-        } else if !copied {
-            // The upload is done and the link is real; only the clipboard write
-            // failed. Say exactly that instead of reporting a success the user
-            // cannot paste.
-            report(.failed(summary: "上传成功，但写剪贴板失败。链接在「最近上传」里"), seconds: 6)
-        } else {
-            let dd = results.filter(\.deduped).count
-            let extra = dd > 0 ? "（\(dd) 张已存在）" : ""
-            report(.done(
-                summary: results.count == 1 ? "已复制 \(format.label)\(extra)"
-                                            : "\(results.count) 张已复制\(extra)"))
-        }
+        report(UploadPresentation.report(results: results, failure: failure,
+                                         clipboardWritten: copied, format: format))
     }
 
     private func reportFailure(_ err: ErrorBody) {
@@ -544,28 +516,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let status = await Task.detached { GHProbe.status(gh: gh) }.value
                 switch status {
                 case .notInstalled:
-                    self.report(.failed(summary: "找不到 gh，请 brew install gh"), seconds: 5)
+                    self.report(.failed(summary: "找不到 gh，请 brew install gh"))
                 case .notLoggedIn:
-                    self.report(.failed(summary: "gh 未登录，请 gh auth login"), seconds: 5)
+                    self.report(.failed(summary: "gh 未登录，请 gh auth login"))
                 case .failed(let detail):
-                    self.report(.failed(summary: "gh 异常：\(detail.prefix(60))"), seconds: 5)
+                    self.report(.failed(summary: "gh 异常：\(detail.prefix(60))"))
                 case .ready:
                     // gh is fine, so the credential problem is elsewhere — show what
                     // the CLI actually said rather than guessing.
-                    self.report(.failed(summary: err.message), seconds: 5)
+                    self.report(.failed(summary: err.message))
                 }
             }
             return
         }
-        report(.failed(summary: "\(err.code)：\(err.message)"), seconds: 5)
+        report(.failed(summary: "\(err.code)：\(err.message)"))
     }
 
     private func present(_ error: Error) {
         if case RunFailure.undecodable(let status, let raw) = error {
             report(.failed(
-                summary: "gitpic 退出 \(status)，输出无法解析：\(raw.prefix(60))"), seconds: 5)
+                summary: "gitpic 退出 \(status)，输出无法解析：\(raw.prefix(60))"))
         } else {
-            report(.failed(summary: String(describing: error)), seconds: 5)
+            report(.failed(summary: String(describing: error)))
         }
     }
 
