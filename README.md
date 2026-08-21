@@ -103,7 +103,7 @@ path_template = "images/{year}/{month}/{hash8}-{name}.{ext}"
 format        = "md"    # md | html | url —— `--format` 的默认值
 link_kind     = "cdn"   # cdn (jsDelivr) | raw —— `--link` 的默认值
 dedup         = true
-auto_copy     = true
+auto_copy     = true    # 上传后把链接写进剪贴板；App 也遵守（--json / --quiet 从不写）
 compress      = false
 max_width     = 0        # 0 = 不缩放
 quality       = 82       # 压缩时的 JPEG 质量（1-100）

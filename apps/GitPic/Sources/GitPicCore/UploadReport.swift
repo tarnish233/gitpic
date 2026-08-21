@@ -47,20 +47,36 @@ public struct UploadNotice: Equatable, Sendable {
     }
 }
 
+/// What became of the clipboard write for one finished upload.
+///
+/// Three cases rather than a `Bool`, because "not copied" was two different events
+/// wearing one name: a write that was refused (the user is about to paste something
+/// stale) and a write that was never asked for (`upload.auto_copy` is off, and the
+/// setting is doing its job). Reporting the second as the first is how a working
+/// switch gets mistaken for a bug.
+public enum ClipboardOutcome: Equatable, Sendable {
+    /// The snippet is on the clipboard.
+    case written
+    /// The write was attempted and failed.
+    case failed
+    /// No write was attempted: `upload.auto_copy` is off.
+    case suppressed
+}
+
 public enum UploadPresentation {
-    /// What to report once an upload has finished and the clipboard write has been
-    /// attempted.
+    /// What to report once an upload has finished and the clipboard has been dealt
+    /// with — written, refused, or deliberately left alone.
     ///
     /// This was inline in the app layer, where no test could reach it — and it has
-    /// four genuinely different outcomes, one of which (`clipboardWritten == false`)
-    /// exists specifically to avoid claiming a success the user cannot paste.
+    /// five genuinely different outcomes, one of which (`.failed`) exists
+    /// specifically to avoid claiming a success the user cannot paste.
     ///
     /// `results.isEmpty` with `ok: true` is not treated as success: nothing was
     /// uploaded, so there is nothing to copy, and copying an empty string would
     /// replace whatever the user had on the clipboard with nothing.
     public static func report(results: [ItemResult],
                               failure: ErrorBody?,
-                              clipboardWritten: Bool,
+                              clipboard: ClipboardOutcome,
                               form: LinkForm) -> UploadReport {
         guard !results.isEmpty else {
             return .failed(summary: failure.map { "\($0.code)：\($0.message)" }
@@ -71,16 +87,24 @@ public enum UploadPresentation {
         if let failure {
             return .failed(summary: "\(results.count) 张成功，之后失败：\(failure.code)")
         }
-        if !clipboardWritten {
-            return .failed(summary: "上传成功，但写剪贴板失败。链接在「最近上传」里")
-        }
         let deduped = results.filter(\.deduped).count
         let extra = deduped > 0 ? "（\(deduped) 张已存在）" : ""
-        // `form.label` names both dimensions, so "已复制 Markdown · CDN" says which
-        // address the snippet points at as well as how it is wrapped. The old
-        // single-axis label could not.
-        return .succeeded(summary: results.count == 1
-                          ? "已复制 \(form.label)\(extra)"
-                          : "\(results.count) 张已复制\(extra)")
+        switch clipboard {
+        case .failed:
+            return .failed(summary: "上传成功，但写剪贴板失败。链接在「最近上传」里")
+        case .suppressed:
+            // Success, not failure: `upload.auto_copy` is off and the app honoured it,
+            // the same way the CLI does. Still says where the link is, because the one
+            // thing the user cannot do with it is paste it.
+            return .succeeded(summary: "\(results.count) 张已上传\(extra)，未自动复制。"
+                              + "链接在「最近上传」里")
+        case .written:
+            // `form.label` names both dimensions, so "已复制 Markdown · CDN" says which
+            // address the snippet points at as well as how it is wrapped. The old
+            // single-axis label could not.
+            return .succeeded(summary: results.count == 1
+                              ? "已复制 \(form.label)\(extra)"
+                              : "\(results.count) 张已复制\(extra)")
+        }
     }
 }

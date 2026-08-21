@@ -553,16 +553,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func finish(_ results: [ItemResult], failure: ErrorBody?) {
-        // Copy before reporting, because whether the clipboard write landed is one of
-        // the things the wording depends on. An empty result list skips the copy: an
+        // Copy before reporting, because what became of the clipboard is one of the
+        // things the wording depends on. An empty result list skips the copy: an
         // `ok:true` envelope with no results uploaded nothing, and copying "" would
         // replace whatever the user had on the clipboard with nothing.
-        var copied = false
+        var clipboard = ClipboardOutcome.suppressed
         var form = AppModel.shared.linkForm
+        let config = AppModel.shared.savedConfig
         if !results.isEmpty {
             // Resolve both addresses now, against the config that was in force when
             // the files landed — see `UploadedLink`.
-            let links = results.map { UploadedLink($0, config: AppModel.shared.savedConfig) }
+            let links = results.map { UploadedLink($0, config: config) }
             // Only the CDN address can be missing — with no config to build it from,
             // or on a branch jsDelivr cannot address. Falling back to raw keeps a
             // live link on the clipboard rather than none, and `form` is corrected so
@@ -570,13 +571,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if links.contains(where: { $0.url(form.target) == nil }) {
                 form.target = .raw
             }
-            copied = copy(links.compactMap { $0.snippet(form) }.joined(separator: "\n"))
+            // `upload.auto_copy` — the same key the CLI reads, so the switch in 设置
+            // now means one thing on both surfaces instead of being labelled 仅 CLI.
+            //
+            // The copy still happens *here* rather than in the CLI, and that is not a
+            // workaround: the app invokes `--json`, and JSON mode never touches the
+            // clipboard by design (a `gitpic upload --json` inside someone's script
+            // must not overwrite what they had on it — `upload.rs` gates the write on
+            // `Mode::Human`, which also excludes `--quiet`). Honouring the key on this
+            // side is what makes the two agree without giving machine mode a side
+            // effect it should not have.
+            //
+            // Default `true` when the config could not be read, matching the CLI's
+            // own default for a file that is missing.
+            if config?.upload.autoCopy ?? true {
+                let text = links.compactMap { $0.snippet(form) }.joined(separator: "\n")
+                clipboard = copy(text) ? .written : .failed
+            }
             recent = Array((links.reversed() + recent).prefix(8))
             rebuildMenu()
             Task { await AppModel.shared.reload() }
         }
         report(UploadPresentation.report(results: results, failure: failure,
-                                        clipboardWritten: copied, form: form))
+                                        clipboard: clipboard, form: form))
     }
 
     private func reportFailure(_ err: ErrorBody) {

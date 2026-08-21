@@ -115,7 +115,8 @@ path_template = "images/{year}/{month}/{hash8}-{name}.{ext}"
 format        = "md"    # md | html | url — the default for `--format`
 link_kind     = "cdn"   # cdn (jsDelivr) | raw — the default for `--link`
 dedup         = true
-auto_copy     = true
+auto_copy     = true    # copy the link after an upload; the app honours it too
+                        # (never written in --json / --quiet)
 compress      = false
 max_width     = 0        # 0 = keep original
 quality       = 82       # JPEG quality when compressing (1-100)
