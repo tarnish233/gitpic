@@ -95,6 +95,18 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>dev.gitpic.app</string>
   <key>CFBundleName</key><string>GitPic</string>
   <key>CFBundleDisplayName</key><string>GitPic</string>
+  <!-- The UI is Simplified Chinese throughout, and AppKit has to be told so.
+       AppKit localizes its *own* strings — the Edit menu's Undo/Redo titles, the
+       open panel's buttons and sidebar — against the localizations the bundle
+       declares, and a bundle that declares none is treated as English. That is why
+       a Chinese app came up with `Cancel` / `Open` and an English `Undo` sitting
+       next to 剪切/拷贝/粘贴.
+       zh-Hans alone, not zh-Hans + en: there is no English UI here to fall back
+       to, so someone running an English system is better served by one consistent
+       language than by Chinese panes with English buttons. -->
+  <key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>
+  <key>CFBundleLocalizations</key>
+  <array><string>zh-Hans</string></array>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleIconName</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
