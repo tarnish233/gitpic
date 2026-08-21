@@ -48,6 +48,16 @@ final class AppModel {
     var draft: GitpicConfig?
     var history: [HistoryRecord] = []
 
+    /// Which snippet form the next copy produces — syntax and address, chosen
+    /// independently.
+    ///
+    /// Shared rather than one per surface: the status-item menu and the history pane
+    /// each used to hold their own copy, so picking HTML in the menu left the window
+    /// still copying Markdown with nothing on screen explaining the disagreement.
+    /// Not persisted, which is the behaviour it replaces — it resets to
+    /// Markdown · CDN each launch.
+    var linkForm = LinkForm()
+
     var busy = false
     /// Distinguishes "still loading" from "the last read failed", so the form
     /// does not sit on "读取配置中…" forever after a failure.

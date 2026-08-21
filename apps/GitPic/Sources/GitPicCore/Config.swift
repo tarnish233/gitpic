@@ -160,15 +160,13 @@ public struct HistoryRecord: Codable, Sendable, Hashable, Identifiable {
     }
 
     /// The raw.githubusercontent form, rebuilt from the configured target.
-    /// Percent-encoding matches `naming::encode_path`, which preserves `/`.
-    public func rawURL(config: GitpicConfig) -> String {
-        "https://raw.githubusercontent.com/\(GitHubEncoding.encodePath(config.github.owner))/"
-            + "\(GitHubEncoding.encodePath(config.github.repo))/"
-            + "\(GitHubEncoding.encodePath(config.github.branch))/"
-            + "\(GitHubEncoding.encodePath(path))"
+    ///
+    /// One formula, in ``LinkURL`` — the app needs the same two URLs for a freshly
+    /// uploaded item, and a second copy of the template here is how the two drift.
+    public func rawURL(config c: GitpicConfig) -> String {
+        LinkURL.raw(owner: c.github.owner, repo: c.github.repo,
+                    branch: c.github.branch, path: path)
     }
-
-    public func markdown(config: GitpicConfig) -> String { "![\(name)](\(url))" }
 }
 
 public struct HistoryEnvelope: Codable, Sendable {

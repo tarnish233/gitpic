@@ -50,19 +50,25 @@ enum Fixture {
 
     /// Field names mirror `src/output.rs:31-43`; `raw_url` is the only key that is
     /// not already Swift-shaped.
+    ///
+    /// The snippets are **internally consistent** with `url`: `markdown` and `html`
+    /// are what `src/link.rs` builds from `url`, and `url` is the CDN form because
+    /// that is what the default `link_kind = "cdn"` selects. That consistency is what
+    /// lets `LinkTests` assert the Swift port of `link.rs` reproduces the CLI's own
+    /// output byte for byte.
     static func item(name: String, deduped: Bool = false) -> String {
         """
         {
           "name": "\(name)",
           "url": "https://cdn.jsdelivr.net/gh/o/r@main/images/2026/08/abc-\(name).png",
           "raw_url": "https://raw.githubusercontent.com/o/r/main/images/2026/08/abc-\(name).png",
-          "markdown": "![\(name)](https://cdn.example/\(name).png)",
-          "html": "<img src=\\"https://cdn.example/\(name).png\\" alt=\\"\(name)\\">",
+          "markdown": "![\(name)](https://cdn.jsdelivr.net/gh/o/r@main/images/2026/08/abc-\(name).png)",
+          "html": "<img src=\\"https://cdn.jsdelivr.net/gh/o/r@main/images/2026/08/abc-\(name).png\\" alt=\\"\(name)\\">",
           "path": "images/2026/08/abc-\(name).png",
           "sha": "deadbeef\(name.count)",
           "size": 1234,
           "deduped": \(deduped),
-          "output": "![\(name)](https://cdn.example/\(name).png)"
+          "output": "![\(name)](https://cdn.jsdelivr.net/gh/o/r@main/images/2026/08/abc-\(name).png)"
         }
         """
     }
@@ -103,7 +109,7 @@ struct UploadEnvelopeTests {
         #expect(env.results == nil)
     }
 
-    @Test("success decodes every link form, so format switching needs no re-upload")
+    @Test("success carries both addresses, so switching form needs no re-upload")
     func success() throws {
         let env: UploadEnvelope = try decode(Fixture.success(["shot"]))
         guard case .success(let items) = env.outcome, let r = items.first else {
@@ -111,12 +117,24 @@ struct UploadEnvelopeTests {
         }
         #expect(r.name == "shot")
         #expect(r.rawURL.hasPrefix("https://raw.githubusercontent.com/"))
-        #expect(LinkFormat.markdown.snippet(r) == r.markdown)
-        #expect(LinkFormat.html.snippet(r) == r.html)
-        #expect(LinkFormat.cdn.snippet(r) == r.url)
-        #expect(LinkFormat.raw.snippet(r) == r.rawURL)
-        // All four are non-empty, which is what makes zero-retransmit switching real.
-        for f in LinkFormat.allCases { #expect(!f.snippet(r).isEmpty) }
+
+        // The raw address comes out of the envelope; the CDN one is rebuilt, because
+        // a raw-configured host emits no jsDelivr URL at all.
+        let link = UploadedLink(r, config: LinkTests.config)
+        #expect(link.url(.raw) == r.rawURL)
+        #expect(link.url(.cdn) == r.url)
+
+        // Every one of the six combinations is reachable and non-empty, which is
+        // what makes zero-retransmit switching real.
+        for syntax in LinkSyntax.allCases {
+            for target in LinkTarget.allCases {
+                let s = link.snippet(LinkForm(syntax: syntax, target: target))
+                #expect(s?.isEmpty == false, "\(syntax.label) · \(target.label) was empty")
+            }
+        }
+        // And the two the CLI also built are byte-identical to the CLI's own.
+        #expect(link.snippet(LinkForm(syntax: .markdown, target: .cdn)) == r.markdown)
+        #expect(link.snippet(LinkForm(syntax: .html, target: .cdn)) == r.html)
     }
 
     @Test("partial success stays partial and is not flattened either way")

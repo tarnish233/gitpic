@@ -1,35 +1,6 @@
 import Darwin
 import Foundation
 
-/// Which snippet the UI hands to the pasteboard.
-///
-/// This is a *display* choice made entirely in the GUI: a single `--json` upload
-/// returns `markdown`, `html`, `url`, and `raw_url` together
-/// (`src/output.rs:31-43`), so switching format never costs a re-upload and the
-/// CLI's own `--format` flag is not passed at all.
-public enum LinkFormat: String, Sendable, CaseIterable, Identifiable {
-    case markdown, html, cdn, raw
-    public var id: String { rawValue }
-
-    public var label: String {
-        switch self {
-        case .markdown: return "Markdown"
-        case .html:     return "HTML"
-        case .cdn:      return "CDN URL"
-        case .raw:      return "Raw URL"
-        }
-    }
-
-    public func snippet(_ r: ItemResult) -> String {
-        switch self {
-        case .markdown: return r.markdown
-        case .html:     return r.html
-        case .cdn:      return r.url
-        case .raw:      return r.rawURL
-        }
-    }
-}
-
 public struct ProcessOutcome: Sendable {
     public let stdout: Data
     public let stderr: Data

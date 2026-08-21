@@ -44,22 +44,33 @@ struct ImageDropTests {
 @Suite("Upload report")
 struct UploadReportTests {
 
-    @Test("one file names the format that was copied")
+    @Test("one file names both dimensions of the form that was copied")
     func singleSuccess() {
         let r = UploadPresentation.report(results: [result(name: "a.png")],
                                          failure: nil,
                                          clipboardWritten: true,
-                                         format: .markdown)
-        #expect(r == .succeeded(summary: "已复制 Markdown"))
+                                         form: LinkForm())
+        #expect(r == .succeeded(summary: "已复制 Markdown · CDN"))
     }
 
-    @Test("the format label follows the selected format, not the markdown default")
-    func formatLabel() {
-        let r = UploadPresentation.report(results: [result(name: "a.png")],
-                                         failure: nil,
-                                         clipboardWritten: true,
-                                         format: .cdn)
-        #expect(r == .succeeded(summary: "已复制 CDN URL"))
+    @Test("the label follows both axes independently, not one flat format")
+    func formLabel() {
+        // The pair that had no representation at all before syntax and address were
+        // split: Markdown wrapping the raw URL.
+        let markdownRaw = UploadPresentation.report(
+            results: [result(name: "a.png")], failure: nil, clipboardWritten: true,
+            form: LinkForm(syntax: .markdown, target: .raw))
+        #expect(markdownRaw == .succeeded(summary: "已复制 Markdown · Raw"))
+
+        let htmlRaw = UploadPresentation.report(
+            results: [result(name: "a.png")], failure: nil, clipboardWritten: true,
+            form: LinkForm(syntax: .html, target: .raw))
+        #expect(htmlRaw == .succeeded(summary: "已复制 HTML · Raw"))
+
+        let plainCDN = UploadPresentation.report(
+            results: [result(name: "a.png")], failure: nil, clipboardWritten: true,
+            form: LinkForm(syntax: .url, target: .cdn))
+        #expect(plainCDN == .succeeded(summary: "已复制 纯链接 · CDN"))
     }
 
     @Test("a deduped upload says so, so a no-op does not read as a fresh commit")
@@ -67,17 +78,17 @@ struct UploadReportTests {
         let r = UploadPresentation.report(results: [result(name: "a.png", deduped: true)],
                                          failure: nil,
                                          clipboardWritten: true,
-                                         format: .markdown)
-        #expect(r == .succeeded(summary: "已复制 Markdown（1 张已存在）"))
+                                         form: LinkForm())
+        #expect(r == .succeeded(summary: "已复制 Markdown · CDN（1 张已存在）"))
     }
 
-    @Test("several files report the count instead of a format")
+    @Test("several files report the count instead of a form")
     func multiple() {
         let r = UploadPresentation.report(results: [result(name: "a.png"),
                                                    result(name: "b.png")],
                                          failure: nil,
                                          clipboardWritten: true,
-                                         format: .markdown)
+                                         form: LinkForm())
         #expect(r == .succeeded(summary: "2 张已复制"))
     }
 
@@ -87,7 +98,7 @@ struct UploadReportTests {
                                          failure: ErrorBody(code: "NETWORK",
                                                             message: "b.png: reset"),
                                          clipboardWritten: true,
-                                         format: .markdown)
+                                         form: LinkForm())
         #expect(r == .failed(summary: "1 张成功，之后失败：NETWORK"))
     }
 
@@ -98,7 +109,7 @@ struct UploadReportTests {
         let r = UploadPresentation.report(results: [result(name: "a.png")],
                                          failure: nil,
                                          clipboardWritten: false,
-                                         format: .markdown)
+                                         form: LinkForm())
         #expect(r == .failed(summary: "上传成功，但写剪贴板失败。链接在「最近上传」里"))
     }
 
@@ -107,7 +118,7 @@ struct UploadReportTests {
         let r = UploadPresentation.report(results: [],
                                          failure: nil,
                                          clipboardWritten: true,
-                                         format: .markdown)
+                                         form: LinkForm())
         #expect(r == .failed(summary: "上传没有返回任何结果"))
     }
 
@@ -117,7 +128,7 @@ struct UploadReportTests {
                                          failure: ErrorBody(code: "CONFIG_MISSING",
                                                             message: "no credential"),
                                          clipboardWritten: true,
-                                         format: .markdown)
+                                         form: LinkForm())
         #expect(r == .failed(summary: "CONFIG_MISSING：no credential"))
     }
 

@@ -4,6 +4,42 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### App
+
+- **「链接格式」拆成两个各自独立的维度：语法 × 地址。** 原先是一个四选一的扁平枚举
+  （Markdown / HTML / CDN URL / Raw URL），而它并不是对任何东西的拆分：`markdown` 和 `html`
+  用的是 `upload.link_kind` 恰好选中的那个地址，`cdn` 和 `raw` 则是裸链接。后果有两个，都是真
+  的 —— **「Markdown 包裹 raw 链接」根本没有对应项**，六种组合里有两种无法表达；而历史面板的
+  `cdn` 分支直接返回 `record.url`，也就是 `link_kind` 选中的那个地址，所以配置成 `raw` 时，
+  「CDN URL」在一个写着 CDN 的标签下交回一条 `raw.githubusercontent.com` 链接。CLI 从来就是
+  两个独立的 flag（`--format` × `--link`），现在 app 与之对齐。
+- **这个选择现在由菜单和窗口共用。** 之前状态栏菜单和历史面板各存一份，于是在菜单里选了 HTML，
+  窗口那边仍然在复制 Markdown，而界面上没有任何地方解释这个分歧。
+- **`src/link.rs` 移植到 Swift，因为信封里只有一个地址。** `ItemResult.url` 是
+  `upload.link_kind` 选中的那一种，所以配置成 `raw` 的图床根本不会产出任何 jsDelivr 链接；
+  `list --json` 更窄 —— 每行一个 URL，且不记录它是哪一种。转义规则一并移植：历史面板原先用
+  `"![\(r.name)](\(r.url))"` 这样的裸插值拼 Markdown，文件名里一个 `]` 或 `(` 就会提前终止
+  标签、产出坏掉的 Markdown。两个转义器都按 `unicodeScalars` 遍历以对齐 Rust 的 `chars()`：
+  按 `Character` 遍历会把 `\r\n` 合成一个字素，只吐一个空格，而 CLI 吐两个。
+- **两个地址在上传落地时就解析完成，而不是等到复制时。** URL 由 `github.owner/repo/branch`
+  拼出，若延后到复制时再推导，十分钟前的那条菜单项会悄悄指向那次上传从未用过的目标。
+- **含 `/` 的分支不再产出 CDN 链接，而不是产出一条死链。** jsDelivr 把 ref 编码成
+  `repo@branch/path`，分支里的 `/` 让 branch 与 path 的边界无法解析，链接必然 404 —— CLI 为此
+  直接拒绝上传（`reject_dead_cdn_link`）。但 app 现在自己拼 CDN 地址，而 `--link raw` 配在
+  `feat/x` 分支上是能正常上传的，于是同一个谓词不移植过来，app 就会亲手造出 CLI 拒绝打印的那
+  条死链。缺少 CDN 地址时**原因随之传递**：读不到配置和分支含 `/` 需要用户做的事完全不同，把
+  后者报成前者是一条会让用户去查错地方的提示。
+- **窗口打开时不再把光标放在 Owner 里。** AppKit 会把初始焦点交给键盘循环里的第一个视图，这里
+  正好是 Owner 输入框 —— 于是窗口一开，插入符就在里面、值处于全选状态，再按一个键就把一个能用
+  的图床 owner 换成了随手输入的内容。
+- **Return 不再保存，底部的「保存」成为唯一路径。** 相应地，配置面板上的状态栏改为常驻、按钮置
+  灰而不是整条出现又消失 —— 一个「只有你已经改过东西才出现」的按钮，没法告诉你保存要点它；而
+  一条会随输入改变宽度的状态栏，会把按钮从指针底下挪走。
+- **「关于」页加上 app 自己的图标**，通过 `NSImage.applicationIconName` 从 bundle 里读回，因此
+  显示的是真正打包进去的那个图标，而不是第二份可能漂移的副本。
+
 ## [0.8.0] - 2026-08-21
 
 ### 拖一张图到菜单栏图标

@@ -26,10 +26,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var runner: GitpicRunner?
     private var tools: ToolPaths?
-    private var format: LinkFormat = .markdown
     /// Bounded to the same 8 the menu shows. Unbounded growth used to keep every
     /// upload of the session in memory for a status-item that only lists eight.
-    private var recent: [ItemResult] = []
+    ///
+    /// `UploadedLink` rather than `ItemResult`: both addresses are resolved when the
+    /// upload lands, so re-copying in another form later cannot follow a target the
+    /// upload never used.
+    private var recent: [UploadedLink] = []
 
     /// `GITPIC_APP_DRY_RUN=1` records what would be uploaded and skips the network
     /// entirely. Exists so the drag and clipboard plumbing can be verified without
@@ -257,6 +260,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return box
     }
 
+    /// One radio group: every case of one dimension, the current one checked.
+    ///
+    /// Generic over the dimension so the two groups cannot drift apart in how they
+    /// mark the selection or carry it back — the value travels as its `rawValue`,
+    /// which is the same string the config file and the CLI flags use.
+    private static func radioMenu<T: RawRepresentable & Equatable>(
+        _ cases: [T], current: T, label: KeyPath<T, String>,
+        target: AnyObject, action: Selector
+    ) -> NSMenu where T.RawValue == String {
+        let menu = NSMenu()
+        for c in cases {
+            let mi = NSMenuItem(title: c[keyPath: label], action: action,
+                                keyEquivalent: "")
+            mi.target = target
+            mi.representedObject = c.rawValue
+            mi.state = (c == current) ? .on : .off
+            menu.addItem(mi)
+        }
+        return menu
+    }
+
     private func rebuildMenu() {
         let menu = NSMenu()
 
@@ -271,18 +295,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        let fmt = Self.item("链接格式", "link", nil)
-        let sub = NSMenu()
-        for f in LinkFormat.allCases {
-            let mi = NSMenuItem(title: f.label, action: #selector(setFormat(_:)),
-                                keyEquivalent: "")
-            mi.target = self
-            mi.representedObject = f.rawValue
-            mi.state = (f == format) ? .on : .off
-            sub.addItem(mi)
-        }
-        fmt.submenu = sub
-        menu.addItem(fmt)
+        // Two dimensions, two sibling submenus — because that is what they are. A
+        // snippet's syntax and the host it addresses are chosen independently, and
+        // the single four-entry "链接格式" menu these replace could not express half
+        // the grid: Markdown pointing at the raw URL had no entry at all.
+        let form = AppModel.shared.linkForm
+
+        let syntax = Self.item("链接格式", "chevron.left.forwardslash.chevron.right", nil)
+        syntax.submenu = Self.radioMenu(LinkSyntax.allCases, current: form.syntax,
+                                        label: \.label, target: self,
+                                        action: #selector(setSyntax(_:)))
+        menu.addItem(syntax)
+
+        let target = Self.item("图片地址", "link", nil)
+        target.submenu = Self.radioMenu(LinkTarget.allCases, current: form.target,
+                                        label: \.detailedLabel, target: self,
+                                        action: #selector(setTarget(_:)))
+        menu.addItem(target)
 
         if !recent.isEmpty {
             menu.addItem(.separator())
@@ -292,8 +321,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let header = NSMenuItem.sectionHeader(title: "最近上传")
             header.image = Self.menuIconSpacer()
             menu.addItem(header)
-            // One upload carries every link form, so re-copying in a different
-            // format never re-uploads.
+            // One upload carries both addresses, so re-copying in a different
+            // form never re-uploads.
             for r in recent.prefix(8) {
                 let mi = Self.item(r.name + (r.deduped ? "  (已存在)" : ""),
                                    "photo", #selector(copyRecent(_:)))
@@ -319,18 +348,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
-    @objc private func setFormat(_ sender: NSMenuItem) {
+    @objc private func setSyntax(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
-              let f = LinkFormat(rawValue: raw) else { return }
-        format = f
+              let s = LinkSyntax(rawValue: raw) else { return }
+        AppModel.shared.linkForm.syntax = s
+        rebuildMenu()
+    }
+
+    @objc private func setTarget(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let t = LinkTarget(rawValue: raw) else { return }
+        AppModel.shared.linkForm.target = t
         rebuildMenu()
     }
 
     @objc private func copyRecent(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String,
               let r = recent.first(where: { $0.id == id }) else { return }
-        if copy(format.snippet(r)) {
-            report(.succeeded(summary: "已复制 \(format.label)"))
+        let form = AppModel.shared.linkForm
+        // A missing snippet is a missing *address*, not a missing upload: only the
+        // CDN form can be absent. Say which address is missing and why — the two
+        // causes have different fixes, and one of them is a config value only the
+        // user can change — instead of copying the other under the label they picked.
+        guard let text = r.snippet(form) else {
+            report(.failed(summary: r.unavailable(form.target)?.message
+                                    ?? "没有 \(form.target.label) 链接"))
+            return
+        }
+        if copy(text) {
+            report(.succeeded(summary: "已复制 \(form.label)"))
         } else {
             report(.failed(summary: "写剪贴板失败"))
         }
@@ -496,14 +542,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `ok:true` envelope with no results uploaded nothing, and copying "" would
         // replace whatever the user had on the clipboard with nothing.
         var copied = false
+        var form = AppModel.shared.linkForm
         if !results.isEmpty {
-            copied = copy(results.map { format.snippet($0) }.joined(separator: "\n"))
-            recent = Array((results.reversed() + recent).prefix(8))
+            // Resolve both addresses now, against the config that was in force when
+            // the files landed — see `UploadedLink`.
+            let links = results.map { UploadedLink($0, config: AppModel.shared.savedConfig) }
+            // Only the CDN address can be missing — with no config to build it from,
+            // or on a branch jsDelivr cannot address. Falling back to raw keeps a
+            // live link on the clipboard rather than none, and `form` is corrected so
+            // the report names the address actually copied.
+            if links.contains(where: { $0.url(form.target) == nil }) {
+                form.target = .raw
+            }
+            copied = copy(links.compactMap { $0.snippet(form) }.joined(separator: "\n"))
+            recent = Array((links.reversed() + recent).prefix(8))
             rebuildMenu()
             Task { await AppModel.shared.reload() }
         }
         report(UploadPresentation.report(results: results, failure: failure,
-                                         clipboardWritten: copied, format: format))
+                                        clipboardWritten: copied, form: form))
     }
 
     private func reportFailure(_ err: ErrorBody) {
