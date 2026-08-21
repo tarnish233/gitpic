@@ -4,6 +4,82 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-08-21
+
+### The window is Settings, and the keyboard belongs to the system again
+
+App-side only; not a line of the CLI changed. All four items are the same kind of debt:
+names, platform conventions, and a UI whose text did not match what it did.
+
+The window had always been called 主窗口 — the main window — while the only thing it
+ever did was edit the config. So the menu item is now 「打开设置…」, its icon went from
+`macwindow` to `gearshape`, and the title bar reads 设置 with the current pane as its
+subtitle. System Settings lets the title bar be the pane alone, because the app it
+belongs to is named in the Dock and the menu bar; this app is `.accessory` and has
+neither, so a title bar reading only 「图床」 left nothing on screen to say which window
+this is or that it is where settings are edited.
+
+The upload pane's 自动复制到剪贴板 switch used to be labelled 仅 CLI, its own caption
+admitting 对 App 无效 — a setting declaring itself decorative in the very UI that offers
+it. The app now reads that key. The copy still happens app-side, because `--json` not
+touching the clipboard is deliberate (`upload.rs` gates the write on `Mode::Human`, which
+excludes `--quiet` too): a `gitpic upload --json` inside someone's script must not
+overwrite what they had on their clipboard. What is aligned is the behaviour, not by
+giving machine mode a side effect it should not have.
+
+Inside the settings window ⌘W, ⌘Q, ⌘M, ⌘C, ⌘V and ⌘Z all did nothing, because those keys
+are dispatched by the **main menu's** key equivalents — and this app never had a main
+menu: it is `.accessory`, its own menu bar is not drawn, so nobody ever built one. The
+hardest symptom to spot was in the text fields: they do not implement editing commands
+themselves, the Edit menu is what sends `copy:`/`paste:`/`undo:` to the first responder,
+so with the caret genuinely in the Owner field (measured: `AXFocusedUIElement` was the
+`AXTextField`) ⌘A ⌘C copied nothing at all.
+
+### App
+
+- **主窗口 is now 设置, from the menu item down to the type names.** The status-item entry
+  went from 「打开主窗口…」 to 「打开设置…」 and its icon from `macwindow` to `gearshape` (the
+  former describes a shape, and a shape says nothing about what clicking it does);
+  `MainWindowController` / `MainWindowView` / `MainTab` / `MainNavigation` became
+  `SettingsWindowController` / `SettingsWindowView` / `SettingsTab` /
+  `SettingsNavigation`. The title bar is now 设置 plus the pane as a subtitle, for the
+  reason above. **One thing deliberately kept its old spelling**:
+  `setFrameAutosaveName("GitPicMainWindow")` is a defaults key (`NSWindow Frame
+  GitPicMainWindow`), not a name anyone reads — renaming it would make every window
+  already out there forget its size and position, a real cost for no benefit.
+- **A standard main menu, so the system shortcuts work in the settings window.** Three
+  menus: GitPic (About, 设置… ⌘,, Hide, Quit ⌘Q), Edit (Undo/Redo, Cut/Copy/Paste/Delete/
+  Select All) and Window (Close ⌘W, Minimize ⌘M, Zoom, with the window list handed to
+  `NSApp.windowsMenu`). Not one custom binding: standard titles, standard selectors,
+  standard key equivalents, each dispatched to whatever the first responder happens to be
+  — which is what "leave it to the system" means at this layer. Close lives in the Window
+  menu rather than in a File menu invented to hold one item, because this app has no file
+  operations; System Settings resolves it the same way. **This adds no global hotkeys**: a
+  main-menu key equivalent fires only while this app is frontmost, which for an
+  `.accessory` app means only while a window of its own is open. The status-bar menu still
+  carries no shortcuts at all, for the unchanged reason that they would look global and
+  would not be. ⌘R is wired to the toolbar's refresh button — like ⌘S it is dispatched by
+  SwiftUI inside the window, which is exactly why those two were the only keys that
+  responded while there was no main menu.
+- **`upload.auto_copy` is honoured by the app, and no longer labelled 仅 CLI.** The switch
+  lost its parenthetical and its caption now tells the truth; with it off the app writes
+  no clipboard, and the link is still in 最近上传 and 历史 to copy by hand. When the config
+  cannot be read the default is `true`, matching what the CLI defaults to for a missing
+  file. The copy result also went from a `Bool` to a three-state `ClipboardOutcome`
+  (`written` / `failed` / `suppressed`): "did not copy" and "the copy failed" used to share
+  the line 「上传成功，但写剪贴板失败」, which reported a working switch as a malfunction.
+  An upload with the switch off now reports 「N 张已上传，未自动复制。链接在「最近上传」里」 —
+  a success, and never a claim of a copy.
+- **The bundle declares `zh-Hans`, so the system half of the UI follows suit.** AppKit picks
+  its own strings against the localizations a bundle declares, and a bundle that declares
+  none is treated as English — which is why a Chinese app put up `Cancel` / `Open` and an
+  English `Undo` between 剪切 and 拷贝. With `CFBundleDevelopmentRegion` and
+  `CFBundleLocalizations` in Info.plist the open panel reads 取消 / 打开, its sidebar
+  最近使用 / 个人收藏, undo reads 撤销键入, and even the items AppKit appends itself
+  (自动填充 / 开始听写… / 表情与符号) come through in Chinese. `zh-Hans` alone, without
+  `en`: there is no English UI here to fall back to, and one consistent language beats
+  Chinese panes with English buttons.
+
 ## [0.10.0] - 2026-08-21
 
 ### Configuring this thing can now be done in the window
@@ -1095,7 +1171,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.0
 [0.10.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.10.0
 [0.9.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.9.0
 [0.8.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.8.0

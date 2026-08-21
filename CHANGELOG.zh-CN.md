@@ -4,6 +4,62 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.11.0] - 2026-08-21
+
+### 窗口就是设置，快捷键交还给系统
+
+这一版全部是 app 侧的，CLI 一行未改。四件事是同一类账：名字、平台惯例，以及界面上写着的话
+和它实际做的事不一致。
+
+窗口一直叫「主窗口」，而它从头到尾只做一件事——改配置。所以菜单项改成「打开设置…」，图标从
+`macwindow` 换成 `gearshape`，标题栏主标题固定「设置」、副标题跟着面板。系统设置的标题栏只写
+面板名，因为它有 Dock 图标和应用菜单交代自己是谁；这个 app 是 `.accessory`，两样都没有，只写
+「图床」的话，屏幕上就没有任何东西说明这是哪个窗口、以及它是改设置的地方。
+
+上传页的「自动复制到剪贴板」此前标着「仅 CLI」，说明里承认「对 App 无效」——一个设置项在自己
+的界面上声明自己是装饰。现在 app 读同一个键。复制动作仍然留在 app 这边，因为 `--json` 不写
+剪贴板是故意的（`upload.rs` 把写入限制在 `Mode::Human`，`--quiet` 也在外）：别人脚本里的
+`gitpic upload --json` 不该覆盖他剪贴板上的东西。对齐的是行为，不是把副作用塞进机器模式。
+
+设置窗口里 ⌘W、⌘Q、⌘M、⌘C、⌘V、⌘Z 全是死的，因为这些键由**主菜单**的 key equivalent 派发，
+而这个 app 从来没有主菜单——它是 `.accessory`，自己的菜单栏平时不画出来，于是也就没人建过。
+最难发现的一条在文本框：它们自己不实现编辑命令，是「编辑」菜单把 `copy:`/`paste:`/`undo:` 发给
+第一响应者的，所以焦点确实落在 Owner 框上（实测 `AXFocusedUIElement` = `AXTextField`）时，
+⌘A ⌘C 也复制不出任何东西。
+
+### App
+
+- **「主窗口」从名字到类型都改叫「设置」。** 菜单项「打开主窗口…」→「打开设置…」，图标
+  `macwindow` → `gearshape`（前者描述的是形状，而形状不说明点下去会发生什么）；
+  `MainWindowController` / `MainWindowView` / `MainTab` / `MainNavigation` 依次改名为
+  `SettingsWindowController` / `SettingsWindowView` / `SettingsTab` / `SettingsNavigation`。
+  标题栏改成主标题「设置」加副标题当前面板，理由见上。**一处故意没跟着改**：
+  `setFrameAutosaveName("GitPicMainWindow")` 保留旧拼写 —— 它是 UserDefaults 的键
+  （`NSWindow Frame GitPicMainWindow`），不是给人看的名字；改了会让已经存在的窗口忘掉自己的
+  大小和位置，代价真实而收益为零。
+- **装了一条标准主菜单，设置窗口里的系统快捷键终于响应。** 三个菜单：GitPic（关于、设置… ⌘,、
+  隐藏、退出 ⌘Q）、编辑（撤销/重做、剪切/拷贝/粘贴/删除/全选）、窗口（关闭 ⌘W、最小化 ⌘M、
+  缩放，窗口列表交给 `NSApp.windowsMenu`）。里面没有一条自定义绑定：标准标题、标准 selector、
+  标准快捷键，动作发给当前的第一响应者——这一层的「交给系统」就是这个意思。「关闭」放在「窗口」
+  而不是新造一个只装一条的「文件」菜单，因为这个 app 没有文件操作，系统设置也是这么处理的。
+  **这不等于全局热键**：主菜单的快捷键只在本 app 最前台时响应，对 `.accessory` app 来说就是
+  只在它自己的窗口开着时；状态栏菜单仍然一个快捷键都不带，理由没变（那些看起来像全局的，
+  其实不是）。⌘R 接到工具栏的「刷新」上——它和 ⌘S 一样由 SwiftUI 在窗口内部派发，这也正是
+  没有主菜单的那段时间里唯一还能用的两个键。
+- **`upload.auto_copy` 现在 app 也听，不再自称「仅 CLI」。** 开关标题去掉了那个括号，说明改成
+  实话；关掉之后 app 不写剪贴板，链接仍在「最近上传」和「历史」里，随时能手动复制。配置读不出来
+  时默认按 `true`，与 CLI 对一份缺失文件的默认一致。顺带把复制结果从 `Bool` 换成三态
+  `ClipboardOutcome`（`written` / `failed` / `suppressed`）：此前「没去复制」和「复制失败」
+  共用一句「上传成功，但写剪贴板失败」，等于把一个正常工作的开关报成故障。现在关着开关上传，
+  报告是「N 张已上传，未自动复制。链接在「最近上传」里」——是成功，但绝不声称复制了。
+- **bundle 声明 `zh-Hans`，系统提供的那半边 UI 跟着中文走。** AppKit 是拿 bundle 声明的语言
+  来挑它自己那套字符串的，而一个什么都不声明的 bundle 被当成英文的——所以一个中文 app 会弹出
+  `Cancel` / `Open`，「编辑」菜单里的 `Undo` 挤在 剪切/拷贝/粘贴 中间。Info.plist 补上
+  `CFBundleDevelopmentRegion` 与 `CFBundleLocalizations` 之后，文件选择框是「取消」/「打开」、
+  边栏是「最近使用」/「个人收藏」，撤销显示「撤销键入」，连系统自己追加的「自动填充」/
+  「开始听写…」/「表情与符号」也一并中文。只声明 `zh-Hans` 而不加 `en`：这里没有英文界面可以
+  退回去，给一种语言到底好过中文面板配英文按钮。
+
 ## [0.10.0] - 2026-08-21
 
 ### 配置这件事，现在能在窗口里做完
@@ -839,7 +895,8 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.10.0...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.0
 [0.10.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.10.0
 [0.9.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.9.0
 [0.8.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.8.0
