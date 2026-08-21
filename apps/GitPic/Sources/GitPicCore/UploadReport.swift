@@ -61,7 +61,7 @@ public enum UploadPresentation {
     public static func report(results: [ItemResult],
                               failure: ErrorBody?,
                               clipboardWritten: Bool,
-                              format: LinkFormat) -> UploadReport {
+                              form: LinkForm) -> UploadReport {
         guard !results.isEmpty else {
             return .failed(summary: failure.map { "\($0.code)：\($0.message)" }
                                     ?? "上传没有返回任何结果")
@@ -76,8 +76,11 @@ public enum UploadPresentation {
         }
         let deduped = results.filter(\.deduped).count
         let extra = deduped > 0 ? "（\(deduped) 张已存在）" : ""
+        // `form.label` names both dimensions, so "已复制 Markdown · CDN" says which
+        // address the snippet points at as well as how it is wrapped. The old
+        // single-axis label could not.
         return .succeeded(summary: results.count == 1
-                          ? "已复制 \(format.label)\(extra)"
+                          ? "已复制 \(form.label)\(extra)"
                           : "\(results.count) 张已复制\(extra)")
     }
 }

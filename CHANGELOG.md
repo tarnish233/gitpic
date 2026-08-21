@@ -4,6 +4,58 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### App
+
+- **The link format is now two independent dimensions: syntax × address.** It used to
+  be one flat four-case enum (Markdown / HTML / CDN URL / Raw URL), which is not a
+  decomposition of anything: `markdown` and `html` carried whichever address
+  `upload.link_kind` happened to select, while `cdn` and `raw` were bare URLs. Two
+  consequences, both real — **"Markdown pointing at the raw URL" had no entry at all**,
+  leaving two of the six combinations unreachable, and the history pane's `cdn` case
+  returned `record.url`, which is the address `link_kind` selected, so with `raw`
+  configured "CDN URL" handed back a `raw.githubusercontent.com` link under a label
+  reading CDN. The CLI has had these as separate flags (`--format` × `--link`) since
+  before the app existed; the app now matches.
+- **The choice is shared between the menu and the window.** The status-item menu and
+  the history pane each held their own copy, so picking HTML in the menu left the
+  window still copying Markdown, with nothing on screen explaining the disagreement.
+- **`src/link.rs` is ported to Swift, because the envelope carries only one address.**
+  `ItemResult.url` is whichever kind `upload.link_kind` selected, so a raw-configured
+  host emits no jsDelivr URL anywhere; `list --json` is narrower still — one URL per
+  row, and nothing recording which kind it is. The escaping came with it: the history
+  pane used to build Markdown by plain interpolation (`"![\(r.name)](\(r.url))"`), so a
+  filename containing `]` or `(` terminated the label early and yielded broken
+  Markdown. Both escapers walk `unicodeScalars` to match Rust's `chars()` — a
+  `Character` loop folds `\r\n` into one grapheme and emits one space where the CLI
+  emits two.
+- **Both addresses are resolved when the upload lands, not when a snippet is copied.**
+  The URLs are built from `github.owner/repo/branch`, so deriving them at copy time
+  would make a menu entry from ten minutes ago silently follow a target that upload
+  never used.
+- **A branch containing `/` now yields no CDN address instead of a dead link.**
+  jsDelivr encodes the ref as `repo@branch/path`, so a `/` in the branch leaves the
+  branch/path boundary unparseable and the link 404s — the CLI refuses the upload over
+  it (`reject_dead_cdn_link`). The app builds CDN addresses itself now, and `--link
+  raw` on a `feat/x` branch uploads perfectly well, so without the same predicate the
+  app would manufacture exactly the dead link the CLI declines to print. When a CDN
+  address is absent **the reason travels with it**: an unreadable config and a slashed
+  branch need different things from the user, and reporting the second as the first is
+  a message they can act on wrongly.
+- **The window no longer opens with the caret in the Owner field.** AppKit hands
+  initial focus to the first view in the key-view loop, which here was the Owner field
+  — so the window came up with a caret in it and the value selected, one keystroke away
+  from replacing a working image-host owner with whatever was typed next.
+- **Return no longer saves; the bottom bar's 保存 is the only path.** The status bar on
+  config panes is now always present with its buttons dimmed rather than appearing and
+  vanishing: a button that only shows up once you have already changed something cannot
+  tell you that clicking it is how a change gets written, and a bar that changes width
+  as you type moves the button out from under the pointer.
+- **The About pane shows the app's own icon**, read back out of the bundle via
+  `NSImage.applicationIconName`, so it displays what was actually packaged rather than
+  a second copy that could drift.
+
 ## [0.8.0] - 2026-08-21
 
 ### Drag one image onto the menu-bar icon

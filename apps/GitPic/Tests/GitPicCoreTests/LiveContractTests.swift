@@ -65,7 +65,7 @@ struct LiveContractTests {
         #expect(r.error == nil)
     }
 
-    @Test("one upload returns every link form, and re-uploading the same bytes dedups")
+    @Test("one upload yields every syntax × address combination, and re-uploading the same bytes dedups")
     func liveUploadAndDedup() async throws {
         let runner = try Self.runner()
         let png = try Self.fixedPNG()
@@ -75,10 +75,25 @@ struct LiveContractTests {
             Issue.record("first upload did not succeed: \(first.outcome)")
             return
         }
-        // The claim the whole format-switcher rests on.
-        for f in LinkFormat.allCases {
-            #expect(!f.snippet(a).isEmpty, "\(f.label) snippet was empty")
+        // The claim the whole form switcher rests on, against the live config: both
+        // addresses resolve, and every combination of the two dimensions produces a
+        // snippet without a second upload.
+        let link = UploadedLink(a, config: try await runner.loadConfig())
+        for syntax in LinkSyntax.allCases {
+            for target in LinkTarget.allCases {
+                let form = LinkForm(syntax: syntax, target: target)
+                #expect(link.snippet(form)?.isEmpty == false, "\(form.label) snippet was empty")
+            }
         }
+        // The two the CLI built itself must agree with the app's port of link.rs,
+        // for whichever address `upload.link_kind` selected.
+        #expect([LinkTarget.cdn, .raw].contains {
+            link.snippet(LinkForm(syntax: .markdown, target: $0)) == a.markdown
+        }, "no address reproduced the CLI's own markdown: \(a.markdown)")
+        #expect([LinkTarget.cdn, .raw].contains {
+            link.snippet(LinkForm(syntax: .html, target: $0)) == a.html
+        }, "no address reproduced the CLI's own html: \(a.html)")
+
         #expect(a.url.hasPrefix("https://"))
         #expect(a.rawURL.contains("raw.githubusercontent.com"))
         #expect(a.markdown.contains(a.url) || a.markdown.contains(a.rawURL))

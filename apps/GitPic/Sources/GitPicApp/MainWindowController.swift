@@ -32,6 +32,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.center()
         window.delegate = self
         window.contentViewController = NSHostingController(rootView: MainWindowView())
+        // Open showing the form, not editing it.
+        //
+        // AppKit hands initial focus to the first view in the key-view loop when a
+        // window is first shown, and here that is the Owner field — so the window
+        // came up with a caret in it and the value selected, one keystroke away from
+        // replacing a working image-host owner with whatever was typed next. Setting
+        // `initialFirstResponder` is the documented way to decline that; the content
+        // view takes the role and does nothing with it.
+        //
+        // Set after `contentViewController`, because that is what creates the
+        // `contentView` this points at.
+        window.initialFirstResponder = window.contentView
     }
 
     @available(*, unavailable)
