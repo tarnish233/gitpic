@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-08-22
+
+### Two pieces of window chrome that did not match the platform
+
+**The sidebar toggle was missing**, and putting it back needed more than un-hiding
+it: `columnVisibility` was `.constant(.all)`, so the button would have been visible
+and inert. It is a real `@State` binding now, `.toolbar(removing: .sidebarToggle)` is
+gone, and the sidebar collapses and comes back — verified by clicking it: the item's
+AX description flips 隐藏边栏 / 显示边栏, the four rows leave and return, and with the
+sidebar away the toggle moves into the toolbar beside back/forward, which is where
+Passwords and Mail put it.
+
+**The refresh button was a pill twice its needed width with the glyph off-centre in
+it** — and that was self-inflicted. 0.11.1 stopped the toolbar relayouting when work
+started by keeping a hidden `ProgressView` next to the button, and a hidden view still
+takes part in layout: the button and the invisible spinner shared one glass capsule,
+so the capsule was sized for two controls and the arrow sat in one half of it,
+matching neither 放弃 nor 保存.
+
+Progress now replaces the glyph *inside* the button, in a 16×16 box both states fill.
+One control, its own capsule, the same size either way: measured idle and during a
+connectivity test, the button stays 44pt wide at x=1152 and every other toolbar item
+keeps its position too — 0.11.1's reason still holds, because nothing is inserted into
+the toolbar any more.
+
+### App
+
+- **The sidebar can be collapsed.** As above: a real binding plus the system's own
+  toggle, not a control of our own.
+- **The refresh button looks like an icon button again** — round, the same height as
+  放弃 and 保存, glyph centred; it turns into the spinner itself while work runs,
+  without changing size.
+
 ## [0.11.1] - 2026-08-22
 
 ### The half second spent opening Settings was mostly not about settings
@@ -1226,7 +1259,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.2
 [0.11.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.1
 [0.11.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.0
 [0.10.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.10.0
