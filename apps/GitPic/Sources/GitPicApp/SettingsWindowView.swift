@@ -38,7 +38,31 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 final class SettingsNavigation {
     static let shared = SettingsNavigation()
     var selectedTab: SettingsTab? = .host
+
+    /// Visited panes, oldest first, and where in that list we currently are.
+    ///
+    /// Held here rather than in the view's `@State` because the window is no longer
+    /// thrown away when it closes — see ``SettingsWindowController``. The behaviour is
+    /// the one it always had; it is now stated instead of falling out of a destroyed
+    /// view: ``endSession()`` spends the history when the window closes, the way
+    /// System Settings starts over. `selectedTab` deliberately survives, because the
+    /// status item's 连通性测试 sets it before the window exists.
+    var history: [SettingsTab] = [.host]
+    var historyIndex = 0
+    /// Suppresses recording while back/forward is what moved the selection —
+    /// otherwise stepping back appends the pane just left, and the two buttons
+    /// walk in a circle instead of walking a history.
+    var steppingThroughHistory = false
+
     private init() {}
+
+    /// The window closed: the trail through it is spent, and the next open starts
+    /// from wherever it will land rather than from a stale list.
+    func endSession() {
+        history = [selectedTab ?? .host]
+        historyIndex = 0
+        steppingThroughHistory = false
+    }
 }
 
 /// The settings window: a sidebar, one pane at a time, and a toolbar.
@@ -57,20 +81,6 @@ final class SettingsNavigation {
 struct SettingsWindowView: View {
     @State private var navigation = SettingsNavigation.shared
     @State private var model = AppModel.shared
-
-    /// Visited panes, oldest first, and where in that list we currently are.
-    ///
-    /// Held here rather than in `SettingsNavigation` because it is a property of *this
-    /// window*: close it and the history is spent, the same way System Settings
-    /// starts over. `SettingsNavigation.selectedTab` outlives the window — the status
-    /// item's 连通性测试 sets it before the window exists — and mixing the two
-    /// would record a jump nobody made.
-    @State private var history: [SettingsTab] = [.host]
-    @State private var historyIndex = 0
-    /// Suppresses recording while back/forward is what moved the selection —
-    /// otherwise stepping back appends the pane just left, and the two buttons
-    /// walk in a circle instead of walking a history.
-    @State private var steppingThroughHistory = false
 
     private var activeTab: SettingsTab { navigation.selectedTab ?? .host }
 
@@ -92,12 +102,13 @@ struct SettingsWindowView: View {
             // two more buttons crowded in beside 保存.
             ToolbarItemGroup(placement: .navigation) {
                 Button { step(-1) } label: { Image(systemName: "chevron.left") }
-                    .disabled(historyIndex == 0)
-                    .help(historyIndex == 0 ? "没有上一个" : "回到\(history[historyIndex - 1].title)")
+                    .disabled(!canStep(-1))
+                    .help(canStep(-1) ? "回到\(navigation.history[navigation.historyIndex - 1].title)"
+                                      : "没有上一个")
                 Button { step(1) } label: { Image(systemName: "chevron.right") }
-                    .disabled(historyIndex >= history.count - 1)
-                    .help(historyIndex >= history.count - 1
-                          ? "没有下一个" : "前往\(history[historyIndex + 1].title)")
+                    .disabled(!canStep(1))
+                    .help(canStep(1) ? "前往\(navigation.history[navigation.historyIndex + 1].title)"
+                                     : "没有下一个")
             }
 
             ToolbarItemGroup(placement: .primaryAction) {
@@ -186,26 +197,31 @@ struct SettingsWindowView: View {
 
     // MARK: - Navigation history
 
+    private func canStep(_ delta: Int) -> Bool {
+        navigation.history.indices.contains(navigation.historyIndex + delta)
+    }
+
     private func step(_ delta: Int) {
-        let target = historyIndex + delta
-        guard history.indices.contains(target) else { return }
-        steppingThroughHistory = true
-        historyIndex = target
-        navigation.selectedTab = history[target]
+        let target = navigation.historyIndex + delta
+        guard navigation.history.indices.contains(target) else { return }
+        navigation.steppingThroughHistory = true
+        navigation.historyIndex = target
+        navigation.selectedTab = navigation.history[target]
         // Cleared in a later turn than the `onChange` this assignment triggers, which
         // is the whole point: clearing it here would let `recordVisit` see `false`
         // and append the pane we just stepped to.
-        Task { @MainActor in steppingThroughHistory = false }
+        Task { @MainActor in navigation.steppingThroughHistory = false }
     }
 
     private func recordVisit() {
-        guard !steppingThroughHistory, let tab = navigation.selectedTab else { return }
-        guard history[historyIndex] != tab else { return }
+        guard !navigation.steppingThroughHistory,
+              let tab = navigation.selectedTab else { return }
+        guard navigation.history[navigation.historyIndex] != tab else { return }
         // Anything ahead of here was reached by going back; a new choice replaces that
         // future rather than being spliced into it.
-        history = Array(history.prefix(historyIndex + 1))
-        history.append(tab)
-        historyIndex = history.count - 1
+        navigation.history = Array(navigation.history.prefix(navigation.historyIndex + 1))
+        navigation.history.append(tab)
+        navigation.historyIndex = navigation.history.count - 1
     }
 }
 
