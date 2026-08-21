@@ -69,8 +69,8 @@ embeds that same `gitpic` build, so installing the app does not also require
 installing the CLI (and vice versa).
 
 Upload the clipboard image or pick files from the menu-bar icon; the link lands on
-your clipboard. The main window edits the image-host repository and the upload
-settings, and browses history.
+your clipboard. The settings window edits the image-host repository and the upload
+options, and browses history.
 
 ```bash
 unzip GitPic-<version>-macos-arm64.zip -d /Applications/

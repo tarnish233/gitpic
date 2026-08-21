@@ -134,8 +134,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// message; now the outcome itself resets the icon, so both the timer and the
     /// token are gone rather than merely tidied.
     ///
-    /// The main window's status line was a third surface and is gone — see
-    /// `MainWindowView`. The log line below replaces what it was worth keeping: with
+    /// The settings window's status line was a third surface and is gone — see
+    /// `SettingsWindowView`. The log line below replaces what it was worth keeping: with
     /// notification permission denied, this is where an outcome can still be read
     /// back afterwards.
     private func report(_ report: UploadReport) {
@@ -340,9 +340,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        let win = Self.item("打开主窗口…", "macwindow", #selector(openMainWindow))
-        win.target = self
-        menu.addItem(win)
+        // 设置, not 主窗口: this window *is* the settings window — the only place the
+        // app edits the config file — and naming it after its shape ("a window") said
+        // nothing about what clicking it does. `gearshape` replaces `macwindow` for
+        // the same reason.
+        let settings = Self.item("打开设置…", "gearshape", #selector(openSettings))
+        settings.target = self
+        menu.addItem(settings)
 
         let doc = Self.item("连通性测试…", "network", #selector(runDoctor))
         doc.target = self
@@ -399,10 +403,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         p.allowsMultipleSelection = true
         p.canChooseDirectories = false
         p.allowedContentTypes = [.image]
-        // Become .regular for the life of the panel, the same way the main window
+        // Become .regular for the life of the panel, the same way the settings window
         // does — an .accessory app cannot own a focused, title-barred window, and
         // that includes a modal panel. `AppActivationPolicy` is reference-counted
-        // for exactly this: the panel can hold .regular alongside the main window.
+        // for exactly this: the panel can hold .regular alongside the settings window.
         //
         // This replaces a bare `NSApp.activate(ignoringOtherApps:)`, which is
         // deprecated as of macOS 14 and does not do what its name says any more:
@@ -623,14 +627,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return pb.setString(s, forType: .string)
     }
 
-    // MARK: - Doctor
+    // MARK: - Settings
 
-    @objc private func openMainWindow() {
-        MainWindowController.show()
+    @objc private func openSettings() {
+        SettingsWindowController.show()
     }
 
+    // MARK: - Doctor
+
     @objc private func runDoctor() {
-        MainWindowController.show(tab: .host)
+        SettingsWindowController.show(tab: .host)
         Task { await AppModel.shared.runDoctor() }
     }
 }

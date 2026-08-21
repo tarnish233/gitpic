@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import GitPicCore
 
-enum MainTab: String, CaseIterable, Identifiable {
+enum SettingsTab: String, CaseIterable, Identifiable {
     case host, upload, history, about
     var id: Self { self }
 
@@ -35,13 +35,13 @@ enum MainTab: String, CaseIterable, Identifiable {
 
 @MainActor
 @Observable
-final class MainNavigation {
-    static let shared = MainNavigation()
-    var selectedTab: MainTab? = .host
+final class SettingsNavigation {
+    static let shared = SettingsNavigation()
+    var selectedTab: SettingsTab? = .host
     private init() {}
 }
 
-/// The window: a sidebar, one pane at a time, and a toolbar.
+/// The settings window: a sidebar, one pane at a time, and a toolbar.
 ///
 /// **No bottom bar, deliberately.** It used to carry a status line and the
 /// 保存/放弃 pair. The line is gone rather than moved: an outcome is an event, this
@@ -54,25 +54,25 @@ final class MainNavigation {
 ///
 /// The cost is stated because it is real: with notification permission denied,
 /// outcomes reach only `~/Library/Logs/GitPic.log` — see `AppModel.notify`.
-struct MainWindowView: View {
-    @State private var navigation = MainNavigation.shared
+struct SettingsWindowView: View {
+    @State private var navigation = SettingsNavigation.shared
     @State private var model = AppModel.shared
 
     /// Visited panes, oldest first, and where in that list we currently are.
     ///
-    /// Held here rather than in `MainNavigation` because it is a property of *this
+    /// Held here rather than in `SettingsNavigation` because it is a property of *this
     /// window*: close it and the history is spent, the same way System Settings
-    /// starts over. `MainNavigation.selectedTab` outlives the window — the status
+    /// starts over. `SettingsNavigation.selectedTab` outlives the window — the status
     /// item's 连通性测试 sets it before the window exists — and mixing the two
     /// would record a jump nobody made.
-    @State private var history: [MainTab] = [.host]
+    @State private var history: [SettingsTab] = [.host]
     @State private var historyIndex = 0
     /// Suppresses recording while back/forward is what moved the selection —
     /// otherwise stepping back appends the pane just left, and the two buttons
     /// walk in a circle instead of walking a history.
     @State private var steppingThroughHistory = false
 
-    private var activeTab: MainTab { navigation.selectedTab ?? .host }
+    private var activeTab: SettingsTab { navigation.selectedTab ?? .host }
 
     var body: some View {
         NavigationSplitView(columnVisibility: .constant(.all)) {
@@ -139,7 +139,7 @@ struct MainWindowView: View {
 
     @ViewBuilder private var sidebar: some View {
         List(selection: $navigation.selectedTab) {
-            ForEach(MainTab.allCases) { tab in
+            ForEach(SettingsTab.allCases) { tab in
                 Label(tab.title, systemImage: tab.systemImage)
                     .foregroundStyle(.primary)
                     .tag(tab)
@@ -147,7 +147,7 @@ struct MainWindowView: View {
         }
         .listStyle(.sidebar)
         .scrollEdgeEffectStyleSoftIfAvailable()
-        .navigationTitle("GitPic")
+        .navigationTitle("设置")
         .frame(width: 200)
         .navigationSplitViewColumnWidth(min: 200, ideal: 200, max: 200)
         .toolbar(removing: .sidebarToggle)
@@ -164,10 +164,14 @@ struct MainWindowView: View {
             case .about:   AboutPane(model: model)
             }
         }
-        // The window title follows the pane, the way a settings window's does. The
-        // sidebar's own `.navigationTitle("GitPic")` is what the app is called; this
-        // is what you are looking at.
-        .navigationTitle(activeTab.title)
+        // Title 设置, subtitle the pane — in that order, and not the other way round.
+        // A settings window normally lets the title bar be the pane alone (System
+        // Settings does), because the app it belongs to is named in the Dock and the
+        // menu bar. This app is `.accessory`: no Dock icon, no app menu. A title bar
+        // reading only 「图床」 leaves nothing on screen that says which window this is
+        // or that it is where settings are edited.
+        .navigationTitle("设置")
+        .navigationSubtitle(activeTab.title)
         // Top-left, explicitly. A pane whose content is shorter than the window gets
         // centred by the detail column otherwise — which is exactly how the history
         // pane's format switcher ended up floating halfway down the window. Fixing it
@@ -310,7 +314,7 @@ private struct ConfigTrouble: View {
                     .disabled(model.busy)
             }
             if !repairs {
-                Button("去「图床」处理") { MainNavigation.shared.selectedTab = .host }
+                Button("去「图床」处理") { SettingsNavigation.shared.selectedTab = .host }
             }
         }
         .controlSize(.small)
@@ -632,7 +636,7 @@ struct HistoryPane: View {
             } actions: {
                 Button("重试") { Task { await model.reload() } }
                     .disabled(model.busy)
-                Button("去「图床」处理") { MainNavigation.shared.selectedTab = .host }
+                Button("去「图床」处理") { SettingsNavigation.shared.selectedTab = .host }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if model.history.isEmpty {
