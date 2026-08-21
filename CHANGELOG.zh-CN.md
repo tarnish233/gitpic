@@ -4,7 +4,7 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.10.0] - 2026-08-21
 
 ### 配置这件事，现在能在窗口里做完
 
@@ -839,7 +839,8 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.9.0...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.10.0
 [0.9.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.9.0
 [0.8.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.8.0
 [0.7.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.7.0
