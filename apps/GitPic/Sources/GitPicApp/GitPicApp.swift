@@ -43,6 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let dryRun = ProcessInfo.processInfo.environment["GITPIC_APP_DRY_RUN"] == "1"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before anything can open a window: without a main menu the standard
+        // shortcuts are dead inside it — see `MainMenu`.
+        MainMenu.install()
         setUpStatusItem()
         // The menu's checkmarks are derived from the config, so they have to be
         // redrawn whenever it changes — including when the change came from the
@@ -646,8 +649,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Settings
 
-    @objc private func openSettings() {
+    /// Internal, not private: `MainMenu` names these selectors from another file.
+    @objc func openSettings() {
         SettingsWindowController.show()
+    }
+
+    @objc func openAbout() {
+        SettingsWindowController.show(tab: .about)
     }
 
     // MARK: - Doctor

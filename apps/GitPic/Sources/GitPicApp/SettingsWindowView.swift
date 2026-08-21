@@ -109,8 +109,13 @@ struct SettingsWindowView: View {
                 Button { Task { await model.reload() } } label: {
                     Image(systemName: "arrow.clockwise")
                 }
+                // ⌘R, where reload lives on every other Mac. `⌘S` on 保存 already
+                // worked this way: SwiftUI dispatches these inside the window, which
+                // is why they were the two keys that *did* respond before the app had
+                // a main menu at all — see `MainMenu`.
+                .keyboardShortcut("r")
                 .disabled(model.busy)
-                .help("重新读取配置与历史")
+                .help("重新读取配置与历史（⌘R）")
 
                 if activeTab.savesConfig {
                     // Present on every config pane whether or not anything is dirty,
