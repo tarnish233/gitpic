@@ -4,7 +4,23 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-08-21
+
+### Drag one image onto the menu-bar icon
+
+Everything here is on the app side. The CLI is unchanged; it takes the version along
+because since 0.6.0 there is one version and one Release for both.
+
+The app had three ways to upload and none of them was a drag — the notch panel was
+the only thing built for it, it never passed acceptance, and it sat in the tree
+switched off by default, so nothing could drop anywhere. The drop target is now the
+menu-bar icon itself: drag an image onto it to upload, and clicking it still opens
+the menu. The notch's two files (366 lines) are gone along with them, and the
+platform measurements they documented stay in `docs/macos-app-plan.md`.
+
+Upload outcomes moved to system notifications, because they are events the user may
+have walked away from; an upload *in flight* is still shown by the icon, because that
+is a state with a natural end.
 
 ### App
 
@@ -832,7 +848,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.8.0
 [0.7.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.7.0
 [0.6.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.6.0
 [0.5.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.5.1
