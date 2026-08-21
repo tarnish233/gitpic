@@ -11,8 +11,24 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     static func show(tab: SettingsTab? = nil) {
         if let tab { SettingsNavigation.shared.selectedTab = tab }
-        if shared == nil { shared = SettingsWindowController() }
+        prewarm()
         shared?.showWindow(nil)
+    }
+
+    /// Build the window without showing it.
+    ///
+    /// This is where the cost of opening the window went. Measured on this machine:
+    /// `NSHostingController(rootView: SettingsWindowView())` is ~150ms of main-thread
+    /// work (~340ms the first time, before SwiftUI is warm) and `showWindow` another
+    /// ~50ms, and **every** open used to pay all of it, because `windowWillClose`
+    /// released the controller. Building it once, at launch, where no click is waiting
+    /// on it, is what makes 打开设置 feel like opening a window rather than starting
+    /// one.
+    ///
+    /// Safe before `gitpic` has been located: the panes render their "still looking"
+    /// state, nothing is on screen to see it, and `showWindow` reloads anyway.
+    static func prewarm() {
+        if shared == nil { shared = SettingsWindowController() }
     }
 
     private init() {
@@ -82,11 +98,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         Task { await AppModel.shared.reload() }
     }
 
+    /// Closing gives back the activation policy and spends the pane history — but
+    /// keeps the window.
+    ///
+    /// It used to `Self.shared = nil` here, which meant the next open rebuilt the
+    /// window and its whole SwiftUI tree from scratch: ~200ms of nothing, on every
+    /// open, for a window whose contents are rebuilt from the config file anyway. The
+    /// one thing that release did carry — a back/forward trail that starts over, the
+    /// way System Settings does — is now said out loud in `endSession()` instead of
+    /// being a side effect of destroying a view.
     func windowWillClose(_ notification: Notification) {
         if holdingActivation {
             AppActivationPolicy.leave()
             holdingActivation = false
         }
-        Self.shared = nil
+        SettingsNavigation.shared.endSession()
     }
 }

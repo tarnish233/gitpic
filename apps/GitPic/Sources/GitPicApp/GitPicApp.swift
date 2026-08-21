@@ -56,6 +56,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // interruption, and the moment a result is ready is the worst time to
         // discover the app cannot show it.
         Task { await Notifier.authorize() }
+        // Build the settings window now, while nothing is waiting on it — see
+        // `SettingsWindowController.prewarm()`. In its own turn of the main loop, so
+        // the status item is on screen first: the icon is what the user is waiting
+        // for at launch, and this is ~150ms they would otherwise wait for it.
+        Task { @MainActor in SettingsWindowController.prewarm() }
     }
 
     // MARK: - Tools

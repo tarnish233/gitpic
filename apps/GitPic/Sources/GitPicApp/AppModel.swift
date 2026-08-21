@@ -163,10 +163,19 @@ final class AppModel {
         let baseline = savedConfig
         beginWork()
         defer { endWork() }
-        // Asked on every read, not only a failed one: `config path` does not load the
-        // file, so it answers in both cases, and the window needs the path exactly
-        // when the read fails.
-        configPath = try? await runner.configPath()
+        // Asked once per launch, not once per read. `config path` does not load the
+        // file, so it answers whether or not the read fails — and the window needs the
+        // path exactly when the read fails, which is why it is fetched up front rather
+        // than in the `catch`. But it is a whole `gitpic` process for an answer that
+        // cannot change while this app runs: the path comes from `XDG_CONFIG_HOME` and
+        // the home directory, and `rebuildConfig()` renames the file *into the same
+        // place*. Reading it on every reload was the most expensive call in the
+        // sequence — measured ~90ms of the ~120ms a window-opening reload cost, since
+        // the first spawn of a cycle also waits on the main thread finishing the
+        // window's first layout.
+        if configPath == nil {
+            configPath = try? await runner.configPath()
+        }
         do {
             let cfg = try await runner.loadConfig()
             savedConfig = cfg
