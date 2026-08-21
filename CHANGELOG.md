@@ -4,7 +4,30 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-08-21
+
+### The link format was two choices all along
+
+This release is app-side again. The CLI is unchanged; it takes the version along
+because since 0.6.0 there is one version and one Release for both.
+
+The menu's four-way "链接格式" — Markdown / HTML / CDN URL / Raw URL — looked like a
+set of alternatives. It was really two unrelated things crammed into one dropdown:
+**which syntax wraps the snippet**, and **which host the link points at**. The CLI has
+had them as separate flags (`--format` × `--link`) from the start; the app had
+collapsed them into one.
+
+The cost was two concrete bugs. Two of the six combinations had no entry at all, so
+"Markdown pointing at the raw URL" could not be chosen. And the history pane's "CDN
+URL" returned `record.url`, which is whichever address `upload.link_kind` selected —
+so with `raw` configured it handed back a `raw.githubusercontent.com` link under a
+label reading CDN.
+
+They are two independent dimensions now, all six combinations reachable, and
+switching still costs no re-upload. `src/link.rs` is ported to Swift along the way,
+because the envelope carries only one address — escaping included, since the history
+pane used to build Markdown by plain interpolation and a single `]` in a filename was
+enough to produce a broken link.
 
 ### App
 
@@ -900,7 +923,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.9.0
 [0.8.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.8.0
 [0.7.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.7.0
 [0.6.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.6.0
