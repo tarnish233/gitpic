@@ -4,6 +4,61 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-08-22
+
+### The half second spent opening Settings was mostly not about settings
+
+The window was slow to open, and the instant it appeared the toolbar's 刷新 and the
+host pane's 连通性测试 twitched. Neither is a matter of taste. Measured on this
+machine, per open:
+
+    NSHostingController(rootView: SettingsWindowView())   338ms first, 133–172ms after
+    super.showWindow + ordering                            44–91ms
+    main thread still busy after showWindow returned          176ms
+    reload (three gitpic invocations)                      115–154ms
+
+The window was built from scratch every time: `windowWillClose` released the
+controller, so every open paid for the whole SwiftUI tree again. It is now built
+once — at launch, in its own turn of the main loop, where nothing is waiting on it
+— and kept. Opens after that are `build=0ms`, `showWindow=20–28ms`, with the main
+thread settled in 26–35ms.
+
+The twitch was the progress report. Everything gated on `busy` changed state twice
+on the way past, and the spinner was *inserted* into the toolbar when work started
+and removed when it stopped, so AppKit relayouted and 刷新 / 放弃 / 保存 slid
+sideways and back on every open — the report was moving the controls it was
+reporting about. `busy` now means "still running after 250ms": a window-opening
+reload never crosses that line, while a save (one process per changed key), an
+upload or a connectivity test does and still gets its spinner.
+
+### App
+
+- **The settings window is built once, so opening it just shows it.**
+  `SettingsWindowController.prewarm()` builds it at launch (after the status item is
+  on screen — that icon is what the user is actually waiting for), and
+  `windowWillClose` no longer releases it. That release did carry one thing worth
+  keeping: closing the window spends the back/forward trail, the way System Settings
+  does. It used to be a side effect of destroying the view's `@State`; it is now
+  explicit — the trail lives in `SettingsNavigation`, which outlives one window
+  session, and `endSession()` spends it on close. Verified: switch panes and 返回
+  lights up; close, reopen, and it is dark again on the pane you left.
+- **`config path` is read once per launch, not once per reload.** A whole process for
+  an answer that cannot change while the app runs: the path comes from
+  `XDG_CONFIG_HOME` and the home directory, and `rebuildConfig()` renames the file
+  into the same place. It was also the most expensive call in the sequence — ~90ms of
+  ~120ms, because the first spawn of a cycle waits on the main thread finishing the
+  window's first layout. A reload is now 16–24ms.
+- **The spinner lives in the toolbar permanently and is only sometimes visible.** It
+  used to be inserted on demand, which pushed the buttons beside it out of the way.
+  Only its opacity changes now, so the layout does not move. Verified through the AX
+  tree: at the instant the window appears and 2.5s later, the five toolbar buttons
+  report identical x positions and identical enabled states — 832 / 873 / 1155 /
+  1196 / 1246, with 刷新 enabled throughout.
+- **刷新 is no longer disabled during a read.** `reload()` is idempotent and every
+  invocation passes through `GitpicRunner`'s serial gate, so a second press queues a
+  second read rather than racing the first. An extra read is a better trade than a
+  button that flickers.
+
 ## [0.11.0] - 2026-08-21
 
 ### The window is Settings, and the keyboard belongs to the system again
@@ -1171,7 +1226,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.1
 [0.11.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.0
 [0.10.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.10.0
 [0.9.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.9.0
