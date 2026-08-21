@@ -4,6 +4,44 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.11.1] - 2026-08-22
+
+### 打开设置窗口的那半秒，几乎和设置无关
+
+窗口开得慢，而且开的一瞬间工具栏的「刷新」和图床页的「连通性测试」会自己动一下。两件事都不是
+观感问题，实测（本机，每次打开）：
+
+    NSHostingController(rootView: SettingsWindowView())   首次 338ms，之后每次 133–172ms
+    super.showWindow + 上屏                                44–91ms
+    showWindow 返回之后主线程还在忙                            176ms
+    reload（三次 gitpic 调用）                              115–154ms
+
+窗口每次都是从头建的 —— `windowWillClose` 把 controller 释放了，于是每次打开都重新搭一遍整棵
+SwiftUI 树。现在只建一次（启动时，在主循环自己的一轮里，没有任何点击在等它）然后留着：之后每次
+打开 `build=0ms`、`showWindow=20–28ms`、主线程 26–35ms 内安静下来。
+
+而抖动是「进度报告」造成的：`busy` 一变，刷新和连通性测试就变灰再变回来；更糟的是那个转圈是
+**插进**工具栏、结束时再删掉的，AppKit 因此重排，刷新/放弃/保存 整排左右滑一下再滑回来 —— 报告
+把它正在报告的控件挪动了。现在 `busy` 的含义是「跑过 250ms 还没完」：开窗那次 reload 根本到不了
+这条线，所以什么都不变；而保存（每个改动键一个进程）、上传、连通性测试会越过它，照旧转圈。
+
+### App
+
+- **设置窗口只建一次，之后打开是直接显示。** `SettingsWindowController.prewarm()` 在启动时
+  建好窗口（状态栏图标先上屏，这是启动时用户真正在等的东西），`windowWillClose` 不再把它释放。
+  释放原本捎带了一件值得留的事 —— 关掉窗口，前进/后退的足迹就作废，和系统设置一样；那原先是
+  销毁 `@State` 的副作用，现在明说：足迹搬到 `SettingsNavigation`（它比一次开窗更长命），由
+  `endSession()` 在关窗时清掉。实测：切一次面板「返回」亮起；关掉重开，它在你离开的那一页上是灰的。
+- **`config path` 从「每次 reload 一次」改成「每次启动一次」。** 一整个进程，换一个在本次运行里
+  不可能变的答案（路径来自 `XDG_CONFIG_HOME` 和家目录，而 `rebuildConfig()` 是把文件改名留在
+  原地）。它还是这串调用里最贵的一个：~120ms 里占 ~90ms，因为一轮里的第一次 spawn 还要等主线程
+  画完窗口第一帧。现在一次 reload 是 16–24ms。
+- **转圈常驻工具栏，只是有时不可见。** 之前是按需插入/删除，所以它一出现就把旁边的按钮推走。
+  现在只改 `opacity`，布局不动。实测（AX）：窗口出现那一瞬间和 2.5 秒后，五个工具栏按钮的 x 坐标
+  和 enabled 状态逐一相同 —— 832 / 873 / 1155 / 1196 / 1246，刷新全程可用。
+- **「刷新」在读取期间不再变灰。** `reload()` 是幂等的，而且每次调用都过 `GitpicRunner` 的串行
+  闸门，所以再按一下是排队而不是并发；多读一次比一个会闪的按钮划算。
+
 ## [0.11.0] - 2026-08-21
 
 ### 窗口就是设置，快捷键交还给系统
@@ -895,7 +933,8 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.0...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.1
 [0.11.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.0
 [0.10.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.10.0
 [0.9.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.9.0
