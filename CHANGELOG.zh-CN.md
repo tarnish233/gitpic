@@ -4,7 +4,20 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.8.0] - 2026-08-21
+
+### 拖一张图到菜单栏图标
+
+这一版全部是 app 侧的。CLI 一行未改，版本号跟着走是 0.6.0 起「一个版本、一个 Release」
+的结果。
+
+app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设计的刘海面板从未通过验收，以默认关闭
+的形态搁置在树里，于是任何地方都接不了拖拽。现在落区做在菜单栏图标上：拖一张图上去就传，
+点它照样弹菜单。刘海的两个文件（366 行）连同它们记录的平台实测一起清理，实测结论保留在
+`docs/macos-app-plan.md`。
+
+同时上传结果改走系统通知，因为那是用户可能已经离开屏幕时发生的事；而「正在上传」仍然由
+图标表示，因为那是一个有自然终点的状态。
 
 ### App
 
@@ -658,7 +671,8 @@
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.7.0...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.8.0
 [0.7.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.7.0
 [0.6.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.6.0
 [0.5.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.5.1
