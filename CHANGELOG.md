@@ -4,6 +4,46 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### App
+
+- **The menu-bar icon is now a drop target: drag one image onto it to upload.** The
+  app had no drop zone at all. The notch panel was meant to be one, but it was never
+  verified — synthesising a real Finder-to-panel drag needs an accessibility-authorised
+  CGEvent sequence, so it shipped parked behind a `NotchDropZone` default and nothing
+  could drop anywhere. `docs/macos-app-plan.md` had listed dragging onto the status
+  item as the cheapest alternative, and a probe confirmed on this machine that it
+  works: a subview of `statusItem.button` registered for `.fileURL` receives a real
+  Finder drag, *and* clicking the icon still opens the menu — but only if `hitTest` is
+  left alone. The old notch drop view overrode it to keep every event for itself,
+  which on the status item would have meant the icon never opened its menu again.
+- **A drag carries exactly one image, or it is refused before it starts.** Several
+  files, a non-image, or a folder makes `draggingEntered` return no operation: the
+  icon does not highlight and the system plays its own snap-back. This reverses the
+  deleted notch view's written decision to accept any file type on the grounds that
+  the CLI validates no content either. Two things outweighed it — the two other upload
+  entry points already restrict to images, so the unfiltered drop was the odd one out,
+  and a drag has no undo: by the time a wrong file is uploaded it is a commit in the
+  image-host repository.
+- **Upload outcomes are system notifications now, and the notch is gone.** The status
+  item still changes its icon while an upload is in flight, because that is a state
+  with a natural end; what *happened* is delivered as a banner, because that is an
+  event the user may have walked away from. `NotchPanel.swift` and `NotchShape.swift`
+  are deleted (366 lines); the C2/C3 platform measurements they documented live on in
+  `docs/macos-app-plan.md`, and C3 still governs the new drop view.
+- **The icon-reset timer and its guard token are gone rather than ported.** The icon
+  used to be restored by a 2.6 s task, which needed a token so a stale reset could not
+  wipe a newer message. The outcome now resets the icon directly, so there is no timer
+  to race and nothing to guard. `AppModel.clearStatus(_:from:)` went with it — its only
+  caller was that task.
+- **The upload result wording is now covered by tests.** Its four outcomes — one file,
+  several files, partial success, and a successful upload whose clipboard write failed
+  — were built inline in the app layer, which no test can import. They moved to
+  `UploadPresentation.report` in `GitPicCore` unchanged in behaviour, and the case
+  that matters most is now locked down: a failed clipboard write must not be reported
+  as a success, or the user pastes stale content and never learns why.
+
 ## [0.7.0] - 2026-08-20
 
 ### The invariants the comments claimed, now actually held

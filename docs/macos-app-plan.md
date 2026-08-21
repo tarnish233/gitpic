@@ -118,6 +118,9 @@ C1 决定这一节不是可选项——不做，Finder 启动的 app 每次上�
 
 ### 4.3 刘海拖拽区——受 C2 约束的那一块
 
+> **本节已废弃，保留作为记录。** 刘海面板从未通过验收，代码已删除；拖拽落区最终做在菜单栏
+> 图标上，见下文「M1 的实际结果」。本节的 C2/C3 分析仍然正确，也正是它否掉了这个方案。
+
 视觉：黑色 `NotchShape` 齐屏幕上边缘，看起来从硬件刘海里长出来。
 交互：**只有菜单栏以下的部分有效**。具体结构：
 
@@ -178,8 +181,7 @@ gitpic-cli/
 │  ├─ Sources/GitPicApp/
 │  │  ├─ GitPicApp.swift       @main, .accessory
 │  │  ├─ StatusItem.swift      菜单栏
-│  │  ├─ NotchPanel.swift      刘海面板（ledge + 展开）
-│  │  ├─ NotchShape.swift      取自 skill
+│  │  ├─ StatusItemDropView.swift  图标落区（M1 的最终形态，见 §「M1 的实际结果」）
 │  │  ├─ MainWindow.swift      历史 + 设置
 │  │  ├─ GitpicRunner.swift    进程调用 + JSON 解码 + 串行队列
 │  │  ├─ ToolDiscovery.swift   gh 发现（§3）
@@ -236,7 +238,7 @@ gitpic-cli/
 - **人工验收清单**（无法自动化的部分，逐条勾）：
   - ~~M1：从 Finder 启动 app，拖一个 png 到刘海落区~~ → 搁置，见 §9
   - Finder 启动下 `gh` 解析成功（这是 C1 的回归点）
-  - 无刘海外接屏 / 多屏切换下面板定位正确（仅在打开 `NotchDropZone` 时相关）
+  - ~~无刘海外接屏 / 多屏切换下面板定位正确~~（刘海面板已删除，不再适用）
   - 菜单栏 popover 落区可用（C2 的兜底路径）
 - **菜单对齐**：`NSMenuItem` 按图片自身尺寸绘制，SF Symbol 每个字形的包围盒都不一样
   （本菜单六个符号在 2x 下 21–28 px 宽、19–25 px 高），所以每个符号都要居中画进同一个
@@ -259,16 +261,26 @@ gitpic-cli/
 
 M1 原本排在功能之前——它是唯一一个失败就要改设计的里程碑（兜底见 §4.3）。
 
-**M1 的实际结果：搁置，未验证。** `NotchPanel.swift` 和 C2 那批实测结论都留在树里，但
-面板默认不再启动（`defaults write dev.gitpic.app NotchDropZone -bool true` 打开）。原因
-是验收动作本身做不到：合成一次真实的 Finder→面板拖拽需要辅助功能授权下的 CGEvent 拖拽
-序列，我没做出来，而 §4.3 已经说明这一条只能人手验。
+**M1 的实际结果：刘海方案放弃，落区改到菜单栏图标上（上面三个选项里的第 1 个）。**
 
-**连带后果**：刘海摘掉后 app 没有任何拖拽落区了——`NSMenu` 的菜单项不能收拖拽。当前只
-有「上传剪贴板图片」和「选择文件上传…」两条路。要补回拖拽，三个选项，工作量差别很大：
+刘海面板搁置的原因是验收动作本身做不到：合成一次真实的 Finder→面板拖拽需要辅助功能授权
+下的 CGEvent 拖拽序列，我没做出来，而 §4.3 已经说明这一条只能人手验。`NotchPanel.swift`
+与 `NotchShape.swift` 已删除；C2 / C3 那两条实测结论保留在本文 §C2、§C3，它们仍然有效，
+并且 §C3（`.accessory` app 必须 `acceptsFirstMouse = true`）对新落区同样适用。
 
-1. 拖到菜单栏图标上（`statusItem.button` 注册 `registerForDraggedTypes`）——最省，且不
-   受 C2 约束，因为那个 button 归系统管。
-2. §4.1 的菜单栏 popover 里放落区——原计划的兜底路径，必然可用，但要写 popover。
-3. 暂时不做拖拽。
+**选项 1 已实测通过**，探针在真机上验的（ad-hoc 签名、`.accessory`、菜单已挂在
+`statusItem.menu` 上）：
+
+- 往 `statusItem.button` 上 `addSubview` 一个注册了 `.fileURL` 的 `NSView`，真实 Finder
+  拖拽能收到 `draggingEntered` 与 `performDragOperation`；
+- **同时**点击图标仍然弹出菜单（`menuWillOpen` 照常触发）。
+
+两件事同时成立的前提是**不要覆写 `hitTest`**。`NotchDropView` 当年那个「把所有事件留给
+自己」的 `hitTest` 用在这里会吃掉点击，图标就再也打不开菜单了。
+
+不受 C2 约束的原因确认成立：那个 button 属于系统自己的 status bar window，所以菜单栏保留
+区吞掉的事件，它的子视图收得到。
+
+**另一条实测**：`draggingUpdated` 触发极密（一秒悬停约 78 次），落区必须在
+`draggingEntered` 里把判断结果缓存下来，不能每次重读剪贴板。
 

@@ -109,13 +109,6 @@ final class AppModel {
         post(nil, from: author)
     }
 
-    /// Drop `text` only while it is still the message on screen, so a reset timer
-    /// firing late cannot erase a newer message that replaced it.
-    func clearStatus(_ text: String?, from author: StatusAuthor) {
-        guard statusAuthor == author, statusLine == text else { return }
-        post(nil, from: author)
-    }
-
     private func beginWork() {
         inflight += 1
         busy = true
