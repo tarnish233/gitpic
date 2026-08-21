@@ -4,7 +4,23 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.9.0] - 2026-08-21
+
+### 「链接格式」其实是两个选择
+
+这一版还是 app 侧的。CLI 一行未改，版本号跟着走是 0.6.0 起「一个版本、一个 Release」的结果。
+
+菜单里那个四选一的「链接格式」——Markdown / HTML / CDN URL / Raw URL——看着像一组备选项，
+其实是把两件互不相干的事挤在了一个下拉框里：**snippet 用什么语法包裹**，和**链接指向哪个
+主机**。CLI 从一开始就是两个独立的 flag（`--format` × `--link`），app 这边却塌成了一个。
+
+代价是实打实的两条。六种组合里有两种根本没有入口，「Markdown 包裹 raw 链接」选不出来；而历史
+面板的「CDN URL」直接返回 `record.url`，也就是 `upload.link_kind` 恰好选中的那个地址——所以
+配置成 `raw` 时，它在一个写着 CDN 的标签下交回一条 `raw.githubusercontent.com` 链接。
+
+现在是两个各自独立的维度，六种组合都能选，而且切换不会重新上传。顺带把 `src/link.rs` 移植到
+了 Swift，因为信封里只有一个地址；转义规则一起移植，历史面板原先用裸插值拼 Markdown，文件名
+里一个 `]` 就能拼出坏链接。
 
 ### App
 
@@ -707,7 +723,8 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.8.0...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.9.0
 [0.8.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.8.0
 [0.7.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.7.0
 [0.6.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.6.0
