@@ -48,7 +48,7 @@ struct UploadReportTests {
     func singleSuccess() {
         let r = UploadPresentation.report(results: [result(name: "a.png")],
                                          failure: nil,
-                                         clipboardWritten: true,
+                                         clipboard: .written,
                                          form: LinkForm())
         #expect(r == .succeeded(summary: "已复制 Markdown · CDN"))
     }
@@ -58,17 +58,17 @@ struct UploadReportTests {
         // The pair that had no representation at all before syntax and address were
         // split: Markdown wrapping the raw URL.
         let markdownRaw = UploadPresentation.report(
-            results: [result(name: "a.png")], failure: nil, clipboardWritten: true,
+            results: [result(name: "a.png")], failure: nil, clipboard: .written,
             form: LinkForm(syntax: .markdown, target: .raw))
         #expect(markdownRaw == .succeeded(summary: "已复制 Markdown · Raw"))
 
         let htmlRaw = UploadPresentation.report(
-            results: [result(name: "a.png")], failure: nil, clipboardWritten: true,
+            results: [result(name: "a.png")], failure: nil, clipboard: .written,
             form: LinkForm(syntax: .html, target: .raw))
         #expect(htmlRaw == .succeeded(summary: "已复制 HTML · Raw"))
 
         let plainCDN = UploadPresentation.report(
-            results: [result(name: "a.png")], failure: nil, clipboardWritten: true,
+            results: [result(name: "a.png")], failure: nil, clipboard: .written,
             form: LinkForm(syntax: .url, target: .cdn))
         #expect(plainCDN == .succeeded(summary: "已复制 纯链接 · CDN"))
     }
@@ -77,7 +77,7 @@ struct UploadReportTests {
     func deduped() {
         let r = UploadPresentation.report(results: [result(name: "a.png", deduped: true)],
                                          failure: nil,
-                                         clipboardWritten: true,
+                                         clipboard: .written,
                                          form: LinkForm())
         #expect(r == .succeeded(summary: "已复制 Markdown · CDN（1 张已存在）"))
     }
@@ -87,7 +87,7 @@ struct UploadReportTests {
         let r = UploadPresentation.report(results: [result(name: "a.png"),
                                                    result(name: "b.png")],
                                          failure: nil,
-                                         clipboardWritten: true,
+                                         clipboard: .written,
                                          form: LinkForm())
         #expect(r == .succeeded(summary: "2 张已复制"))
     }
@@ -97,7 +97,7 @@ struct UploadReportTests {
         let r = UploadPresentation.report(results: [result(name: "a.png")],
                                          failure: ErrorBody(code: "NETWORK",
                                                             message: "b.png: reset"),
-                                         clipboardWritten: true,
+                                         clipboard: .written,
                                          form: LinkForm())
         #expect(r == .failed(summary: "1 张成功，之后失败：NETWORK"))
     }
@@ -108,16 +108,37 @@ struct UploadReportTests {
         // Saying "已复制" here would send the user to paste stale content.
         let r = UploadPresentation.report(results: [result(name: "a.png")],
                                          failure: nil,
-                                         clipboardWritten: false,
+                                         clipboard: .failed,
                                          form: LinkForm())
         #expect(r == .failed(summary: "上传成功，但写剪贴板失败。链接在「最近上传」里"))
+    }
+
+    @Test("auto_copy off is neither a copy nor a broken promise, and says where the link is")
+    func clipboardSuppressed() {
+        // The app honours `upload.auto_copy` itself, because it speaks to the CLI in
+        // `--json` and that mode never writes the clipboard. So this outcome is the
+        // switch working: report the upload as the success it is, without claiming a
+        // copy the user cannot paste — and without the 「写剪贴板失败」 line, which
+        // would turn a setting into a bug report.
+        let r = UploadPresentation.report(results: [result(name: "a.png")],
+                                          failure: nil,
+                                          clipboard: .suppressed,
+                                          form: LinkForm())
+        #expect(r == .succeeded(summary: "1 张已上传，未自动复制。链接在「最近上传」里"))
+
+        // The dedup note is not a property of copying, so it survives here too.
+        let deduped = UploadPresentation.report(
+            results: [result(name: "a.png", deduped: true)], failure: nil,
+            clipboard: .suppressed, form: LinkForm())
+        #expect(deduped == .succeeded(
+            summary: "1 张已上传（1 张已存在），未自动复制。链接在「最近上传」里"))
     }
 
     @Test("no results is a failure, not an empty success")
     func emptyResults() {
         let r = UploadPresentation.report(results: [],
                                          failure: nil,
-                                         clipboardWritten: true,
+                                         clipboard: .written,
                                          form: LinkForm())
         #expect(r == .failed(summary: "上传没有返回任何结果"))
     }
@@ -127,7 +148,7 @@ struct UploadReportTests {
         let r = UploadPresentation.report(results: [],
                                          failure: ErrorBody(code: "CONFIG_MISSING",
                                                             message: "no credential"),
-                                         clipboardWritten: true,
+                                         clipboard: .written,
                                          form: LinkForm())
         #expect(r == .failed(summary: "CONFIG_MISSING：no credential"))
     }

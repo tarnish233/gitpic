@@ -551,11 +551,12 @@ struct UploadPane: View {
                     .toggleStyle(.switch)
                     Toggle(isOn: draft.upload.autoCopy) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("自动复制到剪贴板（仅 CLI）")
-                            // Stated rather than quietly ignored: the flag is real,
-                            // it just cannot affect this app.
-                            Text("对 App 无效——App 走 --json，CLI 在该模式下从不写剪贴板，"
-                                 + "复制由 App 自己完成。改这项只影响你在终端里直接用 gitpic。")
+                            Text("自动复制到剪贴板")
+                            // No longer labelled 仅 CLI. The app performs the copy
+                            // itself — `--json` never writes the clipboard — but it
+                            // now reads this key first, so one switch covers both.
+                            Text("上传成功后把链接写进剪贴板。App 和终端里的 gitpic 都听这一项；"
+                                 + "关掉之后链接仍然在「最近上传」和「历史」里，随时能手动复制。")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
