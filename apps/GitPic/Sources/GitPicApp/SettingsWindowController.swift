@@ -1,17 +1,17 @@
 import AppKit
 import SwiftUI
 
-/// The main window, created as an `NSWindow` rather than a SwiftUI `Window`
+/// The settings window, created as an `NSWindow` rather than a SwiftUI `Window`
 /// scene: `.fullSizeContentView` has to be in the style mask at creation time for
 /// macOS 26 to render the liquid-glass chrome, and a SwiftUI scene does not
 /// expose it.
 @MainActor
-final class MainWindowController: NSWindowController, NSWindowDelegate {
-    private static var shared: MainWindowController?
+final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+    private static var shared: SettingsWindowController?
 
-    static func show(tab: MainTab? = nil) {
-        if let tab { MainNavigation.shared.selectedTab = tab }
-        if shared == nil { shared = MainWindowController() }
+    static func show(tab: SettingsTab? = nil) {
+        if let tab { SettingsNavigation.shared.selectedTab = tab }
+        if shared == nil { shared = SettingsWindowController() }
         shared?.showWindow(nil)
     }
 
@@ -23,15 +23,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false)
         super.init(window: window)
-        window.title = "GitPic"
+        window.title = "设置"
         window.titleVisibility = .visible
         window.toolbarStyle = .automatic
         window.isMovableByWindowBackground = true
+        // The old spelling on purpose: this is a defaults key ("NSWindow Frame
+        // GitPicMainWindow"), not a name anyone reads. Renaming it to match the
+        // type would forget the size and position of every window already out
+        // there, which is a real cost for zero benefit.
         window.setFrameAutosaveName("GitPicMainWindow")
         window.minSize = NSSize(width: 680, height: 480)
         window.center()
         window.delegate = self
-        window.contentViewController = NSHostingController(rootView: MainWindowView())
+        window.contentViewController = NSHostingController(rootView: SettingsWindowView())
         // Open showing the form, not editing it.
         //
         // AppKit hands initial focus to the first view in the key-view loop when a

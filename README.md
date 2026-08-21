@@ -64,7 +64,7 @@ cargo install --path .
 `GitPic-<版本>-macos-arm64.zip`。它和 CLI 同版本，并且内嵌了同一版本的 `gitpic`，所以装了
 App 不必再单独装 CLI（反之也不必装 App）。
 
-从菜单栏图标上传剪贴板图片或选文件，链接自动进剪贴板；主窗口可以改图床仓库、上传设置，看历史。
+从菜单栏图标上传剪贴板图片或选文件，链接自动进剪贴板；设置窗口可以改图床仓库和上传选项，看历史。
 
 ```bash
 unzip GitPic-<版本>-macos-arm64.zip -d /Applications/
