@@ -99,9 +99,23 @@ pub struct Cli {
 }
 
 impl Cli {
-    /// The output format to actually use.
-    pub fn effective_format(&self) -> OutputFormat {
-        self.format.unwrap_or(OutputFormat::Md)
+    /// The output format to actually use: the flag if given, else the config's
+    /// `upload.format`.
+    ///
+    /// The flag stays an `Option` for the reason its own doc comment gives — "the
+    /// user asked for md" has to stay distinguishable from "nobody said anything" —
+    /// and this is where that distinction is spent: only the second case falls
+    /// through to the file.
+    ///
+    /// The final `unwrap_or` is unreachable through any supported path, because
+    /// `Config::validate` rejects a format it cannot parse before a config is ever
+    /// handed out. It is here rather than an `expect` because a panic is not a
+    /// defensible answer to a config file, and Markdown is what every version before
+    /// this key existed produced.
+    pub fn effective_format(&self, cfg: &crate::config::Config) -> OutputFormat {
+        self.format
+            .or_else(|| crate::link::parse_output_format_strict(&cfg.upload.format))
+            .unwrap_or(OutputFormat::Md)
     }
 
     /// Which upload-only options this invocation actually set.
@@ -372,9 +386,23 @@ mod tests {
         // md must still be what an unadorned upload produces.
         let cli = Cli::try_parse_from(["gitpic", "a.png"]).unwrap();
         assert_eq!(cli.format, None);
-        assert_eq!(cli.effective_format(), OutputFormat::Md);
+        assert_eq!(
+            cli.effective_format(&crate::config::Config::default()),
+            OutputFormat::Md
+        );
         let explicit = Cli::try_parse_from(["gitpic", "a.png", "-f", "url"]).unwrap();
-        assert_eq!(explicit.effective_format(), OutputFormat::Url);
+        assert_eq!(
+            explicit.effective_format(&crate::config::Config::default()),
+            OutputFormat::Url
+        );
+
+        // With no flag, the file decides — and with a flag, the file does not get a
+        // say. Both directions, because the whole value of `format` being an
+        // `Option` is that these two cases stay separable.
+        let mut cfg = crate::config::Config::default();
+        cfg.upload.format = "html".to_string();
+        assert_eq!(cli.effective_format(&cfg), OutputFormat::Html);
+        assert_eq!(explicit.effective_format(&cfg), OutputFormat::Url);
     }
 
     #[test]

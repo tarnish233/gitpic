@@ -138,6 +138,22 @@ pub fn parse_link_kind_strict(s: &str) -> Option<LinkKind> {
     }
 }
 
+/// Parse an output format, rejecting anything unrecognized.
+///
+/// The same reason `parse_link_kind_strict` exists: `upload.format` is now a config
+/// key, and a value the reader silently defaulted to Markdown would make
+/// `config set upload.format htlm` report success and then hand back Markdown
+/// forever. The three spellings are exactly clap's `OutputFormat` value names, so
+/// the file and the `--format` flag cannot disagree about what "html" means.
+pub fn parse_output_format_strict(s: &str) -> Option<OutputFormat> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "md" => Some(OutputFormat::Md),
+        "html" => Some(OutputFormat::Html),
+        "url" => Some(OutputFormat::Url),
+        _ => None,
+    }
+}
+
 /// jsDelivr encodes the ref as `repo@branch/path`, so a branch containing `/`
 /// makes the boundary between branch and path ambiguous. Raw GitHub URLs are
 /// unaffected.

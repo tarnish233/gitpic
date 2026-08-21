@@ -17,7 +17,7 @@ struct LinkTests {
     static let config = GitpicConfig(
         github: .init(owner: "o", repo: "r", branch: "main"),
         upload: .init(pathTemplate: "images/{year}/{month}/{hash8}-{name}.{ext}",
-                      linkKind: "cdn", dedup: true, autoCopy: true,
+                      format: "md", linkKind: "cdn", dedup: true, autoCopy: true,
                       compress: false, maxWidth: 0, quality: 82))
 
     // MARK: - URLs
@@ -202,10 +202,43 @@ struct LinkTests {
         #expect(LinkForm() == LinkForm(syntax: .markdown, target: .cdn))
     }
 
+    /// The bridge the whole "config is the single answer" design rests on: what the
+    /// file says is what the app copies, and what the app writes is what the file
+    /// gets. A one-way mapping would let the window display one form and copy another.
+    @Test("a config round-trips through LinkForm and back")
+    func configRoundTrip() {
+        for syntax in LinkSyntax.allCases {
+            for target in LinkTarget.allCases {
+                let form = LinkForm(syntax: syntax, target: target)
+                let written = form.applied(to: Self.config)
+                #expect(written.upload.format == syntax.rawValue)
+                #expect(written.upload.linkKind == target.rawValue)
+                // Read back out, it is the same point in the grid.
+                #expect(LinkForm(config: written) == form)
+                // And nothing else moved: `applied(to:)` is not a config rewrite.
+                #expect(changedKeys(from: Self.config, to: written)
+                        .allSatisfy { $0 == .format || $0 == .linkKind })
+            }
+        }
+    }
+
+    /// Not laxness — `Config::validate` refuses both keys before the app sees them, so
+    /// a fallback means the app is holding something the CLI would have rejected.
+    /// Markdown · CDN is what every version before these keys existed produced.
+    @Test("a config the CLI would have refused falls back instead of crashing")
+    func unparsableConfigFallsBack() {
+        var broken = Self.config
+        broken.upload.format = "htlm"
+        broken.upload.linkKind = "raw2"
+        #expect(LinkForm(config: broken) == LinkForm(syntax: .markdown, target: .cdn))
+    }
+
     @Test("raw values are the CLI's own spellings, since they cross that boundary")
     func rawValues() {
-        // `upload.link_kind` is written with these, and `--format` reads these.
+        // `upload.link_kind` is written with these, `upload.format` with those, and
+        // `--link` / `--format` read the same spellings. `markdown` is the Swift case
+        // name; `md` is what crosses the boundary.
         #expect(LinkTarget.allCases.map(\.rawValue) == ["cdn", "raw"])
-        #expect(LinkSyntax.allCases.map(\.rawValue) == ["markdown", "html", "url"])
+        #expect(LinkSyntax.allCases.map(\.rawValue) == ["md", "html", "url"])
     }
 }

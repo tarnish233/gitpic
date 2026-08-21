@@ -41,87 +41,162 @@ final class MainNavigation {
     private init() {}
 }
 
+/// The window: a sidebar, one pane at a time, and a toolbar.
+///
+/// **No bottom bar, deliberately.** It used to carry a status line and the
+/// 保存/放弃 pair. The line is gone rather than moved: an outcome is an event, this
+/// window is usually shut when one happens, and Notification Center is where the
+/// app already reported uploads — two surfaces saying the same thing meant the
+/// bottom one was mostly stale. What the line *did* uniquely carry, a failed config
+/// read, is now stated in the pane that owns it, next to the buttons that fix it,
+/// instead of as one truncated line of `undecodable(status: 10, raw: …)` at the
+/// bottom of the window. The buttons moved to the toolbar.
+///
+/// The cost is stated because it is real: with notification permission denied,
+/// outcomes reach only `~/Library/Logs/GitPic.log` — see `AppModel.notify`.
 struct MainWindowView: View {
     @State private var navigation = MainNavigation.shared
     @State private var model = AppModel.shared
+
+    /// Visited panes, oldest first, and where in that list we currently are.
+    ///
+    /// Held here rather than in `MainNavigation` because it is a property of *this
+    /// window*: close it and the history is spent, the same way System Settings
+    /// starts over. `MainNavigation.selectedTab` outlives the window — the status
+    /// item's 连通性测试 sets it before the window exists — and mixing the two
+    /// would record a jump nobody made.
+    @State private var history: [MainTab] = [.host]
+    @State private var historyIndex = 0
+    /// Suppresses recording while back/forward is what moved the selection —
+    /// otherwise stepping back appends the pane just left, and the two buttons
+    /// walk in a circle instead of walking a history.
+    @State private var steppingThroughHistory = false
 
     private var activeTab: MainTab { navigation.selectedTab ?? .host }
 
     var body: some View {
         NavigationSplitView(columnVisibility: .constant(.all)) {
-            List(MainTab.allCases, selection: $navigation.selectedTab) { tab in
-                Label(tab.title, systemImage: tab.systemImage)
-                    .foregroundStyle(.primary)
-                    .tag(tab)
-            }
-            .listStyle(.sidebar)
-            .scrollEdgeEffectStyleSoftIfAvailable()
-            .navigationTitle("GitPic")
-            .frame(width: 190)
-            .navigationSplitViewColumnWidth(min: 190, ideal: 190, max: 190)
-            .toolbar(removing: .sidebarToggle)
+            sidebar
         } detail: {
             detail
         }
-        .navigationTitle("GitPic")
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 680, minHeight: 480)
         // A toolbar is what forces NSToolbar to exist, which the liquid-glass
-        // title bar treatment depends on.
+        // title bar treatment depends on. It is also where 保存 lives, now that the
+        // window has no bottom bar to put it in.
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            // Leading, where the platform puts navigation: the sidebar can reach any
+            // pane in one click, so these are for retracing — the same role they play
+            // in System Settings, and the reason they are `.navigation` rather than
+            // two more buttons crowded in beside 保存.
+            ToolbarItemGroup(placement: .navigation) {
+                Button { step(-1) } label: { Image(systemName: "chevron.left") }
+                    .disabled(historyIndex == 0)
+                    .help(historyIndex == 0 ? "没有上一个" : "回到\(history[historyIndex - 1].title)")
+                Button { step(1) } label: { Image(systemName: "chevron.right") }
+                    .disabled(historyIndex >= history.count - 1)
+                    .help(historyIndex >= history.count - 1
+                          ? "没有下一个" : "前往\(history[historyIndex + 1].title)")
+            }
+
+            ToolbarItemGroup(placement: .primaryAction) {
+                // The bar's spinner, in the one place still worth having it: a save
+                // writes one `gitpic` process per changed key, so "nothing is
+                // happening" and "ten processes are queued" need telling apart.
+                if model.busy { ProgressView().controlSize(.small) }
+
                 Button { Task { await model.reload() } } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .disabled(model.busy)
                 .help("重新读取配置与历史")
-            }
-        }
-        .safeAreaInset(edge: .bottom) { statusBar }
-    }
 
-    @ViewBuilder private var detail: some View {
-        switch activeTab {
-        case .host:    HostPane(model: model)
-        case .upload:  UploadPane(model: model)
-        case .history: HistoryPane(model: model)
-        case .about:   AboutPane(model: model)
-        }
-    }
-
-    @ViewBuilder private var statusBar: some View {
-        let dirty = model.dirtyKeys
-        let text = model.statusLine ?? (dirty.isEmpty ? nil : "\(dirty.count) 项未保存")
-        // On a config pane the bar is unconditional, because that is where 保存 lives
-        // and a button that only appears once you have already changed something
-        // cannot tell you that clicking it is how a change gets written. The panes
-        // that save nothing keep it transient — a status line and nothing else.
-        if activeTab.savesConfig || text != nil || model.busy {
-            HStack(spacing: 10) {
-                if model.busy { ProgressView().controlSize(.small) }
-                if let text {
-                    Text(text)
-                        .font(.callout)
-                        .foregroundStyle(model.statusLine == nil ? .secondary : .primary)
-                        .lineLimit(2)
-                }
-                Spacer()
                 if activeTab.savesConfig {
-                    // Both stay put and go dim rather than appearing and
-                    // disappearing: a bar that changes width as you type moves the
-                    // button out from under the pointer.
+                    // Present on every config pane whether or not anything is dirty,
+                    // for the reason the bottom bar had them unconditionally: a
+                    // button that only appears once you have changed something cannot
+                    // teach you that clicking it is how a change gets written.
                     Button("放弃") { model.revert() }
-                        .disabled(dirty.isEmpty || model.busy)
+                        .disabled(model.dirtyKeys.isEmpty || model.busy)
                     Button("保存") { Task { await model.save() } }
                         .keyboardShortcut("s")
                         .buttonStyle(.borderedProminent)
-                        .disabled(dirty.isEmpty || model.busy)
+                        .disabled(model.dirtyKeys.isEmpty || model.busy)
+                        // Which keys, since there is no longer a line of text saying
+                        // "N 项未保存".
+                        .help(model.dirtyKeys.isEmpty
+                              ? "没有改动"
+                              : "保存 \(model.dirtyKeys.count) 项："
+                                + model.dirtyKeys.map(\.rawValue).joined(separator: ", "))
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(.bar)
         }
+        .onChange(of: navigation.selectedTab) { _, _ in recordVisit() }
+    }
+
+    // MARK: - Sidebar
+
+    @ViewBuilder private var sidebar: some View {
+        List(selection: $navigation.selectedTab) {
+            ForEach(MainTab.allCases) { tab in
+                Label(tab.title, systemImage: tab.systemImage)
+                    .foregroundStyle(.primary)
+                    .tag(tab)
+            }
+        }
+        .listStyle(.sidebar)
+        .scrollEdgeEffectStyleSoftIfAvailable()
+        .navigationTitle("GitPic")
+        .frame(width: 200)
+        .navigationSplitViewColumnWidth(min: 200, ideal: 200, max: 200)
+        .toolbar(removing: .sidebarToggle)
+    }
+
+    // MARK: - Detail
+
+    @ViewBuilder private var detail: some View {
+        Group {
+            switch activeTab {
+            case .host:    HostPane(model: model)
+            case .upload:  UploadPane(model: model)
+            case .history: HistoryPane(model: model)
+            case .about:   AboutPane(model: model)
+            }
+        }
+        // The window title follows the pane, the way a settings window's does. The
+        // sidebar's own `.navigationTitle("GitPic")` is what the app is called; this
+        // is what you are looking at.
+        .navigationTitle(activeTab.title)
+        // Top-left, explicitly. A pane whose content is shorter than the window gets
+        // centred by the detail column otherwise — which is exactly how the history
+        // pane's format switcher ended up floating halfway down the window. Fixing it
+        // per-pane leaves the next pane to rediscover it.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    // MARK: - Navigation history
+
+    private func step(_ delta: Int) {
+        let target = historyIndex + delta
+        guard history.indices.contains(target) else { return }
+        steppingThroughHistory = true
+        historyIndex = target
+        navigation.selectedTab = history[target]
+        // Cleared in a later turn than the `onChange` this assignment triggers, which
+        // is the whole point: clearing it here would let `recordVisit` see `false`
+        // and append the pane we just stepped to.
+        Task { @MainActor in steppingThroughHistory = false }
+    }
+
+    private func recordVisit() {
+        guard !steppingThroughHistory, let tab = navigation.selectedTab else { return }
+        guard history[historyIndex] != tab else { return }
+        // Anything ahead of here was reached by going back; a new choice replaces that
+        // future rather than being spliced into it.
+        history = Array(history.prefix(historyIndex + 1))
+        history.append(tab)
+        historyIndex = history.count - 1
     }
 }
 
@@ -149,15 +224,30 @@ extension View {
     }
 }
 
-/// Shown in the host and upload panes until the config arrives.
+/// Shown in the host and upload panes when there is no config to edit — and, when
+/// the cause is a file the CLI will not parse, the way out of it.
 ///
-/// Three states, not two. `loadFailed` alone left the worst case unrepresented:
+/// Four states, not two. A bare `loadFailed` flag left two of them unrepresented:
 /// while tool discovery is still running `reload()` returns early without ever
 /// setting it, so this sat on "读取配置中…" indefinitely with a retry button that
 /// could not appear — and when discovery *failed* it said the same thing about a
 /// config that was never going to be read at all.
-private struct ConfigPlaceholder: View {
+///
+/// The fourth is the one that made this pane useless in practice. "读取配置失败。"
+/// plus 重试 is a dead end for the failure people actually have: a config file
+/// carried over from before 0.5.0 still has `github.token` in it, which the CLI
+/// refuses for good reason and will keep refusing however many times 重试 is
+/// pressed. The CLI names the file and the offending key; showing that, and offering
+/// the one action that changes the answer, is the difference between a diagnosis and
+/// a shrug.
+private struct ConfigTrouble: View {
     var model: AppModel
+    /// Whether this pane owns the repair. The host pane does — it is where the config
+    /// is edited — and the upload pane points at it instead of growing a second copy
+    /// of the same buttons.
+    let repairs: Bool
+
+    @State private var confirmingRebuild = false
 
     var body: some View {
         switch model.toolState {
@@ -169,17 +259,75 @@ private struct ConfigPlaceholder: View {
                     .foregroundStyle(.secondary)
             }
         case .ready:
-            if model.loadFailed {
+            if let failure = model.configFailure {
                 Section {
-                    Text("读取配置失败。")
-                        .foregroundStyle(.secondary)
-                    Button("重试") { Task { await model.reload() } }
+                    Label(failure.headline, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    reason(failure)
+                    actions(failure)
                 }
             } else {
                 Section { Text("读取配置中…").foregroundStyle(.secondary) }
             }
         }
     }
+
+    /// The CLI's own words, verbatim.
+    ///
+    /// Not paraphrased and not truncated: the message already names the file and the
+    /// key that broke it, which is more than any sentence written here could say. It
+    /// is also safe to show — `src/config.rs` pins that a rejected `github.token`
+    /// is reported without echoing its value, so a real credential cannot ride along.
+    @ViewBuilder private func reason(_ failure: ConfigFailure) -> some View {
+        if let code = failure.code {
+            LabeledContent("错误码") {
+                Text(code).font(.caption.monospaced()).textSelection(.enabled)
+            }
+        }
+        Text(failure.message)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+        if let path = model.configPath {
+            LabeledContent("配置文件") {
+                Text(path.path).font(.caption).textSelection(.enabled)
+            }
+        }
+    }
+
+    @ViewBuilder private func actions(_ failure: ConfigFailure) -> some View {
+        HStack(spacing: 8) {
+            Button("重试") { Task { await model.reload() } }
+                .disabled(model.busy)
+            if let path = model.configPath,
+               FileManager.default.fileExists(atPath: path.path) {
+                Button("在 Finder 中显示") {
+                    NSWorkspace.shared.activateFileViewerSelecting([path])
+                }
+            }
+            if repairs, failure.isFileUnusable {
+                Button("备份并重建…") { confirmingRebuild = true }
+                    .disabled(model.busy)
+            }
+            if !repairs {
+                Button("去「图床」处理") { MainNavigation.shared.selectedTab = .host }
+            }
+        }
+        .controlSize(.small)
+        .alert("把这个配置文件移开？", isPresented: $confirmingRebuild) {
+            Button("备份并重建") { Task { await model.rebuildConfig() } }
+            Button("取消", role: .cancel) {}
+        } message: {
+            // Says what will be lost before it is lost. The rebuilt config is the
+            // CLI's defaults, so the old repo target has to be typed again — and the
+            // file it came from is still there to read it out of.
+            Text("原文件会改名保留在同一个目录里（\(name).broken-…），不会删除。"
+                 + "之后这里是一份空白配置：Owner / Repo / Branch 要重新填一次，"
+                 + "旧值可以从备份文件里抄回来。")
+        }
+    }
+
+    private var name: String { model.configPath?.lastPathComponent ?? "config.toml" }
 }
 
 /// One editable text row in a grouped form.
@@ -234,8 +382,41 @@ struct HostPane: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                // A blank form is not self-explanatory, and it is now reachable two
+                // ways: a machine that never ran `gitpic init` (a missing file reads
+                // back as the CLI's defaults, not as an error), and one that just
+                // used 备份并重建 above. Neither said what to do next, and 保存 is no
+                // longer a button sitting at the bottom of the window where an empty
+                // field could be seen next to it.
+                if isUnconfigured(draft.wrappedValue) {
+                    Section {
+                        Label("还没配置图床", systemImage: "exclamationmark.circle")
+                        Text("填好 Owner 和 Repo，再按右上角的「保存」写进配置文件。"
+                             + "凭据不在这里配 —— gitpic 只从 `gh auth token` 取，"
+                             + "所以需要先 `gh auth login`。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                // Only after a rebuild, and it outlives the failure that caused it on
+                // purpose: `ConfigTrouble` disappears the moment the read succeeds, so
+                // if this hint lived there the backup's name would vanish at exactly
+                // the moment the user needs to go read values out of it.
+                if let backup = model.configBackup {
+                    Section {
+                        Label("旧配置已备份", systemImage: "arrow.uturn.backward.circle")
+                        Text("原文件是 \(backup.lastPathComponent)，就在同一个目录里。"
+                             + "上面的三项要重新填一次，旧值可以从它里面抄。")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("在 Finder 中显示备份") {
+                            NSWorkspace.shared.activateFileViewerSelecting([backup])
+                        }
+                        .controlSize(.small)
+                    }
+                }
             } else {
-                ConfigPlaceholder(model: model)
+                ConfigTrouble(model: model, repairs: true)
             }
 
             Section("连通性") {
@@ -250,6 +431,13 @@ struct HostPane: View {
                         Text("\(e.code)：\(e.message)")
                             .font(.caption).foregroundStyle(.orange)
                     }
+                } else if let failure = model.doctorFailure {
+                    // The test could not be run at all — distinct from a report that
+                    // came back unhealthy, which is the branch above. This used to go
+                    // to the status line at the bottom of the window, two panes away
+                    // from the button that caused it.
+                    Text("测试没跑起来：\(failure)")
+                        .font(.caption).foregroundStyle(.orange).textSelection(.enabled)
                 } else {
                     // Says what the button will do before it is pressed. The three
                     // probes behind it are all GET (`/user`, the repo, the branch),
@@ -258,6 +446,7 @@ struct HostPane: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Button("连通性测试") { Task { await model.runDoctor() } }
+                    .controlSize(.small)
                     .disabled(model.busy)
             }
         }
@@ -266,6 +455,16 @@ struct HostPane: View {
 
     private func row(_ label: String, _ prompt: String, _ text: Binding<String>) -> some View {
         ConfigField(label: label, prompt: prompt, text: text)
+    }
+
+    /// Whether this config could not upload anything yet.
+    ///
+    /// Either half missing is enough: `require_target` in `src/config.rs` refuses an
+    /// empty owner and an empty repo alike, so a half-filled form is exactly as
+    /// unusable as a blank one and must not look settled.
+    private func isUnconfigured(_ c: GitpicConfig) -> Bool {
+        c.github.owner.trimmingCharacters(in: .whitespaces).isEmpty
+            || c.github.repo.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     private func mark(_ b: Bool?) -> some View {
@@ -292,25 +491,52 @@ struct UploadPane: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
+                // Everything about "what link do I get" in one section. The two
+                // live-together axes were in the history pane until now, one pane away
+                // from the only other row naming the same idea.
+                //
+                // Two independent dimensions, because that is what they are: any syntax
+                // can address either host. The flat four-case picker these replaced
+                // listed Markdown / HTML / CDN URL / Raw URL as if they were
+                // alternatives, which left two of the six combinations unreachable.
+                //
+                // One picker per row, and no `.fixedSize()`: two segmented controls in
+                // one Form row plus the row's label column pushed the content to 920pt
+                // inside a 680pt window — measured — squeezing the sidebar to a sliver.
+                //
+                // Two config rows, not app-local state: these bind to
+                // `upload.format` and `upload.link_kind` through the draft, so they are
+                // written by the toolbar's 保存 and reverted by 放弃 like every other
+                // setting on this pane. There used to be a third row here — a separate
+                // "CLI 默认地址" for `upload.link_kind` — with a caption admitting it had
+                // no effect on the app. Two controls for the same idea, one of which
+                // disclaimed itself, is what got collapsed: the app now copies what the
+                // config says, so there is one address and one place to set it.
+                //
+                // Tagged by `rawValue` rather than by the enum, because the draft holds
+                // the config's strings and those strings are the CLI's own spellings
+                // (`md`/`html`/`url`, `cdn`/`raw` — see `LinkSyntax`).
                 Section("链接") {
-                    // One axis, named as one: this key is `upload.link_kind`, which
-                    // picks the *host*. It has nothing to say about Markdown vs
-                    // HTML — that is `--format`, the other axis — and labelling it
-                    // "形态" alongside a four-way Markdown/HTML/CDN/Raw switcher was
-                    // what made the two look like one choice.
-                    Picker("默认地址", selection: draft.upload.linkKind) {
-                        ForEach(LinkTarget.allCases) { t in
-                            Text(t.detailedLabel).tag(t.rawValue)
-                        }
+                    Picker("格式", selection: draft.upload.format) {
+                        ForEach(LinkSyntax.allCases) { Text($0.label).tag($0.rawValue) }
                     }
-                    .pickerStyle(.menu)
-                    Text("这项只决定 CLI 默认用哪个地址。App 的两个维度各自独立：菜单里的"
-                         + "「链接格式」选 Markdown / HTML / 纯链接，「图片地址」选 CDN / Raw，"
-                         + "任意组合都不会重新上传。")
+                    .pickerStyle(.segmented)
+                    Picker("地址", selection: draft.upload.linkKind) {
+                        ForEach(LinkTarget.allCases) { Text($0.label).tag($0.rawValue) }
+                    }
+                    .pickerStyle(.segmented)
+                    Text("配置文件里的 `upload.format` 与 `upload.link_kind`，改完按右上角"
+                         + "「保存」才生效 —— 状态栏菜单里改这两项是即时写入。App 复制的 snippet"
+                         + "和终端里 gitpic 的默认值都取它们；六种组合任意切换都不会重新上传，"
+                         + "命令行的 `-f` / `--link` 仍可临时覆盖。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
                 Section("行为") {
+                    // `.switch` explicitly on both. A `Toggle` in a grouped Form
+                    // already renders as a switch on macOS, but the style is
+                    // inherited — one `.toggleStyle` anywhere up the tree silently
+                    // turns these into checkboxes.
                     Toggle(isOn: draft.upload.dedup) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("内容去重")
@@ -318,6 +544,7 @@ struct UploadPane: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
+                    .toggleStyle(.switch)
                     Toggle(isOn: draft.upload.autoCopy) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("自动复制到剪贴板（仅 CLI）")
@@ -328,10 +555,12 @@ struct UploadPane: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
+                    .toggleStyle(.switch)
                 }
 
                 Section("压缩") {
                     Toggle("上传前压缩", isOn: draft.upload.compress)
+                        .toggleStyle(.switch)
                     // Only the parameters are gated on the toggle. Disabling the
                     // whole section would disable the toggle too, leaving no way
                     // to switch compression back on.
@@ -359,7 +588,7 @@ struct UploadPane: View {
                     .disabled(!draft.upload.compress.wrappedValue)
                 }
             } else {
-                ConfigPlaceholder(model: model)
+                ConfigTrouble(model: model, repairs: false)
             }
         }
         .formChrome()
@@ -376,58 +605,85 @@ struct HistoryPane: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Two controls side by side, because the two choices are side by side:
-            // any syntax can address either host. The one segmented picker these
-            // replace listed Markdown / HTML / CDN URL / Raw URL as if they were
-            // four alternatives, so half the grid was unreachable and "CDN URL"
-            // handed back a raw link whenever the config said raw.
-            HStack(spacing: 16) {
-                Picker("格式", selection: $model.linkForm.syntax) {
-                    ForEach(LinkSyntax.allCases) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                Picker("地址", selection: $model.linkForm.target) {
-                    ForEach(LinkTarget.allCases) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                Spacer()
-                Text("\(model.history.count) 条")
-                    .foregroundStyle(.secondary).font(.callout)
+        // Same container as every other pane, and that is the whole point.
+        //
+        // This was a bare `VStack` + `List`, and it did not line up with anything: a
+        // grouped `Form` honours the detail column's own margins, a naked `List` does
+        // not. Measured on this window — the form panes' content sits at x=847 inside
+        // a scroll area starting at 827 (a symmetric 20pt inset); the list's scroll
+        // area started at 816 and ran 494 wide, so it bled 11pt *under* the split-view
+        // divider on the left and 11pt past the window's right edge. Padding it by
+        // hand would have meant hard-coding that 11 and re-deriving it at every window
+        // size. Using the container the other panes use costs nothing and cannot drift.
+        //
+        // The format switcher scrolls with the content now rather than being pinned
+        // above it. It is not the only way to reach those two choices — the status-item
+        // menu carries the same shared `linkForm` — and a pinned strip was what forced
+        // the hand-aligned layout in the first place.
+        if let failure = model.configFailure {
+            // Not "还没有上传记录", which is a claim this pane is in no position to
+            // make: history and config are read by the same `reload()`, config first,
+            // so a file that will not parse takes the history down with it and the
+            // list is empty for a reason that has nothing to do with uploads.
+            ContentUnavailableView {
+                Label("读不到历史", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text("\(failure.headline)。历史和配置是一起读的，所以这里也是空的。")
+            } actions: {
+                Button("重试") { Task { await model.reload() } }
+                    .disabled(model.busy)
+                Button("去「图床」处理") { MainNavigation.shared.selectedTab = .host }
             }
-            .padding(12)
-
-            if model.history.isEmpty {
-                ContentUnavailableView("还没有上传记录", systemImage: "clock",
-                                       description: Text("上传一张图片后会出现在这里。"))
-            } else {
-                List(model.history) { r in
-                    HStack(spacing: 10) {
-                        Image(systemName: r.deduped ? "doc.on.doc" : "photo")
-                            .foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(r.name).lineLimit(1)
-                            Text(r.path)
-                                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                        }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if model.history.isEmpty {
+            ContentUnavailableView("还没有上传记录", systemImage: "clock",
+                                   description: Text("上传一张图片后会出现在这里。"))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            Form {
+                // A header view rather than a title string, because it carries two
+                // things: how many records, and what the copy buttons will produce.
+                //
+                // In the header and not the footer, and that is the whole point of the
+                // second line. The switcher itself lives in 上传 now, so this pane has a
+                // mode set elsewhere — and a footer sits below every row, which with 37
+                // of them means below the fold, read by nobody. The copy button's
+                // tooltip says the same thing, but only to whoever hovers the right
+                // pixel.
+                Section {
+                    ForEach(model.history) { r in row(r) }
+                } header: {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("\(model.history.count) 条记录")
                         Spacer()
-                        Text(byteText(r.size))
-                            .font(.caption).monospacedDigit().foregroundStyle(.secondary)
-                        Button {
-                            copy(r)
-                        } label: {
-                            Image(systemName: "doc.on.clipboard")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("复制 \(model.linkForm.label)")
+                        Text("复制 \(model.linkForm.label) · 在「上传」页的「链接」改")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    .padding(.vertical, 2)
                 }
-                .scrollEdgeEffectStyleSoftIfAvailable()
             }
+            .formChrome()
         }
+    }
+
+    private func row(_ r: HistoryRecord) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: r.deduped ? "doc.on.doc" : "photo")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(r.name).lineLimit(1)
+                Text(r.path)
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            Text(byteText(r.size))
+                .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+            Button { copy(r) } label: { Image(systemName: "doc.on.clipboard") }
+                .buttonStyle(.borderless)
+                .help("复制 \(model.linkForm.label)")
+        }
+        .padding(.vertical, 2)
     }
 
     /// History stores one URL and no record of which kind it is, so both addresses
@@ -436,7 +692,7 @@ struct HistoryPane: View {
         guard let cfg = model.savedConfig else {
             // Was a bare `return`: the button did nothing at all and said nothing
             // about why.
-            model.post("读不到配置，无法生成链接", from: .window)
+            model.notify(title: "复制失败", body: "读不到配置，生成不了链接")
             return
         }
         let form = model.linkForm
@@ -444,17 +700,18 @@ struct HistoryPane: View {
         guard let text = link.snippet(form) else {
             // Names the cause, not just the gap: with a slashed branch every row in
             // the pane is CDN-less, and the remedy is a config change.
-            model.post(link.unavailable(form.target)?.message
-                       ?? "没有 \(form.target.label) 链接：\(r.name)",
-                       from: .window)
+            model.notify(title: "复制失败",
+                         body: link.unavailable(form.target)?.message
+                               ?? "没有 \(form.target.label) 链接：\(r.name)")
             return
         }
         let pb = NSPasteboard.general
         pb.clearContents()
-        model.post(pb.setString(text, forType: .string)
-                   ? "已复制 \(form.label)：\(r.name)"
-                   : "写剪贴板失败：\(r.name)",
-                   from: .window)
+        if pb.setString(text, forType: .string) {
+            model.notify(title: "已复制 \(form.label)", body: r.name)
+        } else {
+            model.notify(title: "写剪贴板失败", body: r.name)
+        }
     }
 
     private func byteText(_ n: Int) -> String {
@@ -481,13 +738,13 @@ struct AboutPane: View {
     @ViewBuilder private var versionNote: some View {
         switch (appVersion, embeddedCLI) {
         case (let app?, let cli?) where app == cli:
-            Text("App 与 CLI 同版本发布，内嵌的就是这个版本的 gitpic。")
+            Text("App 与 gitpic_cli 同版本发布，打包进来的就是这个版本。")
                 .font(.caption).foregroundStyle(.secondary)
         case (_?, _?):
-            Text("版本不一致——这份 App 内嵌的 gitpic 与 App 自身版本不符，请重新构建。")
+            Text("版本不一致——这份 App 里的 gitpic_cli 与 App 自身版本不符，请重新构建。")
                 .font(.caption).foregroundStyle(.orange)
         default:
-            Text("开发构建：没有打包成 .app，读不到版本信息。App 与 CLI 同版本发布，"
+            Text("开发构建：没有打包成 .app，读不到版本信息。App 与 gitpic_cli 同版本发布，"
                  + "由 scripts/build-app.sh 在构建时校验。")
                 .font(.caption).foregroundStyle(.secondary)
         }
@@ -529,7 +786,7 @@ struct AboutPane: View {
             Section { header }
             Section("版本") {
                 LabeledContent("App") { Text(appVersion ?? "dev").monospacedDigit() }
-                LabeledContent("内嵌 gitpic") { Text(embeddedCLI ?? "未知").monospacedDigit() }
+                LabeledContent("gitpic_cli") { Text(embeddedCLI ?? "未知").monospacedDigit() }
                 // Both rows stay even though a real build always makes them agree:
                 // the second is read back out of the bundle, so it is the only
                 // place that shows what was *actually* packaged rather than what
@@ -549,6 +806,13 @@ struct AboutPane: View {
                 Text("Finder 启动的 App 只有最小 PATH，gh 由 App 自己探测后显式传给 gitpic。")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("项目") {
+                Text("CLI 与 App 同仓库、同版本发布，凭据只经过 GitHub CLI，配置文件里不存任何密钥。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Link("github.com/tarnish233/gitpic-cli",
+                     destination: URL(string: "https://github.com/tarnish233/gitpic-cli")!)
+                    .font(.caption)
+            }
             Section("诊断") {
                 LabeledContent("日志") {
                     Text(Diagnostics.logURL.path)
@@ -557,6 +821,7 @@ struct AboutPane: View {
                 Button("在 Finder 中显示") {
                     NSWorkspace.shared.activateFileViewerSelecting([Diagnostics.logURL])
                 }
+                .controlSize(.small)
             }
         }
         .formChrome()

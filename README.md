@@ -100,7 +100,8 @@ branch = "main"
 
 [upload]
 path_template = "images/{year}/{month}/{hash8}-{name}.{ext}"
-link_kind     = "cdn"   # cdn (jsDelivr) | raw
+format        = "md"    # md | html | url —— `--format` 的默认值
+link_kind     = "cdn"   # cdn (jsDelivr) | raw —— `--link` 的默认值
 dedup         = true
 auto_copy     = true
 compress      = false

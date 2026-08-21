@@ -16,6 +16,7 @@ struct ConfigTests {
         "github": { "owner": "tarnish233", "repo": "picture_of_notes", "branch": "main" },
         "upload": {
           "path_template": "images/{year}/{month}/{hash8}-{name}.{ext}",
+          "format": "md",
           "link_kind": "cdn",
           "dedup": true,
           "auto_copy": true,
@@ -42,7 +43,7 @@ struct ConfigTests {
     @Test("every one of the ten settable keys can be read back out of a config")
     func keyCoverage() throws {
         let c = try decode(Self.live, ConfigEnvelope.self).config
-        #expect(ConfigKey.allCases.count == 10)
+        #expect(ConfigKey.allCases.count == 11)
         for k in ConfigKey.allCases {
             #expect(!k.value(in: c).isEmpty, "\(k.rawValue) produced no value")
         }
@@ -84,7 +85,7 @@ struct ConfigTests {
         let source = try decode(Self.live, ConfigEnvelope.self).config
         var target = GitpicConfig(
             github: .init(owner: "", repo: "", branch: ""),
-            upload: .init(pathTemplate: "", linkKind: "raw", dedup: false,
+            upload: .init(pathTemplate: "", format: "url", linkKind: "raw", dedup: false,
                           autoCopy: false, compress: true, maxWidth: 9, quality: 1))
         for key in ConfigKey.allCases { key.copy(from: source, into: &target) }
         // Read and write have to stay symmetrical: a key `copy` forgot would leave

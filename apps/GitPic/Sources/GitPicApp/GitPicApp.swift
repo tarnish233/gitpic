@@ -44,6 +44,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setUpStatusItem()
+        // The menu's checkmarks are derived from the config, so they have to be
+        // redrawn whenever it changes — including when the change came from the
+        // window's 保存 two panes away.
+        AppModel.shared.onConfigChange = { [weak self] in self?.rebuildMenu() }
         Task { await resolveTools() }
         // Ask at launch rather than at the first upload: the prompt is a modal
         // interruption, and the moment a result is ready is the worst time to
@@ -129,17 +133,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 2.6 s task, which needed a token to stop a stale reset from wiping a newer
     /// message; now the outcome itself resets the icon, so both the timer and the
     /// token are gone rather than merely tidied.
+    ///
+    /// The main window's status line was a third surface and is gone — see
+    /// `MainWindowView`. The log line below replaces what it was worth keeping: with
+    /// notification permission denied, this is where an outcome can still be read
+    /// back afterwards.
     private func report(_ report: UploadReport) {
         switch report {
         case .started(let n):
             statusItem.button?.image = Self.icon(symbol: "arrow.up.circle")
-            AppModel.shared.post(n == 1 ? "上传中…" : "上传 \(n) 张…", from: .upload)
+            Diagnostics.log("upload started: \(n) file(s)")
         case .succeeded(let summary), .failed(let summary):
             statusItem.button?.image = Self.icon(symbol: "photo.on.rectangle.angled")
-            // Kept even though notifications are the result surface: this drives the
-            // main window's status line, and with notifications denied it is the only
-            // place an outcome is visible at all.
-            AppModel.shared.post(summary, from: .upload)
+            Diagnostics.log("upload outcome: \(summary)")
         }
         if let notice = report.notice { Notifier.post(notice) }
     }
@@ -348,18 +354,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
+    /// Both of these write the config file, and the menu redraws from what landed
+    /// rather than from what was clicked — `AppModel.onConfigChange` calls
+    /// `rebuildMenu()` after the reload, so a write that fails leaves the checkmark
+    /// where it was instead of claiming a change the file never took.
     @objc private func setSyntax(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let s = LinkSyntax(rawValue: raw) else { return }
-        AppModel.shared.linkForm.syntax = s
-        rebuildMenu()
+        var form = AppModel.shared.linkForm
+        form.syntax = s
+        Task { await AppModel.shared.writeLinkForm(form) }
     }
 
     @objc private func setTarget(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let t = LinkTarget(rawValue: raw) else { return }
-        AppModel.shared.linkForm.target = t
-        rebuildMenu()
+        var form = AppModel.shared.linkForm
+        form.target = t
+        Task { await AppModel.shared.writeLinkForm(form) }
     }
 
     @objc private func copyRecent(_ sender: NSMenuItem) {

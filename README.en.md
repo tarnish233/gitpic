@@ -112,7 +112,8 @@ branch = "main"
 
 [upload]
 path_template = "images/{year}/{month}/{hash8}-{name}.{ext}"
-link_kind     = "cdn"   # cdn (jsDelivr) | raw
+format        = "md"    # md | html | url — the default for `--format`
+link_kind     = "cdn"   # cdn (jsDelivr) | raw — the default for `--link`
 dedup         = true
 auto_copy     = true
 compress      = false

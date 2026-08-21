@@ -112,7 +112,7 @@ C1 决定这一节不是可选项——不做，Finder 启动的 app 每次上�
 ### 4.2 主窗口——历史与设置
 
 `NavigationSplitView`，macOS 26 liquid glass（参考 `macos-settings-ui` skill）。两个 pane：历史浏览、设置。
-设置直接读写 CLI 的十个合法 key（`github.owner/repo/branch`、`upload.path_template/link_kind/dedup/auto_copy/compress/max_width/quality`）。
+设置直接读写 CLI 的十一个合法 key（`github.owner/repo/branch`、`upload.path_template/format/link_kind/dedup/auto_copy/compress/max_width/quality`）。
 
 **并发注意**：`config set` 是 load→改一个 key→整文件存盘，两个并发 set 会丢更新（`src/commands/config_cmd.rs:82-84`，无锁）。GUI 侧把设置写入串行化到一个队列，别并发发多个 `config set`。
 
