@@ -4,6 +4,30 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.11.2] - 2026-08-22
+
+### 窗口的两处装配件，和平台不一样
+
+**侧边栏折叠按钮之前根本没有。** 补回来不只是「别隐藏它」：`columnVisibility` 原本是
+`.constant(.all)`，按钮放上去也是个按了没反应的东西。现在它是一个真的 `@State` 绑定，
+`.toolbar(removing: .sidebarToggle)` 去掉，侧边栏能收起也能回来 —— 实测点它：AX 描述在
+「隐藏边栏 / 显示边栏」之间翻，四行面板列表随之消失和回来，侧边栏收起后按钮移到工具栏里紧挨着
+前进/后退，也就是「密码」和「邮件」放它的位置。
+
+**刷新按钮是个宽了一倍、图标偏在一边的胶囊** —— 这是 0.11.1 自己造的。那一版为了不让工具栏在
+开工时重排，把一个隐藏的转圈常驻在按钮旁边，而隐藏的视图照样参与布局：按钮和这个看不见的转圈
+共用一个玻璃胶囊，于是胶囊按两个控件的宽度算，箭头落在其中半边，跟「放弃」「保存」都不一样。
+
+现在转圈画在按钮**内部**、替掉那个箭头，两种状态共用一个 16×16 的盒子。一个控件、一个胶囊、
+两种状态同宽：实测空闲时和连通性测试跑着的时候，按钮都是 44pt 宽、x=1152，其他工具栏项的位置
+也都不动 —— 0.11.1 那条理由仍然成立，因为不再往工具栏里插东西。
+
+### App
+
+- **侧边栏可以折叠了。** 见上：真绑定 + 系统自带的切换按钮，不是自制控件。
+- **刷新按钮回到图标按钮该有的样子**：圆形、和「放弃」「保存」同高，图标居中；开工时它自己变成
+  转圈，尺寸不变。
+
 ## [0.11.1] - 2026-08-22
 
 ### 打开设置窗口的那半秒，几乎和设置无关
@@ -933,7 +957,8 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.1...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.2
 [0.11.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.1
 [0.11.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.0
 [0.10.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.10.0
