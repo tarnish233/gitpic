@@ -37,12 +37,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         // AppKit hands initial focus to the first view in the key-view loop when a
         // window is first shown, and here that is the Owner field — so the window
         // came up with a caret in it and the value selected, one keystroke away from
-        // replacing a working image-host owner with whatever was typed next. Setting
-        // `initialFirstResponder` is the documented way to decline that; the content
-        // view takes the role and does nothing with it.
+        // replacing a working image-host owner with whatever was typed next.
         //
         // Set after `contentViewController`, because that is what creates the
         // `contentView` this points at.
+        //
+        // **Not sufficient on its own** — measured, not assumed. `initialFirstResponder`
+        // is the documented way to decline initial focus, but `NSView` does not accept
+        // first responder by default and `NSHostingView` does not override that, so
+        // AppKit reads this as a view that declines and moves on to *the next valid key
+        // view*: the Owner field, the very one being declined. The invariant only looked
+        // like it held because the pane it protects renders no text field at all while
+        // the config cannot be read — which was this machine's state in every version
+        // that shipped it. `showWindow` does the real work.
         window.initialFirstResponder = window.contentView
     }
 
@@ -65,6 +72,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         super.showWindow(sender)
         window?.deminiaturize(nil)
         window?.makeKeyAndOrderFront(nil)
+        // Decline focus for real: `nil` makes the *window* first responder, which is
+        // the one answer AppKit does not resolve into "then the next text field".
+        window?.makeFirstResponder(nil)
         Task { await AppModel.shared.reload() }
     }
 

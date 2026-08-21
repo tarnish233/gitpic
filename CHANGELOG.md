@@ -4,6 +4,178 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Configuring this thing can now be done in the window
+
+A config file still carrying a `github.token` line — the key that stopped being
+accepted in 0.5.0 — makes `config get` refuse, correctly and informatively: it names
+the offending key and the file it is in. The app then threw that away. `ConfigEnvelope`
+declares `config` non-optional, so a perfectly good error envelope failed to decode
+and collapsed into "读取配置失败。" beside a 重试 button that could never change the
+answer. The host, upload and history panes all went blank at once, and the window's
+bottom bar read `undecodable(status: 10, raw: "{\n \"ok\": false,…` — truncated JSON
+serving as the explanation.
+
+What made it fatal was having no way out. Every config-*writing* subcommand in the CLI
+begins with `Config::load()`, the very call that is failing, so `config set` cannot
+repair a file it refuses to parse — and `init` is interactive, so the GUI cannot drive
+it. A broken config meant editing the file by hand in a terminal: a GUI app sending
+the user back to the command line.
+
+Three things close that gap in this release. **Error envelopes are decoded in one place
+in `GitpicRunner`** (`doctor` and partial uploads are untouched: their `error` is
+optional, so they decode `ok:false` as data and never reach the fallback), the panes state
+the CLI's own words, and they offer an action that changes the answer — back up and
+rebuild renames the unparsable file in place and hands back an editable form. **The copy
+form became config**: a new `upload.format` (the eleventh key) joins `upload.link_kind` to
+decide what the app copies *and* what `gitpic` defaults to in a terminal — it used to live
+only in memory, resetting to Markdown · CDN each launch, with the menu's checkmarks free
+to disagree with the window. **The settings window follows the macOS 26 conventions it was
+missing**: back/forward in the toolbar, a title that follows the pane, and a history pane
+rebuilt on the same container as every other pane (it had been bleeding 11pt past both
+edges, lined up with nothing).
+
+The window's bottom bar is gone in the same pass: outcomes go to Notification Center only.
+
+### Added
+
+- **`upload.format` — an eleventh config key, and the default for `--format`.** Takes
+  `md` | `html` | `url`, spelled exactly as the flag accepts them. Until now "which
+  syntax do I get" could only be answered per invocation: `link_kind` had been a config
+  key from the start, the format had not, so "I always want HTML" was not a thing the
+  config file could say. `effective_format` now reads the flag first, the config second,
+  and only then falls back to md — which is precisely what keeping the flag an `Option`
+  was for: "the user asked for md" and "nobody said anything" have to stay separable, and
+  only the second defers to the file. Unrecognised values are refused
+  (`parse_output_format_strict`, the same treatment `parse_link_kind_strict` gives
+  addresses): a hand-edited `htlm` is `CONFIG_INVALID` naming `upload.format`, and
+  `config set upload.format htlm` is a `USAGE` error. A generated config writes `format`
+  immediately above `link_kind`, because the two answer the two halves of one question.
+
+  **Upgrade note**: `gitpic` 0.9.0 and earlier do not know this key, and the config is
+  `deny_unknown_fields` — so a config carrying `format` is rejected wholesale by an older
+  binary. The app and the CLI ship at one version, so installing the release fixes both;
+  a stale `gitpic` left on the machine will report `CONFIG_INVALID`.
+
+### App
+
+- **The copy form moved from the history pane to the upload pane, and became real
+  config.** Both dimensions now bind `upload.format` and `upload.link_kind`: in the
+  window they behave like every other setting on the pane — edited through the draft,
+  written by 保存, undone by 放弃 — while the status-item menu writes immediately, because
+  a menu has no 保存 button and no room for one, so a click there has to be the whole
+  interaction. The upload pane's separate "CLI 默认地址" row is gone: two controls for one
+  address, one of which had to admit in its own caption that it did not affect the app
+  you were looking at, is exactly what wanted collapsing. The snippet the app copies and
+  the default `gitpic` uses in a terminal now come from the same two values.
+- **`linkForm` is derived from the saved config instead of being state of its own.** It
+  used to reset to Markdown · CDN on every launch however the config was written, and the
+  menu's checkmarks could disagree with the window: measured — after switching to
+  纯链接 · Raw in the window the menu still showed Markdown ✓ / CDN ✓, with the copy
+  behaviour correct (both read the same variable) and only the marks lying. There is one
+  answer now, and `onConfigChange` rebuilds the menu whenever the config moves —
+  including when the move came from a 保存 two panes away.
+- **A config that cannot be read now says why.** `RunFailure` gains
+  `.cli(status:error:)`, carrying the CLI's own `ErrorCode` and message, and
+  `GitpicRunner.runJSON` tries this command's payload first and the error envelope
+  second. That order is deliberate: `doctor` and a partially-successful `upload` both
+  declare `error` optional, so they decode `ok:false` as **data** and never arrive
+  here; the commands with a non-optional payload — `config get`, `list` — do, and they
+  are exactly the two that used to turn `{ok:false,error:…}` into `undecodable`. The
+  pane shows the CLI's message verbatim: it already names the file and the key, which
+  beats any paraphrase, and `src/config.rs` pins that a rejected `token` is reported
+  without echoing its value, so quoting it is safe.
+- **A broken config has a way out from the GUI: back up and rebuild.** The old file is
+  renamed in place (`config.toml.broken-<stamp>`), never deleted —
+  `owner`/`repo`/`branch` in it are probably still right, and the backup is where they
+  are read back from. Once it is out of the way `config get` returns the defaults (a
+  missing file is not an error — `src/config.rs`), the form is editable again, and 保存
+  writes it one `config set` per key as always. The app does the rename because no
+  subcommand can: every config write starts with `Config::load()`. **Renamed, never
+  read**: a pre-0.5.0 config still holds `github.token`, and putting its contents in
+  the window — or in a notification — would be putting a possibly-live credential on
+  screen. The CLI holds that line in its error messages; the app must not become the
+  leak the CLI declined to be.
+- **The rebuild is offered for one cause only.** `CONFIG_INVALID` means the file exists
+  and its text is the problem, which a rename fixes. `spawnFailed`, non-envelope output
+  and `CONFIG_MISSING` are all about something other than the file's contents, and
+  renaming for those would destroy a working config to fix nothing.
+- **A blank form now says what it is for.** With Owner or Repo empty, the host pane
+  states it: fill both in, press 保存 at the top right, and credentials are not
+  configured here (they come from `gh auth token`, so `gh auth login` first). Two paths
+  reach that state — a machine that never ran `init` (a missing file reads back as the
+  defaults, not as an error) and one that just used the rebuild above.
+- **The upload pane is no longer just "读取配置失败".** Same cause, same verbatim
+  message, plus a jump to the host pane — the repair lives in exactly one pane, the one
+  that owns the config.
+- **The history pane now uses the same grouped Form as every other pane; it had not been
+  lining up with anything.** It was a bare `VStack` + `List`, with two faults. A `VStack`
+  only stretches when one of its children is greedy, and `ContentUnavailableView` reports
+  an ideal height rather than filling — so with an empty history nothing pushed the stack
+  open, it stayed content-sized, and the detail column centred the lot: the format
+  switcher floated halfway down the pane. (With records present the `List` is greedy,
+  which is what hid that.) And even with records it was misaligned, because a `Form`
+  honours the detail column's own margins and a naked `List` does not. Measured on this
+  window: the form panes' content sits at x=847 in a scroll area starting at 827 — a
+  symmetric 20pt inset — while the list's scroll area started at 816 and ran 494 wide,
+  bleeding 11pt *under* the split-view divider on the left and 11pt past the window's
+  right edge. Padding it by hand would have meant hard-coding that 11 and re-deriving it
+  at every window size; using the container the other panes already use costs nothing and
+  cannot drift. All three panes now report the same geometry (scroll area 828/472,
+  section 848/432).
+  The cost, stated: the format switcher is two Form rows that scroll with the content
+  instead of a strip pinned above it. The status-item menu carries the same shared
+  `linkForm`, so it is not the only way in — and the pinned strip is what forced the
+  hand-aligned layout to begin with.
+- **The two segmented pickers are one per row, neither `.fixedSize()`.** Both in a single
+  Form row does not survive the move: the row gains a label column, and two segmented
+  controls that refuse to compress pushed the content to 920pt inside a 680pt window —
+  measured — squeezing the sidebar to a sliver and shoving the size and copy columns off
+  the right edge. A Form row puts the label in its own column and gives the control the
+  value column, which is the layout that fits.
+- **An empty history no longer lies.** History and config are read by the same
+  `reload()`, config first, so a file that will not parse takes the history down with
+  it and the empty list says nothing about whether anything was ever uploaded. That case
+  now reads "读不到历史" with the reason and two actions, and the "N 条" counter is
+  omitted when the read failed: "0 条" beside a failure reads as a fact about the
+  history, and it is not one.
+- **The window's bottom bar is gone; outcomes rely on macOS notifications alone.** It
+  carried two things: a line of status text, and the 保存/放弃 pair. The line is deleted
+  rather than moved — an outcome is an event, this window is usually shut when one
+  happens, and Notification Center is where the app already reported uploads, so of the
+  two surfaces the bottom one was mostly stale. The one thing it uniquely carried, a
+  failed config read, is now stated in the pane that owns it, next to the buttons that
+  fix it. The buttons moved to the toolbar, still dimming rather than disappearing when
+  nothing is dirty, ⌘S unchanged. The cost is recorded because it is real: with
+  notification permission denied, outcomes reach only `~/Library/Logs/GitPic.log` —
+  which is why every notification now also writes a log line.
+- **The window now follows the macOS 26 settings-window conventions it was missing.**
+  The bones were already right (an `NSWindowController` with `.fullSizeContentView`, a
+  balanced `NavigationSplitView`, the grouped-Form trio, reference-counted activation
+  policy for an `.accessory` app). Added: **back/forward navigation history** on the
+  toolbar's leading side (the sidebar reaches any pane in one click, so these are for
+  retracing, as in System Settings); **the window title follows the active pane** (the sidebar's `navigationTitle` is
+  what the app is called, the title bar is what you are looking at); and an explicit
+  `alignment: .topLeading` on the detail pane.
+- **Detail-pane alignment went from a per-pane patch to a rule.** The history pane's
+  control strip floating mid-window came from the detail column centring content shorter
+  than the window; that was fixed in the history pane itself. `.topLeading` now sits at
+  the pane-routing layer, so the next pane does not get to rediscover it.
+- **All four toggles state `.toggleStyle(.switch)`.** A `Toggle` in a grouped Form
+  already renders as a switch, but the style is inherited — one `.toggleStyle` anywhere
+  up the tree turns them into checkboxes.
+- **Secondary buttons are uniformly `.controlSize(.small)`.** The connectivity test, the
+  three config-repair actions, reveal-backup and reveal-log are row actions, not the
+  point of their rows.
+- **关于 gains a 项目 section**: one line on the CLI and app sharing a repo and a
+  version, credentials passing only through GitHub CLI, and no secret in the config
+  file — plus a link to the repository.
+- **A connectivity test that could not run says so in its own section.** It used to go
+  to the status line at the bottom of the window, two panes away from the button that
+  caused it — and it is now kept distinct from a report that came back unhealthy, which
+  is a different branch.
+
 ## [0.9.0] - 2026-08-21
 
 ### The link format was two choices all along

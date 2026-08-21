@@ -35,6 +35,21 @@ public struct ErrorBody: Codable, Sendable, Hashable {
     public let message: String
 }
 
+/// The `{ ok: false, error: {…} }` envelope *any* subcommand emits when it
+/// refuses — `ErrorEnvelope` in `src/output.rs`.
+///
+/// Kept apart from the per-command payload types rather than folded into them.
+/// `config get` and `list` declare their payload non-optional, which is the honest
+/// shape of a success; making it optional to accommodate a refusal would push
+/// "which of the two is this" into every call site instead. The payload decode is
+/// tried first and this is the fallback (``GitpicRunner/failure(_:)``), so a
+/// refusal arrives as a typed ``RunFailure/cli(status:error:)`` carrying the CLI's
+/// own code and message.
+public struct ErrorEnvelope: Codable, Sendable {
+    public let ok: Bool
+    public let error: ErrorBody
+}
+
 /// The three envelope shapes the CLI can emit on stdout under `--json`,
 /// collapsed into one decodable type.
 ///

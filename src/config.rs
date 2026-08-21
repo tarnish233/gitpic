@@ -55,6 +55,12 @@ impl Default for GithubConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct UploadConfig {
     pub path_template: String,
+    /// Which snippet syntax `--format` defaults to: `md` | `html` | `url`.
+    ///
+    /// Declared next to `link_kind` because the two answer the two halves of one
+    /// question — how the snippet is wrapped, and which host it points at — and
+    /// serde writes a generated config in declaration order.
+    pub format: String,
     pub link_kind: String,
     pub dedup: bool,
     pub auto_copy: bool,
@@ -67,6 +73,7 @@ impl Default for UploadConfig {
     fn default() -> Self {
         Self {
             path_template: "images/{year}/{month}/{hash8}-{name}.{ext}".to_string(),
+            format: "md".to_string(),
             link_kind: "cdn".to_string(),
             dedup: true,
             auto_copy: true,
@@ -183,6 +190,12 @@ impl Config {
             return Err("github.branch must not be empty".to_string());
         }
         check_branch(&self.github.branch)?;
+        if crate::link::parse_output_format_strict(&self.upload.format).is_none() {
+            return Err(format!(
+                "upload.format must be \"md\", \"html\" or \"url\", not {:?}",
+                self.upload.format
+            ));
+        }
         if crate::link::parse_link_kind_strict(&self.upload.link_kind).is_none() {
             return Err(format!(
                 "upload.link_kind must be \"cdn\" or \"raw\", not {:?}",
@@ -755,6 +768,36 @@ mod tests {
             .apply_env_with(env_of(&[("GITPIC_LINK", "raw2")]))
             .expect_err("the variable must be rejected too");
         assert_eq!(err.code, ErrorCode::Usage);
+    }
+
+    #[test]
+    fn a_bad_output_format_is_rejected_from_the_file() {
+        // Same hole `link_kind` had, one key later: a value the reader shrugged at
+        // would make `config set upload.format htlm` report success and then hand
+        // back Markdown forever.
+        let err = Config::parse("[upload]\nformat = \"htlm\"\n", "/tmp/c.toml")
+            .expect_err("the file must be rejected");
+        assert_eq!(err.code, ErrorCode::ConfigInvalid);
+        assert!(err.message.contains("format"), "{}", err.message);
+
+        // The three the flag accepts are the three the file accepts, spelled the
+        // same way — that agreement is the point of `parse_output_format_strict`.
+        for good in ["md", "html", "url", "HTML", " url "] {
+            let toml = format!("[upload]\nformat = {good:?}\n");
+            Config::parse(&toml, "/tmp/c.toml")
+                .unwrap_or_else(|e| panic!("format {good:?} must be accepted: {}", e.message));
+        }
+    }
+
+    #[test]
+    fn the_default_format_is_markdown_and_writes_no_surprise_into_a_new_file() {
+        assert_eq!(Config::default().upload.format, "md");
+        // Generated next to link_kind, because they answer the two halves of one
+        // question and a config file is read by people.
+        let toml = toml::to_string_pretty(&Config::default()).unwrap();
+        let format_at = toml.find("format").expect("format is written out");
+        let link_at = toml.find("link_kind").expect("link_kind is written out");
+        assert!(format_at < link_at, "{toml}");
     }
 
     #[test]

@@ -132,6 +132,7 @@ fn get_key(cfg: &Config, key: &str) -> Result<String> {
         "github.repo" => cfg.github.repo.clone(),
         "github.branch" => cfg.github.branch.clone(),
         "upload.path_template" => cfg.upload.path_template.clone(),
+        "upload.format" => cfg.upload.format.clone(),
         "upload.link_kind" => cfg.upload.link_kind.clone(),
         "upload.dedup" => cfg.upload.dedup.to_string(),
         "upload.auto_copy" => cfg.upload.auto_copy.to_string(),
@@ -149,6 +150,9 @@ fn set_key(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
         "github.repo" => cfg.set_repo_spec(value)?,
         "github.branch" => cfg.github.branch = value.to_string(),
         "upload.path_template" => cfg.upload.path_template = value.to_string(),
+        "upload.format" => {
+            cfg.upload.format = value.trim().to_ascii_lowercase();
+        }
         "upload.link_kind" => {
             cfg.upload.link_kind = value.trim().to_ascii_lowercase();
         }
@@ -210,12 +214,13 @@ mod tests {
                     get_key(&cfg, &key).is_ok(),
                     "`config get {key}` is unreachable"
                 );
-                // link_kind is validated, so it needs a real value; "1" parses
-                // for every other key (u32, u8 in 1..=100, bools, strings, repo).
-                let v = if key == "upload.link_kind" {
-                    "raw"
-                } else {
-                    "1"
+                // The two enum-valued keys are validated, so they need real values;
+                // "1" parses for every other key (u32, u8 in 1..=100, bools, strings,
+                // repo).
+                let v = match key.as_str() {
+                    "upload.link_kind" => "raw",
+                    "upload.format" => "html",
+                    _ => "1",
                 };
                 assert!(
                     set_key(&mut cfg.clone(), &key, v).is_ok(),

@@ -11,6 +11,64 @@ public struct ConfigEnvelope: Codable, Sendable {
     public let config: GitpicConfig
 }
 
+/// `config path` / `config edit` (`src/commands/config_cmd.rs`).
+public struct PathEnvelope: Codable, Sendable {
+    public let ok: Bool
+    public let path: String
+}
+
+/// Why the window has no config to show, in the form it has to be presented.
+///
+/// The distinction that earns a type is not failed-vs-not but whether there is a
+/// way *out*. A config file that exists and cannot be parsed is the one read
+/// failure the window can clear by itself, and it is the one people actually hit:
+/// `github.token` stopped being accepted in 0.5.0, so every machine upgraded from
+/// before that still has a line in the file that makes the whole of it
+/// `CONFIG_INVALID`.
+public enum ConfigFailure: Sendable, Equatable {
+    /// The CLI refused and named its reason. Shown verbatim — it already names the
+    /// file and the offending key, and says nothing about the file's *contents*
+    /// (`src/config.rs` has a test pinning that a removed `token` is rejected
+    /// without echoing its value).
+    case cli(ErrorBody)
+    /// Something below the CLI's error contract: it never ran, or answered with
+    /// something that was not an envelope. Also shown verbatim — inventing a
+    /// friendlier story for this is how the real cause gets buried.
+    case other(String)
+
+    public init(_ error: Error) {
+        if case RunFailure.cli(_, let body) = error {
+            self = .cli(body)
+        } else {
+            self = .other(String(describing: error))
+        }
+    }
+
+    public var code: String? {
+        if case .cli(let e) = self { return e.code }
+        return nil
+    }
+
+    public var message: String {
+        switch self {
+        case .cli(let e):   return e.message
+        case .other(let s): return s
+        }
+    }
+
+    /// Whether moving the file aside is a remedy for this.
+    ///
+    /// `CONFIG_INVALID` means the file exists and its text is the problem, which a
+    /// rename fixes. Every other code — a `gitpic` that would not spawn, output
+    /// that was not an envelope — is about something other than the file, and
+    /// renaming it would destroy a working config to fix nothing.
+    public var isFileUnusable: Bool { code == "CONFIG_INVALID" }
+
+    public var headline: String {
+        isFileUnusable ? "配置文件无法解析" : "读取配置失败"
+    }
+}
+
 public struct GitpicConfig: Codable, Sendable, Equatable {
     public var github: GitHub
     public var upload: Upload
@@ -23,6 +81,9 @@ public struct GitpicConfig: Codable, Sendable, Equatable {
 
     public struct Upload: Codable, Sendable, Equatable {
         public var pathTemplate: String
+        /// `upload.format` — the snippet syntax, `md` | `html` | `url`. Declared next
+        /// to `linkKind` because the two are the two halves of one question.
+        public var format: String
         public var linkKind: String
         public var dedup: Bool
         public var autoCopy: Bool
@@ -32,6 +93,7 @@ public struct GitpicConfig: Codable, Sendable, Equatable {
 
         enum CodingKeys: String, CodingKey {
             case pathTemplate = "path_template"
+            case format
             case linkKind = "link_kind"
             case dedup
             case autoCopy = "auto_copy"
@@ -42,7 +104,7 @@ public struct GitpicConfig: Codable, Sendable, Equatable {
     }
 }
 
-/// The ten keys `config set` accepts (`src/commands/config_cmd.rs:126-170`).
+/// The eleven keys `config set` accepts (`src/commands/config_cmd.rs`).
 /// Anything else is a `USAGE` error, and a Rust test derives this list from
 /// `Config` itself so the arms cannot drift.
 public enum ConfigKey: String, Sendable, CaseIterable {
@@ -50,6 +112,7 @@ public enum ConfigKey: String, Sendable, CaseIterable {
     case repo         = "github.repo"
     case branch       = "github.branch"
     case pathTemplate = "upload.path_template"
+    case format       = "upload.format"
     case linkKind     = "upload.link_kind"
     case dedup        = "upload.dedup"
     case autoCopy     = "upload.auto_copy"
@@ -66,6 +129,7 @@ public enum ConfigKey: String, Sendable, CaseIterable {
         case .repo:         return c.github.repo
         case .branch:       return c.github.branch
         case .pathTemplate: return c.upload.pathTemplate
+        case .format:       return c.upload.format
         case .linkKind:     return c.upload.linkKind
         case .dedup:        return String(c.upload.dedup)
         case .autoCopy:     return String(c.upload.autoCopy)
@@ -89,6 +153,7 @@ public enum ConfigKey: String, Sendable, CaseIterable {
         case .repo:         target.github.repo = source.github.repo
         case .branch:       target.github.branch = source.github.branch
         case .pathTemplate: target.upload.pathTemplate = source.upload.pathTemplate
+        case .format:       target.upload.format = source.upload.format
         case .linkKind:     target.upload.linkKind = source.upload.linkKind
         case .dedup:        target.upload.dedup = source.upload.dedup
         case .autoCopy:     target.upload.autoCopy = source.upload.autoCopy

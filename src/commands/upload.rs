@@ -182,7 +182,7 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
                 if outcome.deduped { " [deduped]" } else { "" }
             );
         }
-        let item = build_item(&outcome, &name, kind, cli.effective_format(), cfg);
+        let item = build_item(&outcome, &name, kind, cli.effective_format(cfg), cfg);
         // Record to local history (best-effort; never fail an upload for this).
         if let Err(e) = history::append(&Record {
             time: chrono::Local::now().to_rfc3339(),

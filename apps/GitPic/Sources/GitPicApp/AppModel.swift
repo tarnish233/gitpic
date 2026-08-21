@@ -51,35 +51,56 @@ final class AppModel {
     /// Which snippet form the next copy produces — syntax and address, chosen
     /// independently.
     ///
-    /// Shared rather than one per surface: the status-item menu and the history pane
-    /// each used to hold their own copy, so picking HTML in the menu left the window
-    /// still copying Markdown with nothing on screen explaining the disagreement.
-    /// Not persisted, which is the behaviour it replaces — it resets to
-    /// Markdown · CDN each launch.
-    var linkForm = LinkForm()
+    /// Derived, not stored, and that is the whole design: both halves are config keys
+    /// (`upload.format`, `upload.link_kind`), so the file is the single answer to
+    /// "what will a copy produce" and every surface reads it. It used to be a `var`
+    /// living only in memory, which meant two ways to be wrong — it reset to
+    /// Markdown · CDN on every launch however the config was set, and the status-item
+    /// menu's checkmarks could disagree with the window with nothing on screen
+    /// explaining why.
+    ///
+    /// Falls back to Markdown · CDN only while there is no config to read — during
+    /// tool discovery, or when the file cannot be parsed. That is what the CLI
+    /// defaults to, so the fallback is not a guess.
+    var linkForm: LinkForm {
+        savedConfig.map(LinkForm.init(config:)) ?? LinkForm()
+    }
+
+    /// Called after `savedConfig` changes, so the status-item menu can redraw the
+    /// checkmarks it derives from it.
+    ///
+    /// A callback rather than the menu observing the model: `rebuildMenu()` replaces
+    /// `statusItem.menu` wholesale, which is `AppDelegate`'s business and must not
+    /// happen from inside an `@Observable` read. Without it, changing the form in the
+    /// window left the menu displaying the previous choice until the next upload
+    /// rebuilt it — measured, and the reason this exists.
+    var onConfigChange: (() -> Void)?
 
     var busy = false
-    /// Distinguishes "still loading" from "the last read failed", so the form
-    /// does not sit on "读取配置中…" forever after a failure.
-    var loadFailed = false
-    private(set) var statusLine: String?
     var lastDoctor: DoctorReport?
 
-    /// Who wrote `statusLine`, so a writer clears only what it is entitled to.
+    /// Why the last config read failed, or `nil` if it did not.
     ///
-    /// Four call sites share this one line and none of them could clear another's:
-    /// a failed save's "写入失败" outlived the successful reload that disproved it,
-    /// and "没有改动" was cleared by nothing at all. Blanket-clearing on reload is
-    /// not the fix either — `GitPicApp.finish` starts a reload and then posts the
-    /// upload's outcome in the same MainActor turn, so a reload that cleared
-    /// everything would wipe a message written after it began.
-    ///
-    /// `.window` is a message the window's own actions own, superseded by the next
-    /// successful read; `.upload` is status-item feedback with its own reset timer.
-    /// Making the setter private is what found the fourth writer — the history
-    /// pane's copy button, whose "写剪贴板失败" was stranded the same way.
-    enum StatusAuthor: Sendable { case window, upload }
-    private(set) var statusAuthor: StatusAuthor?
+    /// Distinguishes "still loading" from "the last read failed" — the form must not
+    /// sit on "读取配置中…" forever after a failure — and now also carries *what*
+    /// failed. A bare `loadFailed` flag could only ever produce "读取配置失败。", and
+    /// that sentence was the entire diagnosis offered for a config file whose
+    /// problem the CLI had already named down to the offending key.
+    private(set) var configFailure: ConfigFailure?
+
+    /// Where the config file lives, as the CLI resolves it. Read on every reload,
+    /// because it is what the repair actions in the window act on.
+    private(set) var configPath: URL?
+
+    /// Where ``rebuildConfig()`` last moved an unusable file, so the window can
+    /// still point at it after the fact — the old values are in there, and a fresh
+    /// config starts empty.
+    private(set) var configBackup: URL?
+
+    /// Why the last connectivity test failed. Kept beside `lastDoctor` rather than
+    /// in one shared line: the failure belongs to the 连通性 section and nowhere
+    /// else, and a failure there says nothing about the config read above it.
+    private(set) var doctorFailure: String?
 
     /// Nested work (reload during save, doctor during reload) must not let the
     /// first `defer { busy = false }` clear the spinner of the one still running.
@@ -106,17 +127,21 @@ final class AppModel {
         toolState = .missing
     }
 
-    // MARK: - Status line
+    // MARK: - Telling the user what happened
 
-    func post(_ text: String?, from author: StatusAuthor) {
-        statusLine = text
-        statusAuthor = text == nil ? nil : author
-    }
-
-    /// Drop a message this author left behind, and only that.
-    func clearStatus(from author: StatusAuthor) {
-        guard statusAuthor == author else { return }
-        post(nil, from: author)
+    /// Post an outcome to Notification Center, and log it.
+    ///
+    /// The window has no status line any more: outcomes are events, the window is
+    /// usually closed when one happens, and a line at the bottom of a window nobody
+    /// is looking at is not a report. Notification Center is the one surface now —
+    /// the same one uploads have always used.
+    ///
+    /// The log line is not decoration. With notification permission denied a banner
+    /// goes nowhere at all, and this is then the only trace an outcome leaves;
+    /// `Notifier.authorize()` records that denial for the same reason.
+    func notify(title: String, body: String) {
+        Diagnostics.log("notice: \(title) — \(body)")
+        Notifier.post(UploadNotice(title: title, body: body))
     }
 
     private func beginWork() {
@@ -138,6 +163,10 @@ final class AppModel {
         let baseline = savedConfig
         beginWork()
         defer { endWork() }
+        // Asked on every read, not only a failed one: `config path` does not load the
+        // file, so it answers in both cases, and the window needs the path exactly
+        // when the read fails.
+        configPath = try? await runner.configPath()
         do {
             let cfg = try await runner.loadConfig()
             savedConfig = cfg
@@ -147,24 +176,83 @@ final class AppModel {
                 draft = cfg
             }
             history = try await runner.history(limit: 100)
-            loadFailed = false
-            // A read that succeeded supersedes whatever the last window action left
-            // on screen, including a "写入失败" this read just disproved. An
-            // upload's message is not ours to clear.
-            clearStatus(from: .window)
+            // A read that succeeded supersedes the last failure, including one this
+            // read just disproved.
+            configFailure = nil
+            onConfigChange?()
         } catch {
-            loadFailed = true
-            post("读取失败：\(String(describing: error))", from: .window)
+            configFailure = ConfigFailure(error)
+            // Logged as well as shown: this is the failure users report as "App 没
+            //反应", and the log is what can be read back afterwards.
+            Diagnostics.log("config read failed: \(String(describing: error))")
         }
+    }
+
+    /// Move an unusable config file aside, then read again — which leaves the CLI
+    /// free to write a fresh default file on the next `config set`.
+    ///
+    /// The rename happens here because no subcommand can do it: every config
+    /// *writer* begins with `Config::load()` (`src/commands/config_cmd.rs`), the very
+    /// call that is failing, so `config set` cannot be the way out of a file it
+    /// refuses to parse. `config get` on a *missing* file returns the defaults
+    /// (`src/config.rs`), so a rename is all it takes to get an editable form back.
+    ///
+    /// Renamed, never read. The app does not parse the old file and never shows its
+    /// contents: a config carried over from before 0.5.0 still holds a
+    /// `github.token` line, and putting that on screen — or in a notification —
+    /// would leak a live credential. `src/config.rs` has a test pinning that the CLI
+    /// keeps the same silence in its error messages; this keeps the app from being
+    /// the leak the CLI declined to be.
+    ///
+    /// Moved rather than deleted for the same reason: `owner`/`repo`/`branch` in
+    /// there are probably still correct, and the backup is where the user reads them
+    /// back from.
+    func rebuildConfig() async {
+        guard let runner else { return }
+        beginWork()
+        defer { endWork() }
+        let path: URL
+        do {
+            path = try await runner.configPath()
+        } catch {
+            notify(title: "重建配置失败",
+                   body: "问不出配置文件的位置：\(ConfigFailure(error).message)")
+            return
+        }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: path.path) {
+            let backup = path.deletingLastPathComponent()
+                .appendingPathComponent("\(path.lastPathComponent).broken-\(Self.stamp())")
+            do {
+                try fm.moveItem(at: path, to: backup)
+            } catch {
+                notify(title: "重建配置失败",
+                       body: "移不动 \(path.lastPathComponent)：\(error.localizedDescription)")
+                return
+            }
+            configBackup = backup
+            Diagnostics.log("config moved aside: \(backup.path)")
+            notify(title: "配置文件已备份",
+                   body: "旧文件是 \(backup.lastPathComponent)，现在可以在「图床」里重新填。")
+        }
+        await reload()
+    }
+
+    /// A filename-safe stamp, so a second rebuild cannot overwrite the first
+    /// backup — which would destroy the values the first one was kept for.
+    private static func stamp() -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        return f.string(from: Date())
     }
 
     func save() async {
         guard let runner, let savedConfig, let draft else { return }
         let keys = changedKeys(from: savedConfig, to: draft)
-        guard !keys.isEmpty else {
-            post("没有改动", from: .window)
-            return
-        }
+        // 保存 is disabled with nothing to write, so this is unreachable by hand
+        // (⌘S while nothing is dirty is the one way in) and needs no message.
+        guard !keys.isEmpty else { return }
         // Capture the draft we are writing so a concurrent edit is not replaced
         // by the re-read below.
         let snapshot = draft
@@ -179,8 +267,8 @@ final class AppModel {
             self.savedConfig = fresh
             self.draft = reconcile(
                 draft: self.draft ?? snapshot, toward: fresh, untouchedSince: snapshot)
-            post("已写入 \(keys.count) 项：" + keys.map(\.rawValue).joined(separator: ", "),
-                 from: .window)
+            notify(title: "已保存配置",
+                   body: "写入 \(keys.count) 项：" + keys.map(\.rawValue).joined(separator: ", "))
         } catch {
             // A later key may have failed after an earlier one landed. Re-read
             // so dirtyKeys reflects the file, not the pre-save snapshot.
@@ -193,13 +281,54 @@ final class AppModel {
                     keys: changedKeys(from: savedConfig, to: fresh))
                 self.savedConfig = fresh
             }
-            post("写入失败：\(String(describing: error))", from: .window)
+            notify(title: "保存配置失败", body: ConfigFailure(error).message)
         }
     }
 
     func revert() {
         draft = savedConfig
-        clearStatus(from: .window)
+    }
+
+    /// Write a copy form straight to the config file, without waiting for 保存.
+    ///
+    /// This is the status-item menu's path, and its write policy differs from the
+    /// window's on purpose. The menu has no 保存 button and no room for one: a click
+    /// there is the whole interaction, so it has to land. The window's two pickers are
+    /// ordinary config rows that go through the draft like every other setting on the
+    /// pane — one deferred write for the batch, which is what makes 放弃 mean
+    /// something.
+    ///
+    /// Only the keys that actually differ are written (`applyConfig` diffs), so
+    /// picking the syntax does not rewrite the address, and a menu click while the
+    /// window holds unsaved edits cannot clobber them: the reload afterwards
+    /// reconciles key by key, keeping whatever the user has touched.
+    func writeLinkForm(_ form: LinkForm) async {
+        guard let runner else { return }
+        guard let savedConfig else {
+            // No config read means no baseline to diff against, and writing blind here
+            // would mean inventing values for the other ten keys.
+            notify(title: "改不了链接形态",
+                   body: configFailure?.headline ?? "配置还没读出来，稍后再试")
+            return
+        }
+        let target = form.applied(to: savedConfig)
+        let keys = changedKeys(from: savedConfig, to: target)
+        guard !keys.isEmpty else { return }
+        beginWork()
+        defer { endWork() }
+        do {
+            try await runner.applyConfig(from: savedConfig, to: target)
+            // No banner on success — the checkmark that moved is the feedback, and a
+            // notification per menu click would be noise. Logged, though: it is a write
+            // to the config file, and the log is where a write can be read back.
+            Diagnostics.log("link form written: " + keys.map(\.rawValue).joined(separator: ", ")
+                            + " → \(form.label)")
+        } catch {
+            notify(title: "写入失败", body: ConfigFailure(error).message)
+        }
+        // Reload either way: a partly-applied batch leaves the file in a state the
+        // window and the menu both have to be told about.
+        await reload()
     }
 
     func runDoctor() async {
@@ -208,13 +337,13 @@ final class AppModel {
         defer { endWork() }
         do {
             lastDoctor = try await runner.doctor()
-            clearStatus(from: .window)
+            doctorFailure = nil
         } catch {
             // Drop the previous report rather than leave it standing beside the
             // failure: those checks did not run, and a stale "仓库可写 ✓" next to
             // "doctor 失败" is a claim nothing supports.
             lastDoctor = nil
-            post("doctor 失败：\(String(describing: error))", from: .window)
+            doctorFailure = ConfigFailure(error).message
         }
     }
 }

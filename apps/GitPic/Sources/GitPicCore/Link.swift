@@ -14,7 +14,14 @@ import Foundation
 /// The CLI has had these as separate flags (`--format` × `--link`) since before the
 /// app existed. This type and ``LinkTarget`` are that same split.
 public enum LinkSyntax: String, Sendable, CaseIterable, Identifiable {
-    case markdown, html, url
+    /// Raw values are the CLI's own spellings, because they are what
+    /// `upload.format` stores and what `--format` accepts: `md`, `html`, `url`. The
+    /// case is still called `markdown` — that is what the label says and what the
+    /// code reads like — but `md` is what goes on the wire, the same way
+    /// ``LinkTarget``'s raw values are already `cdn`/`raw`.
+    case markdown = "md"
+    case html
+    case url
 
     public var id: String { rawValue }
 
@@ -66,6 +73,30 @@ public struct LinkForm: Sendable, Hashable {
     /// Both halves. A report naming only one of them ("已复制 Markdown") left the
     /// other invisible, which is precisely the collapse this type undoes.
     public var label: String { "\(syntax.label) · \(target.label)" }
+
+    /// The form the config file asks for.
+    ///
+    /// Both halves are config keys now — `upload.format` and `upload.link_kind` —
+    /// so this is the only place the app decides what it copies, and the CLI reads
+    /// the same two values for its own defaults.
+    ///
+    /// Unparsable values fall back instead of failing, and that is not laxness:
+    /// `Config::validate` rejects both keys before a config is ever handed out, so
+    /// reaching a fallback means the app is holding something the CLI would have
+    /// refused. Markdown · CDN is what every version before these keys existed
+    /// produced, which makes it the honest answer to "we cannot tell".
+    public init(config: GitpicConfig) {
+        self.init(syntax: LinkSyntax(rawValue: config.upload.format) ?? .markdown,
+                  target: LinkTarget(rawValue: config.upload.linkKind) ?? .cdn)
+    }
+
+    /// This form written back into a config, leaving every other key alone.
+    public func applied(to config: GitpicConfig) -> GitpicConfig {
+        var out = config
+        out.upload.format = syntax.rawValue
+        out.upload.linkKind = target.rawValue
+        return out
+    }
 }
 
 // MARK: - URLs

@@ -10,8 +10,16 @@ public struct ProcessOutcome: Sendable {
 
 public enum RunFailure: Error, Sendable, Equatable {
     case spawnFailed(String)
-    /// stdout was not the JSON we expect. Carries the raw text so the UI can
-    /// show it verbatim instead of inventing an explanation.
+    /// The CLI refused and said why, in its own error envelope.
+    ///
+    /// Carries the `ErrorCode` string rather than prose so the UI can branch on the
+    /// code — `CONFIG_INVALID` is the one failure the window can repair, and
+    /// matching that on a message would break the first time the message is
+    /// reworded.
+    case cli(status: Int32, error: ErrorBody)
+    /// stdout was not the JSON we expect, and not an error envelope either.
+    /// Carries the raw text so the UI can show it verbatim instead of inventing an
+    /// explanation.
     case undecodable(status: Int32, raw: String)
 }
 
@@ -85,9 +93,27 @@ public actor GitpicRunner {
     ) async throws -> T {
         let out = try await run(args)
         guard let decoded = try? JSONDecoder().decode(T.self, from: out.stdout) else {
-            throw RunFailure.undecodable(status: out.status, raw: Self.rawText(out))
+            throw Self.failure(out)
         }
         return decoded
+    }
+
+    /// What a stdout that is not this command's payload was.
+    ///
+    /// Payload first, this second, and that order is what leaves `doctor` and
+    /// `upload` behaving exactly as before: both declare `error` optional, so an
+    /// unhealthy report and a partial upload decode as *data* and never arrive
+    /// here. The commands whose payload is non-optional — `config get`, `list` —
+    /// do, and used to turn a perfectly good `{ok:false,error:…}` into
+    /// `.undecodable` with the JSON as prose. That is how one stale line in a
+    /// config file became "读取配置失败。" in three panes with nothing to act on:
+    /// the CLI had named the file and the offending key all along.
+    nonisolated static func failure(_ out: ProcessOutcome) -> RunFailure {
+        if let envelope = try? JSONDecoder().decode(ErrorEnvelope.self, from: out.stdout),
+           !envelope.ok {
+            return .cli(status: out.status, error: envelope.error)
+        }
+        return .undecodable(status: out.status, raw: rawText(out))
     }
 
     nonisolated static func rawText(_ out: ProcessOutcome) -> String {
@@ -289,6 +315,18 @@ extension GitpicRunner {
         try await runJSON(["config", "get", "--json"], as: ConfigEnvelope.self).config
     }
 
+    /// Where the config file lives — asked of the CLI, never recomputed here.
+    ///
+    /// `config path` is the one config subcommand that does not call
+    /// `Config::load()` (`src/commands/config_cmd.rs`), so it still answers when the
+    /// file cannot be parsed — which is exactly when the window needs the path, to
+    /// offer to reveal or move the file. A second copy of the XDG resolution rules
+    /// on this side would be one more thing to drift.
+    public func configPath() async throws -> URL {
+        let shown = try await runJSON(["config", "path", "--json"], as: PathEnvelope.self).path
+        return URL(fileURLWithPath: shown)
+    }
+
     public func history(limit: Int = 50) async throws -> [HistoryRecord] {
         try await runJSON(["list", "--limit", String(limit), "--json"],
                           as: HistoryEnvelope.self).results
@@ -317,9 +355,7 @@ extension GitpicRunner {
         let keys = changedKeys(from: old, to: new)
         for key in keys {
             let out = try await run(["config", "set", key.rawValue, key.value(in: new), "--json"])
-            guard out.status == 0 else {
-                throw RunFailure.undecodable(status: out.status, raw: Self.rawText(out))
-            }
+            guard out.status == 0 else { throw Self.failure(out) }
         }
         return keys
     }
