@@ -144,14 +144,40 @@ final class AppModel {
         Notifier.post(UploadNotice(title: title, body: body))
     }
 
+    /// How long work has to run before it is worth telling anyone about.
+    ///
+    /// Every `reload()` used to flip `busy` twice — and a reload runs on every window
+    /// open. Measured on this machine it takes ~40ms of `gitpic` and finishes long
+    /// before anyone could read a spinner, yet everything gated on `busy` still
+    /// changed twice on the way past: the toolbar's 刷新 and the 连通性测试 button
+    /// greyed out and came back, and the spinner appeared and vanished. A progress
+    /// report for work that is already over is not a report, it is a flicker.
+    ///
+    /// So `busy` now means "still running after a quarter second". Work that is
+    /// genuinely slow — a save writing one process per changed key, an upload, a
+    /// connectivity test — crosses that line and reports normally.
+    private static let busyDelay = Duration.milliseconds(250)
+
+    /// Pending "announce it now" for the debounce above, cancelled if the work
+    /// finishes first.
+    private var busyAnnouncement: Task<Void, Never>?
+
     private func beginWork() {
         inflight += 1
-        busy = true
+        guard busyAnnouncement == nil, !busy else { return }
+        busyAnnouncement = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.busyDelay)
+            guard let self, !Task.isCancelled else { return }
+            self.busy = self.inflight > 0
+        }
     }
 
     private func endWork() {
         inflight = max(0, inflight - 1)
-        busy = inflight > 0
+        guard inflight == 0 else { return }
+        busyAnnouncement?.cancel()
+        busyAnnouncement = nil
+        busy = false
     }
 
     func reload() async {

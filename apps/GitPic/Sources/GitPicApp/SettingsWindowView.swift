@@ -115,17 +115,32 @@ struct SettingsWindowView: View {
                 // The bar's spinner, in the one place still worth having it: a save
                 // writes one `gitpic` process per changed key, so "nothing is
                 // happening" and "ten processes are queued" need telling apart.
-                if model.busy { ProgressView().controlSize(.small) }
+                //
+                // Always in the toolbar, only sometimes visible. Inserting the item
+                // when work started and removing it when it stopped made AppKit
+                // relayout the toolbar, so 刷新 / 放弃 / 保存 all slid sideways and back
+                // every time the window opened — the spinner announced the work by
+                // moving the controls next to it. Reserving the space costs one
+                // spinner's width and nothing moves.
+                ProgressView()
+                    .controlSize(.small)
+                    .opacity(model.busy ? 1 : 0)
+                    .accessibilityHidden(!model.busy)
 
                 Button { Task { await model.reload() } } label: {
                     Image(systemName: "arrow.clockwise")
                 }
+                // Not disabled while a read is in flight. `reload()` is idempotent and
+                // every invocation goes through `GitpicRunner`'s serial gate, so a
+                // second press queues a second read rather than racing the first —
+                // and gating it on `busy` meant the button greyed out and came back on
+                // every window open, which is a worse trade than an extra read.
+                //
                 // ⌘R, where reload lives on every other Mac. `⌘S` on 保存 already
                 // worked this way: SwiftUI dispatches these inside the window, which
                 // is why they were the two keys that *did* respond before the app had
                 // a main menu at all — see `MainMenu`.
                 .keyboardShortcut("r")
-                .disabled(model.busy)
                 .help("重新读取配置与历史（⌘R）")
 
                 if activeTab.savesConfig {
