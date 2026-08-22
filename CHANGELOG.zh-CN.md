@@ -49,6 +49,18 @@
   「换个 store 同目录走磁盘不走网络」、「CDN 404 会落到 raw」、「两个都挂时报 raw 的答复」、
   「超限的原图连请求都不发」，以及 `sha` 的路径注入用例。
 
+### CI
+
+- **`scripts/build-app.sh` 的 Info.plist heredoc 不再执行注释里的三个词。** 那个 heredoc 是
+  `<<PLIST` —— 不加引号,因为要展开 `$APP_VERSION` 和 `$CLI_VERSION` —— 而注释里写着
+  \`Cancel\` / \`Open\` / \`Undo\`。未加引号的 heredoc 里反引号就是命令替换,所以每次构建都
+  真的去执行了这三个名字:`Open` 在大小写不敏感的文件系统上命中 `/usr/bin/open`,于是构建日志里
+  冒出一段 open 的用法说明和一行 `Undo: command not found`,而生成的 plist 里那三个词变成了空白。
+  plist 始终是合法的、每个 key 也都是对的(`plutil -lint` 一直过),所以这个 bug 一直没露出来 ——
+  但它会执行 PATH 里任何叫这三个名字的东西。按 `scripts/new-worktree.sh` 早就在用的写法转义,
+  那份文件的作者显然知道这个坑。转义后实测:构建日志干净了,plist 里那三个词回来了,三处版本号
+  照旧正确替换。
+
 ## [0.11.5] - 2026-08-22
 
 ### 名字归位：仓库和 cask 都叫 `gitpic`
