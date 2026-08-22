@@ -726,8 +726,14 @@ struct HistoryPane: View {
 
     private func row(_ r: HistoryRecord) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: r.deduped ? "doc.on.doc" : "photo")
-                .foregroundStyle(.secondary)
+            // `savedConfig` is what an address is built from, so with no readable
+            // config there is no URL to fetch — the row still lists what was uploaded,
+            // it just cannot show it. The `configFailure` branch above already covers
+            // the case where the read *failed*; this covers the seconds before the
+            // first read lands.
+            HistoryThumbnail(source: model.savedConfig.map { r.thumbnailSource(config: $0) },
+                             store: model.thumbnails,
+                             deduped: r.deduped)
             VStack(alignment: .leading, spacing: 2) {
                 Text(r.name).lineLimit(1)
                 Text(r.path)
@@ -774,6 +780,118 @@ struct HistoryPane: View {
 
     private func byteText(_ n: Int) -> String {
         n < 1024 ? "\(n) B" : String(format: "%.1f KB", Double(n) / 1024)
+    }
+}
+
+/// One history row's picture: a fixed box holding the image, or the reason there is
+/// none.
+///
+/// **Fixed box, image fitted inside it.** The width has to be constant or every row's
+/// text starts at a different x, which is the one thing a list of 100 rows cannot
+/// afford; and fitting rather than filling means a screenshot is shown whole instead
+/// of centre-cropped to a shape it never had. The cost is letterboxing, which is why
+/// the box is a visible surface rather than nothing.
+///
+/// The states are kept apart rather than collapsed into "no picture": a 404 on a
+/// private image host is permanent and needs a decision from the user, a transport
+/// error is worth reopening the pane for, and an original past the size ceiling is
+/// working as designed. ``ThumbnailFailure/message`` is what the tooltip says.
+private struct HistoryThumbnail: View {
+    /// `nil` when there is no config to build an address from.
+    let source: ThumbnailSource?
+    let store: ThumbnailStore
+    let deduped: Bool
+
+    /// 44×32 at a 4:3-ish ratio, which is the shape most screenshots arrive in, so
+    /// the common case letterboxes least. Retina wants 88×64 of it; the decoder is
+    /// asked for 160 px on the long edge (``ThumbnailLimits/maxPixel``).
+    private static let width: CGFloat = 44
+    private static let height: CGFloat = 32
+    private static let corner: CGFloat = 5
+
+    private enum Load {
+        case pending
+        case loaded(Thumbnail)
+        case failed(ThumbnailFailure)
+    }
+    @State private var load: Load = .pending
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: Self.corner, style: .continuous)
+                .fill(.quaternary)
+            switch load {
+            case .pending:
+                // No spinner, deliberately. A hundred of them chasing each other down
+                // the pane reports nothing and is the noisiest thing on screen; the
+                // placeholder is the same glyph this row carried before.
+                Image(systemName: "photo").foregroundStyle(.tertiary)
+            case .loaded(let thumb):
+                Image(decorative: thumb.image, scale: 1)
+                    // The decoded thumbnail is larger than the box on a 1× display,
+                    // so this is a downscale and the interpolation is visible.
+                    .interpolation(.high)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            case .failed:
+                Image(systemName: "photo.badge.exclamationmark").foregroundStyle(.tertiary)
+            }
+        }
+        .frame(width: Self.width, height: Self.height)
+        .clipShape(RoundedRectangle(cornerRadius: Self.corner, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: Self.corner, style: .continuous)
+                .strokeBorder(.separator, lineWidth: 0.5)
+        }
+        // Outside the clip, so the badge can sit on the corner rather than be cut by
+        // it — the same place Finder puts an alias badge.
+        .overlay(alignment: .bottomTrailing) { dedupBadge }
+        .help(tooltip)
+        // Keyed on the source, so a row whose address moved — `github.owner/repo/
+        // branch` changed under it — refetches instead of showing the old picture.
+        // Cancelled when the row scrolls away; the fetch itself survives that on
+        // purpose, so the next row wanting the same image finds it cached.
+        .task(id: source) {
+            guard let source else { return }
+            switch await store.thumbnail(for: source) {
+            case .success(let thumb): load = .loaded(thumb)
+            case .failure(let why):   load = .failed(why)
+            }
+        }
+    }
+
+    /// `deduped` used to be the row's leading glyph — `doc.on.doc` instead of
+    /// `photo` — and the thumbnail took that slot. It is a badge now rather than
+    /// dropped: a deduped upload shows the *same picture* as the row it deduped
+    /// against, which is exactly why the distinction has to be stated somewhere.
+    @ViewBuilder private var dedupBadge: some View {
+        if deduped {
+            Image(systemName: "doc.on.doc.fill")
+                .font(.system(size: 7, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(2)
+                .background(Circle().fill(.background))
+                .overlay(Circle().strokeBorder(.separator, lineWidth: 0.5))
+                .offset(x: 3, y: 3)
+                .help("内容重复：仓库里这个路径已经是同样的内容，这次没有再上传")
+        }
+    }
+
+    /// Always something, never an empty tooltip: the failure message where there is
+    /// one, and otherwise the address the picture came from — which the row's own path
+    /// line can only show truncated.
+    private var tooltip: String {
+        switch load {
+        case .failed(let why):
+            return why.message
+        case .pending:
+            return source == nil ? "还没读到配置，取不了缩略图" : "正在取缩略图…"
+        case .loaded:
+            // The address it was *reached* at is not recorded — a CDN hit and a raw
+            // fallback are one cached image afterwards — so this names where the row
+            // points, which is what the truncated path line cannot show in full.
+            return source?.urls.first ?? ""
+        }
     }
 }
 

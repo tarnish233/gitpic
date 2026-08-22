@@ -48,6 +48,14 @@ final class AppModel {
     var draft: GitpicConfig?
     var history: [HistoryRecord] = []
 
+    /// Thumbnails for the history pane.
+    ///
+    /// One store for the whole process, not one per view: the settings window now
+    /// survives being closed (see ``SettingsWindowController``), and even if it did
+    /// not, the point of a memory cache is that reopening 历史 costs nothing. Its disk
+    /// layer outlives the process anyway — see ``ThumbnailStore``.
+    let thumbnails = ThumbnailStore()
+
     /// Which snippet form the next copy produces — syntax and address, chosen
     /// independently.
     ///
