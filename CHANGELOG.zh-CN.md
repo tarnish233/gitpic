@@ -4,9 +4,40 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.13.2] - 2026-08-22
 
-### README 先讲 App，以及一条会把人装错东西的安装说明
+### App 改发 dmg，设置界面少说几句话
+
+**macOS App 从这一版起发 `GitPic-<版本>-macos-arm64.dmg`，不再发压缩包。** 镜像里除了 App 还有一个
+指向 `/Applications` 的符号链接 —— 这个别名才是它值得做成 dmg 的理由，打开就能拖过去，zip 给不了。
+UDZO 压缩，体积和原来的 zip 差不多：拿 0.13.1 的 bundle 实测 4.76 MB 对 4.35 MB，为安装手感贵 9%。
+
+**但它对 Gatekeeper 毫无帮助，这点没变。** App 仍是本机 ad-hoc 签名、未经 Apple 公证的，下载下来的
+dmg 一样带隔离属性 —— 手动安装的人**仍然要**跑 `xattr -dr com.apple.quarantine`（用 brew 装的话 brew
+替你做）。dmg 改善的是安装的手感，不是 macOS 对它的信任。
+
+CI 的验证方式跟着改了：**只读挂载镜像后就地断言**，而不是解压一份出来查 —— 发布的是镜像，那就该查
+镜像。原有十条断言一条没少，另加一条查 `/Applications` 别名还在（丢了它照样能手装，只是会悄悄不再是
+"拖一下"）。整条打包+验证在本机 macOS 上先跑通了才交给 CI。
+
+### App
+
+- **状态栏菜单的三个省略号删了**：`选择文件上传`、`打开设置`、`连通性测试`。需要说明这是**有意偏离
+  平台惯例** —— macOS 用 `…` 标记"这个命令还需要更多输入才能完成"，Apple 自己的 `设置…` 和所有打开
+  面板的项都带它，而这三项确实都会打开东西。
+- **「上传」页「链接」的说明只留第一句**（两个键叫什么、按「保存」才生效）。删掉的是"状态栏菜单即时
+  写入 / 复制哪个 snippet / 六种组合不重传 / `-f` `--link` 可临时覆盖"那一整段 —— 都是真的，但在一个
+  人正盯着两个分段控件的时候都不需要。
+- **「自动复制到剪贴板」的说明整段删掉**，开关收成一行；开关自己说明了它做什么。App 为什么和 CLI 读
+  同一个键，留成了代码注释 —— 那才是它该待的地方。
+- **「关于」页删掉两处解释**：`versionNote` 整个移除（它用三段散文说的事，两个版本号对上或对不上本来
+  就说清了），「工具位置」保留两行路径、删掉那句关于 Finder 启动只有最小 PATH 的话。
+
+### 文档
+
+- **两份 README 顶部加了 App 图标**，居中排版（图标 → 标题 → 一句话说明 → 语言切换），和多数开源项目
+  一致。图标是从已安装的 `AppIcon.icns` 里抽出来的（`iconutil`，512×512），不是重画的 —— README 上
+  显示的就是 App 实际装的那个。放在 `docs/assets/icon.png`，相对路径，fork 和离线都能渲染。
 
 **旧 README 里的 `brew install tarnish233/tap/gitpic` 被写成"仍然装命令行"，而它现在装的是
 App。** 0.11.5 把 cask 改名成 `gitpic` 并删掉了 formula 的旧名映射，那次发布只改了 changelog 和
@@ -1240,7 +1271,8 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic/compare/v0.13.1...HEAD
+[未发布]: https://github.com/tarnish233/gitpic/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.2
 [0.13.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.1
 [0.13.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.0
 [0.12.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.12.0

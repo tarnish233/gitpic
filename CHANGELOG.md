@@ -4,9 +4,54 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.13.2] - 2026-08-22
 
-### The README leads with the app, and one install line that installed the wrong thing
+### The app ships as a dmg, and the settings panes say less
+
+**The macOS app ships as `GitPic-<version>-macos-arm64.dmg` from this version on, not a
+zip.** The image carries an `/Applications` symlink beside the app — that alias is what
+makes it worth being a dmg at all: open it and drag across, which a zip cannot offer.
+UDZO, so it is about the size the zip was: measured on 0.13.1's bundle, 4.76 MB against
+4.35 MB, 9% for the install experience.
+
+**It does nothing for Gatekeeper, and that has not changed.** The app is still ad-hoc
+signed on the build machine and not notarised by Apple, so a downloaded dmg is quarantined
+exactly as the zip was — a manual install **still** needs
+`xattr -dr com.apple.quarantine` (brew does it for you). The dmg is about how installing
+feels, not about whether macOS trusts it.
+
+CI's verification changed with it: the image is **mounted read-only and asserted in
+place** rather than extracted, because what ships is the image. All ten previous
+assertions survive, plus one on the `/Applications` symlink — a build that lost it would
+still install by hand and would silently stop being a drag-across. The whole packaging and
+verification sequence was run locally on macOS before CI was trusted with it.
+
+### App
+
+- **The three ellipses are gone from the status-item menu**: `选择文件上传`, `打开设置`,
+  `连通性测试`. Worth stating that this is a **deliberate step away from the platform** —
+  macOS uses `…` to mark a command that needs more input before it completes, Apple's own
+  Settings… and every open-panel item carry one, and all three of these do open something.
+- **上传's 链接 caption keeps only its first sentence** (what the two keys are called, and
+  that 保存 applies them). Gone is the paragraph about the status-item menu writing
+  immediately, which snippet gets copied, the six combinations not re-uploading, and
+  `-f` / `--link` overriding — all true, none of it needed while someone is looking at two
+  segmented controls.
+- **自动复制到剪贴板 loses its caption entirely** and collapses to a one-line toggle; the
+  switch says what it does. Why the app honours the same key as the CLI is now a code
+  comment, which is where it belongs.
+- **关于 loses two explanations**: `versionNote` is deleted outright (its three cases spelled
+  out in prose what two version numbers agreeing or disagreeing already says), and 工具位置
+  keeps its two paths while losing the sentence about a Finder-launched app getting a
+  minimal PATH.
+
+### Docs
+
+- **Both READMEs now open with the app icon**, centred (icon → title → one-line
+  description → language switch), the way most open-source projects do. The icon is
+  extracted from the installed `AppIcon.icns` (`iconutil`, 512×512) rather than drawn
+  again, so the README shows what the app installs. It lives at `docs/assets/icon.png` — a
+  relative path, so forks and offline copies render too.
 
 **The old README documented `brew install tarnish233/tap/gitpic` as still installing the
 command line; it installs the app.** 0.11.5 renamed the cask to `gitpic` and deleted the
@@ -1656,7 +1701,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.2
 [0.13.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.1
 [0.13.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.0
 [0.12.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.12.0
