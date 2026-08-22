@@ -673,6 +673,34 @@ struct HistoryPane: View {
     /// would be widening the app's shared state for one `Text`.
     @State private var progress: ThumbnailProgress = .idle
 
+    /// A copy that just landed: which row's button is showing its checkmark, and which
+    /// click put it there.
+    ///
+    /// One value for the whole pane rather than state inside each row, because the
+    /// states it has to rule out are all *between* rows. Two rows can never be
+    /// mid-checkmark at once, and copying several in a row moves the mark instead of
+    /// leaving a trail of them: whichever click was last owns the only mark there is,
+    /// and the row it left reverts in the same update.
+    ///
+    /// `seq` is not decoration. `.task(id:)` restarts only when the id actually
+    /// *changes*, so keyed on the record alone a second click on the **same** row would
+    /// not restart anything — the first click's timer would still be the one running,
+    /// and it would clear the second click's checkmark early, after whatever was left
+    /// of the first second. Bumping a counter on every copy makes each click a distinct
+    /// id, so the timer restarts and the mark always lasts its full stay.
+    private struct CopyFlash: Equatable {
+        let record: HistoryRecord.ID
+        let seq: Int
+    }
+    @State private var flash: CopyFlash?
+    @State private var flashCount = 0
+
+    /// How long the checkmark stays. Long enough to be seen if the eye was elsewhere on
+    /// the row when it was clicked, short enough that it is gone before the next copy —
+    /// and it does not have to carry information the way a banner did, because the
+    /// pointer is already on the thing it is about.
+    private static let flashDuration = Duration.seconds(1)
+
     var body: some View {
         // Same container as every other pane, and that is the whole point.
         //
@@ -772,6 +800,22 @@ struct HistoryPane: View {
                     progress = update
                 }
             }
+            // The checkmark's only way back. Keyed on the whole `CopyFlash`, so every
+            // click — including a second one on the same row — cancels the previous
+            // timer and starts a fresh one; see ``CopyFlash``. Clearing sets the id to
+            // `nil`, which re-runs this and falls straight out of the guard.
+            //
+            // The cancellation check is what keeps a mark from being cleared by the
+            // *previous* row's timer: when the id changes, this closure is cancelled
+            // mid-sleep, and a cancelled run that went on to write `flash = nil` would
+            // wipe the mark the new click had just set. Same shape as
+            // `AppModel.beginWork`'s debounce, for the same reason.
+            .task(id: flash) {
+                guard flash != nil else { return }
+                try? await Task.sleep(for: Self.flashDuration)
+                guard !Task.isCancelled else { return }
+                flash = nil
+            }
         }
     }
 
@@ -794,15 +838,65 @@ struct HistoryPane: View {
             Spacer()
             Text(byteText(r.size))
                 .font(.caption).monospacedDigit().foregroundStyle(.secondary)
-            Button { copy(r) } label: { Image(systemName: "doc.on.clipboard") }
+            Button { copy(r) } label: { copyGlyph(flashed: flash?.record == r.id) }
                 .buttonStyle(.borderless)
-                .help("复制 \(model.linkForm.label)")
+                // Swapped with the glyph, because this doubles as what a screen reader
+                // reads off the button — see the note on ``copy(_:)`` about what the
+                // checkmark cannot say out loud.
+                .help(flash?.record == r.id ? "已复制" : "复制 \(model.linkForm.label)")
         }
         .padding(.vertical, 2)
     }
 
+    /// The copy button's icon: the clipboard, or the checkmark that says the click
+    /// landed.
+    ///
+    /// **Both glyphs are always laid out, one of them transparent.** A plain
+    /// `Image(systemName: flashed ? … : …)` would resize the button as it swapped:
+    /// measured at the 13 pt body size these rows inherit, `doc.on.clipboard` renders
+    /// 16×18 pt and `checkmark` 14×13, so the mark would pull the byte count beside it
+    /// 2 pt to the right and shorten the row's tallest trailing element by 5 on the way
+    /// through — a twitch in the layout, to report that nothing went wrong.
+    ///
+    /// A `.frame(width:height:)` would pin it too, at the price of a hard-coded pair of
+    /// numbers to re-measure whenever either symbol is redrawn. Stacking them makes the
+    /// frame the union of the two glyphs, which is the same fix and derives itself.
+    ///
+    /// The swap is instant, deliberately: this is direct feedback for a click on the
+    /// control under the pointer, and immediacy is the whole content of the message. The
+    /// one animation in this app is for something that arrives late — see ``Motion``.
+    private func copyGlyph(flashed: Bool) -> some View {
+        ZStack {
+            Image(systemName: "doc.on.clipboard").opacity(flashed ? 0 : 1)
+            Image(systemName: "checkmark").opacity(flashed ? 1 : 0)
+        }
+    }
+
     /// History stores one URL and no record of which kind it is, so both addresses
     /// are rebuilt from the configured target — see `UploadedLink`.
+    ///
+    /// **Success is reported on the button; failure keeps the notification.** The split
+    /// is not a preference, it is ``AppModel/notify(title:body:)``'s own justification
+    /// applied where it holds and dropped where it does not. That justification is
+    /// "outcomes are events, the window is usually closed when one happens" — true of an
+    /// upload, and false of this button, which cannot be clicked without the window
+    /// open, this pane in front, and the pointer resting on the control itself. A banner
+    /// plus a system sound (`Notifier.post` sets `content.sound = .default`) for a click
+    /// whose result is already under the cursor was the loudest available way of saying
+    /// nothing.
+    ///
+    /// The failures below keep their banners because they carry a diagnosis no badge can
+    /// hold: ``CDNUnavailable/ambiguousBranch`` is a sentence about a `/` in the branch
+    /// name making every jsDelivr address a 404, and the remedy is a config change in
+    /// another pane. A checkmark cannot say that, and neither can its absence. `Notifier`
+    /// itself is untouched for the same reason — an upload finishing still wants the
+    /// banner and the sound, because then the window really may be shut.
+    ///
+    /// One cost, stated because it is real: a checkmark is silent where the banner was
+    /// announced, so a VoiceOver user loses a spoken confirmation and gets a changed
+    /// button label instead. The log line below is what still distinguishes "copied, and
+    /// you looked away" from "the button did nothing" after the fact — the same reason
+    /// ``AppModel/writeLinkForm(_:)`` logs the success it deliberately does not announce.
     private func copy(_ r: HistoryRecord) {
         guard let cfg = model.savedConfig else {
             // Was a bare `return`: the button did nothing at all and said nothing
@@ -823,7 +917,9 @@ struct HistoryPane: View {
         let pb = NSPasteboard.general
         pb.clearContents()
         if pb.setString(text, forType: .string) {
-            model.notify(title: "已复制 \(form.label)", body: r.name)
+            flashCount += 1
+            flash = CopyFlash(record: r.id, seq: flashCount)
+            Diagnostics.log("copied \(form.label) from history: \(r.name)")
         } else {
             model.notify(title: "写剪贴板失败", body: r.name)
         }
@@ -902,11 +998,33 @@ private struct HistoryThumbnail: View {
         // branch` changed under it — refetches instead of showing the old picture.
         // Cancelled when the row scrolls away; the fetch itself survives that on
         // purpose, so the next row wanting the same image finds it cached.
+        //
+        // **Timed, so a cache hit and a download are not given the same treatment.**
+        // The store cannot be asked which layer answered — and should not be, since
+        // the answer that matters is not "was it cached" but "did anyone see the
+        // placeholder". Both questions have the same answer, and the elapsed time is
+        // the one that measures it directly: below the threshold nothing was on screen
+        // long enough to fade *from*, and animating there would put a flutter on every
+        // reopen of a warm pane where today there is none. Above it the grey box was
+        // read as a grey box, and the picture replacing it is a change worth softening.
+        // ``Motion/thumbnailIsLateAfter`` carries the numbers.
+        //
+        // Only the image. A late *failure* swaps one tertiary glyph for another inside
+        // the same box, at the same size — there is no cut there to soften.
         .task(id: source) {
             guard let source else { return }
-            switch await store.thumbnail(for: source) {
-            case .success(let thumb): load = .loaded(thumb)
-            case .failure(let why):   load = .failed(why)
+            let asked = ContinuousClock.now
+            let result = await store.thumbnail(for: source)
+            let late = ContinuousClock.now - asked >= Motion.thumbnailIsLateAfter
+            switch result {
+            case .success(let thumb):
+                if late {
+                    withAnimation(Motion.thumbnailArrival) { load = .loaded(thumb) }
+                } else {
+                    load = .loaded(thumb)
+                }
+            case .failure(let why):
+                load = .failed(why)
             }
         }
     }
@@ -915,10 +1033,36 @@ private struct HistoryThumbnail: View {
     /// `photo` — and the thumbnail took that slot. It is a badge now rather than
     /// dropped: a deduped upload shows the *same picture* as the row it deduped
     /// against, which is exactly why the distinction has to be stated somewhere.
+    ///
+    /// **`.caption2` and not `.system(size: 7)`.** 7 pt was below every text style the
+    /// platform ships — the macOS scale bottoms out at 10 pt, which `footnote`, `caption`
+    /// and `caption2` all resolve to (measured with `NSFont.preferredFont(forTextStyle:)`)
+    /// — so it was a number with nothing behind it, and one that could not follow the
+    /// system text size anywhere.
+    ///
+    /// `.imageScale(.small)` is the half that keeps the swap from being a regression, and
+    /// it is a relative knob rather than the magic number returning in a second spelling.
+    /// Footprints below are the badge's own rendered layout size, measured with
+    /// `ImageRenderer` against this same 44×32 box:
+    ///
+    /// | spelling | badge | of box height |
+    /// | --- | --- | --- |
+    /// | `.system(size: 7)`, as shipped | 13×16 | 50% |
+    /// | `.caption2`, default medium scale | 17×20 | 62% |
+    /// | `.caption2` + `.small` | 14×17 | 53% |
+    ///
+    /// The middle row is why the second modifier is here: at the default scale the token
+    /// alone grows the badge to 17×20, which crowds the corner and starts competing with
+    /// the picture 0.12.0 put in this slot. `.small` lands 1 pt larger on each axis than
+    /// what shipped — still clear of the corner, glyph a shade bigger rather than
+    /// smaller, and checked by eye at 1× and 2× as well as measured. `.footnote` +
+    /// `.small` renders identically, both being 10 pt; `.caption2` is named because it is
+    /// the bottom of the scale and says so.
     @ViewBuilder private var dedupBadge: some View {
         if deduped {
             Image(systemName: "doc.on.doc.fill")
-                .font(.system(size: 7, weight: .semibold))
+                .font(.caption2.weight(.semibold))
+                .imageScale(.small)
                 .foregroundStyle(.secondary)
                 .padding(2)
                 .background(Circle().fill(.background))
