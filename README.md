@@ -82,7 +82,9 @@ brew install --cask tarnish233/tap/gitpic_app   # 升级：brew upgrade --cask g
 配置和上传历史两边共用：在 App 里改仓库，终端里立刻生效，反之也一样。
 
 只想要命令行、或者用 Linux / Intel Mac 的话装 formula。**两个别都装** —— 它们抢同一个
-`bin/gitpic`，谁先到归谁，后装的那个 brew 会提示 link 失败或 `skipping link`。要换先卸掉另一个。
+`bin/gitpic` 和同三份补全，谁先到归谁：后装 formula 会以 `brew link` 失败结束（keg 装上但没 link），
+后装 cask 则打印 `skipping link` 和 `Will not overwrite`。要换先卸掉另一个；从 formula 切到 cask
+之后补一次 `brew reinstall --cask gitpic_app`，把当初被跳过的链接建起来。
 
 从菜单栏图标上传剪贴板图片或选文件，链接自动进剪贴板；设置窗口可以改图床仓库和上传选项，看历史。
 
