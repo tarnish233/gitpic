@@ -34,11 +34,21 @@ $ gitpic list
 
 ## Install
 
+The CLI and the menu-bar app are two separate things, and their names are separate
+too: the CLI's formula is **`gitpic_cli`**, the app is **GitPic.app** (below). You
+install `gitpic_cli`; the command stays `gitpic`.
+
 **Homebrew (macOS/Linux, recommended — adds it to `PATH` and installs shell completions)**
 
 ```bash
-brew install tarnish233/tap/gitpic
+brew install tarnish233/tap/gitpic_cli
 ```
+
+> The formula used to be called `gitpic`. The old name still installs (the tap
+> carries a rename map), and an existing install is migrated by `brew update` /
+> `brew upgrade`, or by `brew migrate gitpic` on demand. The migration only renames
+> the directory in the Cellar — the command, the completion scripts and the
+> `/opt/homebrew/bin/gitpic` symlink are unchanged.
 
 **Prebuilt binary**
 
@@ -227,7 +237,7 @@ Codex, and other agents how to call it. Install it one of these ways.
 **From the CLI (any agent)**
 
 The skill is embedded in the binary, so the installed copy always matches the
-`gitpic` version you are running — re-run this after `brew upgrade gitpic` to
+`gitpic` version you are running — re-run this after `brew upgrade gitpic_cli` to
 resync:
 
 ```bash
