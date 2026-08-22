@@ -4,6 +4,60 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### The README leads with the app, and one install line that installed the wrong thing
+
+**The old README documented `brew install tarnish233/tap/gitpic` as still installing the
+command line; it installs the app.** 0.11.5 renamed the cask to `gitpic` and deleted the
+formula's old-name map, but that release only touched the changelogs and the manifests —
+neither README followed. Verified now: that name resolves to the cask (0.13.1), and
+`--formula` on it reports `No available formula ... Found a cask named
+"tarnish233/tap/gitpic" instead`. Anyone following the old text wanting the CLI would have
+installed the app. The correct line for the command line alone has always been `brew
+install tarnish233/tap/gitpic_cli`. The old cask name `gitpic_app` still resolves through
+`cask_renames.json`, so nothing already installed breaks.
+
+**Both READMEs are reordered and a good deal shorter**: GitPic.app first, then that the
+command line *is* the app (one file, so they cannot be at different versions, with config
+and history shared) along with CLI usage, and the agent skill last. 271 → 178 lines,
+English 315 → 202. What went is duplication and over-detail — the opening console
+transcript, the case-by-case expansion of the formula/cask conflict, the standalone
+completion and downloads sections (one line each now), and several paragraphs of prose
+about `--json`, strict key validation and `doctor`. What stayed is what someone types: the
+full `config.toml`, the placeholder list, the exit-code table, the three `--json`
+exceptions, and the two rules for agents. Every command in the new README was run.
+
+**AGENTS.md now says how the tap learns about a release**, and loses two claims in the
+same paragraph that were no longer true (that the cask is `gitpic_app`; that
+`formula_renames.json` must not be removed — it was deleted in 0.11.5, precisely because
+keeping it made `gitpic` ambiguous between a formula and a cask).
+
+### CI
+
+- **The tap no longer waits up to six hours after a release.** `release.yml`'s `publish`
+  job fires a `repository_dispatch` at the tap (`gitpic-released`, with the version in the
+  payload) once the release is up, and the tap follows within seconds — measured at 10s.
+  The motivation was measured too: 0.13.0 was published at 05:17Z with the tap still
+  pinning 0.11.5, so `brew upgrade` had nothing to say about a version that was already
+  out. It needs `secrets.TAP_DISPATCH_TOKEN` — a fine-grained PAT limited to the tap with
+  Contents: write — because `GITHUB_TOKEN` cannot reach another repository.
+- **The tap keeps its six-hourly cron**, demoted to a fallback. That is the design, not an
+  oversight: an unset, expired or revoked token, or a GitHub hiccup, has to degrade to the
+  old behaviour instead of leaving the tap stuck forever. For the same reason the dispatch
+  step is guarded on the secret being non-empty (so it does not run at all until one
+  exists, and adding it could not break a release in the meantime) and is
+  `continue-on-error` (by the time it runs the release is published, and failing a good
+  release over something the cron fixes on its own is a bad trade).
+- **The dispatch carries the version, and the tap fails loudly when it disagrees.**
+  Publishing and `releases/latest` moving are not one atomic act, so a run that started a
+  moment early would read the previous release, pin the tap to it and report success —
+  then sit there until the next cron. That silent wrong answer is worse than a failure.
+  Both directions were tested: matching version → success; a deliberate `0.0.1` → failure,
+  logging `dispatch was fired for v0.0.1 but releases/latest is v0.13.1` and `refusing to
+  pin the tap to a release the dispatch did not name`, and dying before it downloaded a
+  checksum or rewrote the formula or cask — the tap was confirmed untouched afterwards.
+
 ## [0.13.1] - 2026-08-22
 
 ### The sidebar does not collapse: that button was modelled on the wrong window
