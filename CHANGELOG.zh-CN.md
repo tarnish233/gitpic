@@ -913,9 +913,9 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
   `CLAUDE_CONFIG_DIR` / `CODEX_HOME`），写入前先询问；`--agent`、`--dir`、`--yes`
   可跳过交互。若两家的 skills 目录软链到同一处，会合并为一个目标而不会重复写入。
   没有终端（脚本 / CI / 助手调用）时返回 `USAGE` 错误，不会挂住也不会擅自写入。
-- 新增 Claude Code 插件市场清单，可用 `/plugin marketplace add tarnish233/gitpic-cli`
+- 新增 Claude Code 插件市场清单，可用 `/plugin marketplace add tarnish233/gitpic`
   安装。
-- 新增 Codex 插件清单，可用 `codex plugin marketplace add tarnish233/gitpic-cli` 安装。
+- 新增 Codex 插件清单，可用 `codex plugin marketplace add tarnish233/gitpic` 安装。
 
 ### 变更
 - `SKILL.md` 移到 `skills/gitpic/SKILL.md`。这是两家插件格式共同的落点，因此三条分发渠道
@@ -1021,29 +1021,29 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.4...HEAD
-[0.11.4]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.4
-[0.11.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.3
-[0.11.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.2
-[0.11.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.1
-[0.11.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.0
-[0.10.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.10.0
-[0.9.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.9.0
-[0.8.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.8.0
-[0.7.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.7.0
-[0.6.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.6.0
-[0.5.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.5.1
-[0.5.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.5.0
-[0.4.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.4.0
-[0.3.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.3.0
-[0.2.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.3
-[0.2.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.2
-[0.2.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.1
-[0.2.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.2.0
-[0.1.6]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.6
-[0.1.5]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.5
-[0.1.4]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.4
-[0.1.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.3
-[0.1.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.2
-[0.1.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.1
-[0.1.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.1.0
+[未发布]: https://github.com/tarnish233/gitpic/compare/v0.11.4...HEAD
+[0.11.4]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.4
+[0.11.3]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.3
+[0.11.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.2
+[0.11.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.1
+[0.11.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.0
+[0.10.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.10.0
+[0.9.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.9.0
+[0.8.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.8.0
+[0.7.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.7.0
+[0.6.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.6.0
+[0.5.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.5.1
+[0.5.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.5.0
+[0.4.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.4.0
+[0.3.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.3.0
+[0.2.3]: https://github.com/tarnish233/gitpic/releases/tag/v0.2.3
+[0.2.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.2.2
+[0.2.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.2.1
+[0.2.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.2.0
+[0.1.6]: https://github.com/tarnish233/gitpic/releases/tag/v0.1.6
+[0.1.5]: https://github.com/tarnish233/gitpic/releases/tag/v0.1.5
+[0.1.4]: https://github.com/tarnish233/gitpic/releases/tag/v0.1.4
+[0.1.3]: https://github.com/tarnish233/gitpic/releases/tag/v0.1.3
+[0.1.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.1.2
+[0.1.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.1.1
+[0.1.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.1.0

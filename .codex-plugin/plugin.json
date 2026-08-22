@@ -6,8 +6,8 @@
     "name": "tarnish233",
     "url": "https://github.com/tarnish233"
   },
-  "homepage": "https://github.com/tarnish233/gitpic-cli",
-  "repository": "https://github.com/tarnish233/gitpic-cli",
+  "homepage": "https://github.com/tarnish233/gitpic",
+  "repository": "https://github.com/tarnish233/gitpic",
   "license": "MIT",
   "keywords": [
     "github",
@@ -30,6 +30,6 @@
       "把这张图片上传图床并生成 Markdown 链接。",
       "Host these two images and return both links."
     ],
-    "websiteURL": "https://github.com/tarnish233/gitpic-cli"
+    "websiteURL": "https://github.com/tarnish233/gitpic"
   }
 }
