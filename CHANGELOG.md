@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-08-22
+
+### The sidebar does not collapse: that button was modelled on the wrong window
+
+### Fixed
+
+- **The settings sidebar no longer collapses, and the button offering to collapse it is
+  gone.** Hiding and showing it lurched: the moment it expanded, the detail content was
+  still laid out at its collapsed width and ran off the window's right edge, clipped,
+  while the toolbar — measured against the now-narrower region — could not fit its items
+  and grew an `»` overflow chevron that appeared and vanished again. Two symptoms, one
+  cause, and the fix here is to **delete the operation rather than repair its animation**.
+- **This reverses what `192566c` decided in 0.11.2, and for a reason beyond the bug.**
+  That commit added the toggle on the grounds that its absence "did not match the
+  platform", citing Passwords and Mail. Those are **content browsers** with resizable
+  sidebars, and this window is not modelled on them: it is modelled on **System
+  Settings** — said out loud twice in the same source file — and **System Settings has no
+  sidebar toggle**. Four fixed panes do not need one; the analogy was to the wrong kind
+  of window.
+- **Three things go, so the operation is gone rather than merely hidden**: the
+  `columnVisibility` state, the binding on `NavigationSplitView`, and the toggle itself
+  via `.toolbar(removing: .sidebarToggle)`. Verified on the built bundle: the toolbar is
+  five buttons where it was six, with no 隐藏边栏 / 显示边栏 among them, and the menu bar
+  carries no View menu, so there is no menu item and hence no ⌃⌘S either.
+- **A leftover is recorded in a comment rather than silently deleted**, because it would
+  bite anyone who tries a toggle again: a `.frame(width: 200)` sat on the sidebar's
+  content as well as on its column. It was harmless when written, since the sidebar could
+  not collapse then — but once it could, every collapse animated a column from 200pt to 0
+  around content told in absolute points that it may only ever be 200 wide. No width
+  satisfies both instructions, so the transition had nowhere smooth to go.
+  `navigationSplitViewColumnWidth` was always the whole of what was wanted, and it is
+  what remains.
+- The cost is stated in the comment: the 200pt is permanent now, so a small screen cannot
+  reclaim it. That is the same deal System Settings offers.
+
 ## [0.13.0] - 2026-08-22
 
 ### Feedback moves back to where the action happens
@@ -1567,7 +1602,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.1
 [0.13.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.0
 [0.12.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.12.0
 [0.11.5]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.5
