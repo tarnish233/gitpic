@@ -1,8 +1,16 @@
-# gitpic
+<p align="center">
+  <img src="./docs/assets/icon.png" alt="GitPic" width="128">
+</p>
 
-**简体中文** | [English](./README.en.md)
+<h1 align="center">gitpic</h1>
 
-把本地或剪贴板里的图片传到 GitHub 仓库当图床，生成 Markdown 链接并复制到剪贴板。
+<p align="center">
+  把本地或剪贴板里的图片传到 GitHub 仓库当图床，生成 Markdown 链接并复制到剪贴板。
+</p>
+
+<p align="center">
+  <strong>简体中文</strong> · <a href="./README.en.md">English</a>
+</p>
 
 菜单栏 App 和命令行是同一个东西的两个界面，同版本、共用配置和上传历史。认证统一交给
 GitHub CLI（`gh`），配置文件里**不保存任何密钥**。
