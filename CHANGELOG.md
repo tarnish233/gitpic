@@ -72,6 +72,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that is reported", "an oversized original is never requested", and the path-injection
   cases for `sha`.
 
+### CI
+
+- **`scripts/build-app.sh`'s Info.plist heredoc no longer executes three words out of a
+  comment.** The heredoc is `<<PLIST` — unquoted, because it has to expand
+  `$APP_VERSION` and `$CLI_VERSION` — and the comment inside it read \`Cancel\` /
+  \`Open\` / \`Undo\`. In an unquoted heredoc a backtick *is* command substitution, so
+  every build really did run those three names: `Open` resolves to `/usr/bin/open` on a
+  case-insensitive filesystem, which printed a page of `open` usage into the build log
+  alongside `Undo: command not found`, and left the three words blank in the generated
+  plist. The plist stayed valid and every key stayed correct (`plutil -lint` always
+  passed), which is why this went unnoticed — but it would execute anything on `PATH`
+  named `Cancel`, `Open` or `Undo`. Escaped the way `scripts/new-worktree.sh` has been
+  doing it all along; whoever wrote that file knew about this. Verified after the fix:
+  the build log is clean, the three words are back in the plist, and all three version
+  substitutions still land.
+
 ## [0.11.5] - 2026-08-22
 
 ### The names line up: the repo and the cask are both `gitpic`

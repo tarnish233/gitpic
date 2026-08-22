@@ -99,8 +99,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
        AppKit localizes its *own* strings — the Edit menu's Undo/Redo titles, the
        open panel's buttons and sidebar — against the localizations the bundle
        declares, and a bundle that declares none is treated as English. That is why
-       a Chinese app came up with `Cancel` / `Open` and an English `Undo` sitting
-       next to 剪切/拷贝/粘贴.
+       a Chinese app came up with \`Cancel\` / \`Open\` and an English \`Undo\`
+       sitting next to 剪切/拷贝/粘贴.
        zh-Hans alone, not zh-Hans + en: there is no English UI here to fall back
        to, so someone running an English system is better served by one consistent
        language than by Chinese panes with English buttons. -->
