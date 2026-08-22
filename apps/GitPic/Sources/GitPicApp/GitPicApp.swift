@@ -26,6 +26,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var runner: GitpicRunner?
     private var tools: ToolPaths?
+
+    /// What the menu-bar icon is saying, as one value.
+    ///
+    /// Mutate this and let `refreshIcon()` draw; nothing else may assign
+    /// `statusItem.button?.image`. Three things now want the icon — the resting
+    /// mark, an upload in flight, and a drag hovering over it — and while the icon
+    /// was "whatever was assigned last" they could only take turns clobbering each
+    /// other. ``StatusIcon`` holds the combination and the precedence between them;
+    /// see its doc for the clobber this replaces.
+    private var statusIcon = StatusIcon() {
+        // Only on a real change. Nothing on the hot path touches this today — the
+        // hover is set on entry, not in `draggingUpdated`, which `StatusItemDropView`
+        // measured at ~78 calls for a one-second hover — and an icon that redraws only
+        // when it differs is one less thing that goes wrong if something ever does.
+        didSet { if statusIcon != oldValue { refreshIcon() } }
+    }
     /// Bounded to the same 8 the menu shows. Unbounded growth used to keep every
     /// upload of the session in memory for a status-item that only lists eight.
     ///
@@ -73,7 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let version = Bundle.main
             .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
         guard let paths = discovered.0 else {
-            statusItem.button?.image = Self.icon(symbol: "exclamationmark.triangle.fill")
+            statusIcon.state = .unavailable
             // The model has to be told the search *finished*, not just that there is
             // no runner: until then every pane reads a nil runner as "still looking"
             // and offers no way forward.
@@ -149,13 +165,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func report(_ report: UploadReport) {
         switch report {
         case .started(let n):
-            statusItem.button?.image = Self.icon(symbol: "arrow.up.circle")
+            statusIcon.state = .uploading
             Diagnostics.log("upload started: \(n) file(s)")
         case .succeeded(let summary), .failed(let summary):
-            statusItem.button?.image = Self.icon(symbol: "photo.on.rectangle.angled")
+            statusIcon.state = restingState
             Diagnostics.log("upload outcome: \(summary)")
         }
         if let notice = report.notice { Notifier.post(notice) }
+    }
+
+    /// What the icon goes back to once nothing is in flight.
+    ///
+    /// Not `.idle` unconditionally, which is what the line above used to hardcode.
+    /// With `gitpic` missing, `upload` and `uploadClipboard` both fail immediately
+    /// through `report(.failed)` — so the very failure the missing tool causes was
+    /// what erased the warning triangle it had put in the menu bar, and nothing set
+    /// it back for the rest of the session.
+    ///
+    /// Read off `AppModel.toolState` rather than kept as a flag here: that is already
+    /// the app's answer to "was the tool found", and two copies of it could disagree.
+    /// `.resolving` counts as idle on purpose — a failure reported while discovery is
+    /// still running (the "正在查找 gitpic" case) is not evidence the tool is absent,
+    /// and discovery is the only thing that decides that.
+    private var restingState: StatusIcon.State {
+        AppModel.shared.toolState == .missing ? .unavailable : .idle
     }
 
     // MARK: - Status item
@@ -166,9 +199,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return img
     }
 
+    /// Draw whatever ``statusIcon`` currently says.
+    ///
+    /// Keeps the previous glyph if the symbol will not resolve, rather than assigning
+    /// `nil` and leaving a blank gap in the menu bar where the app's only affordance
+    /// used to be. All four symbols do resolve — each checked through
+    /// `NSImage(systemSymbolName:)` on macOS 26.5 — so this guards against a future
+    /// rename, and is not a live fallback.
+    private func refreshIcon() {
+        guard let image = Self.icon(symbol: statusIcon.symbol) else { return }
+        statusItem?.button?.image = image
+    }
+
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.image = Self.icon(symbol: "photo.on.rectangle.angled")
+        refreshIcon()
         attachDropTarget()
         rebuildMenu()
     }
@@ -189,6 +234,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let drop = StatusItemDropView(frame: button.bounds)
         drop.autoresizingMask = [.width, .height]
         drop.onDrop = { [weak self] url in self?.upload(paths: [url]) }
+        // The whole of the target-side feedback: one flag into the icon's state, so
+        // an accepted hover cannot lose an in-flight upload's glyph and leaving
+        // cannot restore the wrong one. See ``StatusIcon``.
+        drop.onTargeted = { [weak self] targeted in self?.statusIcon.dropTargeted = targeted }
         button.addSubview(drop)
     }
 
