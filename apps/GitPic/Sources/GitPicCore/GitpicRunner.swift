@@ -347,12 +347,17 @@ extension GitpicRunner {
     public func applyConfig(from old: GitpicConfig, to new: GitpicConfig) async throws -> [ConfigKey] {
         let keys = changedKeys(from: old, to: new)
         guard !keys.isEmpty else { return [] }
-        var args = ["config", "set"]
+        // `--json` *before* the `--`, and the `--` before the pairs. The escape is
+        // what lets a value that starts with a hyphen through — a path template of
+        // `-x/{name}.{ext}` is a legal repo-relative template that clap would
+        // otherwise reject as an unknown flag — and it has to come last because
+        // everything after it is positional: a trailing `--json` would be counted
+        // as a third element of the pair list and fail as an odd argument count.
+        var args = ["config", "set", "--json", "--"]
         for key in keys {
             args.append(key.rawValue)
             args.append(key.value(in: new))
         }
-        args.append("--json")
         let out = try await run(args)
         guard out.status == 0 else { throw Self.failure(out) }
         return keys
