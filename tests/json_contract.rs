@@ -128,6 +128,15 @@ fn every_offline_subcommand_produces_json_when_asked() {
         vec!["config", "get", "--json"],
         vec!["config", "get", "upload.link_kind", "--json"],
         vec!["config", "set", "upload.quality", "90", "--json"],
+        vec![
+            "config",
+            "set",
+            "upload.quality",
+            "80",
+            "upload.compress",
+            "true",
+            "--json",
+        ],
         vec!["list", "--json"],
         vec!["skill", "print", "--json"],
         vec!["skill", "path", "--json"],
@@ -144,6 +153,108 @@ fn every_offline_subcommand_produces_json_when_asked() {
     }
 }
 
+/// One process, several keys, one save — and every key on disk afterwards.
+///
+/// Its own sandbox, deliberately. This used to ride along at the end of the loop
+/// above, where `upload.quality` is also written by the single-pair entry: the
+/// assertion held only because the batch happened to be listed second, so
+/// reordering that array would have failed here with a message blaming batching
+/// for someone else's write.
+#[test]
+fn a_batch_config_set_lands_every_key() {
+    let sb = Sandbox::new("batch-set");
+    let (stdout, _, code) = sb.run(&[
+        "config",
+        "set",
+        "upload.quality",
+        "80",
+        "upload.compress",
+        "true",
+        "github.branch",
+        "gh-pages",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "batch set must succeed: {stdout}");
+    let v = parse(&stdout, "batch config set");
+    assert_eq!(v.get("ok").and_then(|b| b.as_bool()), Some(true), "{v}");
+    // `changes` carries every key; `key`/`value` are the single-pair compatibility
+    // fields and must stay absent when there is more than one.
+    assert_eq!(
+        v.get("changes").and_then(|c| c.as_array()).map(Vec::len),
+        Some(3),
+        "{v}"
+    );
+    assert!(v.get("key").is_none() && v.get("value").is_none(), "{v}");
+
+    for (key, want) in [
+        ("upload.quality", "80"),
+        ("upload.compress", "true"),
+        ("github.branch", "gh-pages"),
+    ] {
+        let (got, _, code) = sb.run(&["config", "get", key]);
+        assert_eq!(code, 0, "reading back {key}: {got}");
+        assert_eq!(got.trim(), want, "{key} must be on disk");
+    }
+}
+
+/// `gitpic --json list` and `gitpic list --json` must be one invocation.
+///
+/// They were not. `args_conflicts_with_subcommands` says what this project wanted —
+/// upload options and a subcommand are not usable together — but it also stops clap
+/// from looking for a subcommand once *any* top-level argument has been seen, the
+/// globals included. So every global-first form parsed the subcommand's own name as
+/// a **filename**: `gitpic --json doctor` answered `NOT_FOUND: file not found:
+/// doctor`, exit 6, having quietly become an upload nobody asked for. Both orders
+/// are what a person or a script types, which is why this is pinned on the real
+/// binary and not only on `Cli`.
+#[test]
+fn a_global_flag_before_the_subcommand_is_the_same_invocation() {
+    let sb = Sandbox::new("global-first");
+    for sub in [
+        vec!["list"],
+        vec!["config", "get"],
+        vec!["config", "path"],
+        vec!["skill", "path"],
+    ] {
+        let mut global_first = vec!["--json"];
+        global_first.extend(sub.iter().copied());
+        let mut global_last = sub.clone();
+        global_last.push("--json");
+
+        let (before, _, code_before) = sb.run(&global_first);
+        let (after, _, code_after) = sb.run(&global_last);
+        assert_eq!(
+            (code_before, parse(&before, "global first")),
+            (code_after, parse(&after, "global last")),
+            "`{global_first:?}` and `{global_last:?}` must agree"
+        );
+        assert_eq!(code_before, 0, "`{global_first:?}` must succeed: {before}");
+    }
+}
+
+/// The other half of the same rule: an upload option *before* a subcommand is
+/// refused rather than parsed and then ignored, since `paste` reads its own copy
+/// and nothing else uploads.
+#[test]
+fn an_upload_option_before_a_subcommand_is_usage() {
+    let sb = Sandbox::new("misplaced-upload-flag");
+    for args in [
+        vec!["--no-copy", "paste", "--json"],
+        vec!["--repo", "o/r", "doctor", "--json"],
+        vec!["--max-width", "800", "list", "--json"],
+    ] {
+        let (stdout, _, code) = sb.run(&args);
+        assert_eq!(code, 2, "`{args:?}` must be a usage refusal: {stdout}");
+        assert_eq!(
+            parse(&stdout, "misplaced upload option")
+                .pointer("/error/code")
+                .and_then(|v| v.as_str()),
+            Some("USAGE"),
+            "{stdout}"
+        );
+    }
+}
+
 #[test]
 fn a_json_error_is_a_json_envelope_on_stdout() {
     let sb = Sandbox::new("err");
@@ -153,6 +264,10 @@ fn a_json_error_is_a_json_envelope_on_stdout() {
         (vec!["config", "get", "no.such.key", "--json"], 2),
         (vec!["config", "set", "github.token", "legacy", "--json"], 2),
         (vec!["config", "set", "upload.quality", "0", "--json"], 2),
+        (
+            vec!["config", "set", "github.owner", "me", "leftover", "--json"],
+            2,
+        ),
         // `init` is interactive and refuses --json rather than pretending.
         (vec!["init", "--json"], 2),
     ] {
@@ -456,6 +571,63 @@ fn a_cdn_link_that_would_404_is_refused_before_any_credential() {
     );
     assert_eq!(
         parse(&stdout, "raw upload on the same branch")
+            .pointer("/error/code")
+            .and_then(|v| v.as_str()),
+        Some("CONFIG_MISSING")
+    );
+}
+
+/// `--path ../x/{name}.{ext}` used to pass `require_target` and then wait until
+/// after `auth::token()` (and the file read) to fail the per-file
+/// `is_safe_remote_path` check. Exit **2** is what makes this test mean anything:
+/// the target is configured, so a run that got past the guard walks on to
+/// `auth::token()` and reports `CONFIG_MISSING` — exit 3 — which the safe
+/// `--path` half below shows happening for real.
+///
+/// `PATH` is emptied so `gh` is unreachable: it keeps the 3 a deterministic local
+/// failure, and it means a future regression here fails the test instead of
+/// attempting a live upload to someone else's repository.
+#[test]
+fn an_escaping_path_template_is_refused_before_any_credential() {
+    let sb = Sandbox::new("path-template");
+    let shot = sb.dir.join("shot.png");
+    std::fs::write(&shot, b"x").expect("write image");
+    let shot_arg = shot.to_str().expect("utf-8 path");
+    let empty_path = sb.dir.join("empty-path");
+    std::fs::create_dir_all(&empty_path).expect("mkdir empty-path");
+    let no_gh: &[(&str, &str)] = &[("PATH", empty_path.to_str().expect("utf-8 path"))];
+
+    let (stdout, _, code) =
+        sb.run_with_env(&[shot_arg, "--path", "../x/{name}.{ext}", "--json"], no_gh);
+    assert_eq!(
+        code, 2,
+        "an escaping --path is a usage refusal, not a credential problem: {stdout}"
+    );
+    let body = parse(&stdout, "upload with a traversing --path");
+    assert_eq!(
+        body.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "{body}"
+    );
+    assert_eq!(
+        body.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("USAGE")
+    );
+    assert!(
+        body.get("results").is_none(),
+        "nothing was uploaded, so there is no results key: {body}"
+    );
+
+    // The same run with the one value the guard looks at changed. Reaching
+    // CONFIG_MISSING proves the config above was loaded and every check before
+    // `auth::token()` passed — so the 2 above came from the guard and nowhere else.
+    let (stdout, _, code) = sb.run_with_env(
+        &[shot_arg, "--path", "images/{name}.{ext}", "--json"],
+        no_gh,
+    );
+    assert_eq!(code, 3, "a safe --path runs on to the credential: {stdout}");
+    assert_eq!(
+        parse(&stdout, "upload with a safe --path")
             .pointer("/error/code")
             .and_then(|v| v.as_str()),
         Some("CONFIG_MISSING")

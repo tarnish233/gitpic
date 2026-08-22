@@ -69,6 +69,12 @@ pub fn is_safe_remote_path(path: &str) -> bool {
             .any(|seg| seg == ".." || seg.is_empty() || seg == ".")
 }
 
+/// Dummy-render a path template the same way `Config::validate` and upload
+/// judge one: `sample.png` plus a 64-char hash. `{name}` cannot inject `..`.
+pub fn template_renders_safe(template: &str) -> bool {
+    is_safe_remote_path(&render_path(template, "sample.png", &"0".repeat(64)))
+}
+
 /// Render the path template.
 ///
 /// Supported placeholders:
@@ -264,5 +270,19 @@ mod tests {
         // A dot inside a segment is fine — only a whole `..` segment is not.
         assert!(is_safe_remote_path("images/a..b/x.png"));
         assert!(is_safe_remote_path("\u{56fe}/x.png"));
+    }
+
+    #[test]
+    fn a_template_is_judged_by_what_it_dummy_renders_to() {
+        assert!(!template_renders_safe("../x/{name}.{ext}"));
+        assert!(!template_renders_safe("../../etc/{name}.{ext}"));
+        assert!(!template_renders_safe("/abs/{name}.{ext}"));
+        assert!(!template_renders_safe("images/{name}//{ext}"));
+        assert!(template_renders_safe(
+            "images/{year}/{month}/{hash8}-{name}.{ext}"
+        ));
+        assert!(template_renders_safe("{name}.{ext}"));
+        // `{name}` slugifies `.` to `-`, so it cannot inject a `..` segment.
+        assert!(template_renders_safe("{name}/x.png"));
     }
 }

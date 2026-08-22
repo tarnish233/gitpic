@@ -166,7 +166,7 @@ impl GitHub {
             404 => AppError::remote_not_found(format!(
                 "GitHub repository, branch, or remote path not found ({status}): {body}"
             )),
-            409 => AppError::general(format!(
+            409 => AppError::network(format!(
                 "GitHub ref conflict ({status}): {body}; retry the upload"
             )),
             422 => AppError::general(format!("GitHub rejected the request ({status}): {body}")),
@@ -385,7 +385,7 @@ mod tests {
         );
         assert_eq!(
             GitHub::map_status(reqwest::StatusCode::CONFLICT, "is at sha but expected").code,
-            ErrorCode::General
+            ErrorCode::Network
         );
         assert_eq!(
             GitHub::map_status(reqwest::StatusCode::UNPROCESSABLE_ENTITY, "protected").code,

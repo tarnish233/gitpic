@@ -56,6 +56,10 @@ async fn main() -> ExitCode {
 }
 
 async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
+    // Before the match, because it is about the invocation rather than about any one
+    // subcommand — and every arm below would otherwise have to remember it, which is
+    // how the check this replaces came to be called seven times.
+    cli.reject_misplaced_upload_args()?;
     // One match, so adding a subcommand fails to compile here — on the arm you
     // actually have to write — rather than at a catch-all that would compile and
     // then panic (an abort exits 134, outside the documented 1-10 contract).
@@ -63,7 +67,6 @@ async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
         // Config-free: these must work even when config.toml is missing or
         // unparseable, so they never touch `resolve_config`.
         Some(Command::Init) => {
-            reject_ignored_options(cli, false)?;
             // `init` is a conversation: it writes prompts to stdout and waits. There
             // is no JSON stream to produce, and pretending otherwise would interleave
             // prompts with an envelope. Every other subcommand honours `--json`.
@@ -75,59 +78,22 @@ async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
             }
             commands::init::run().map(|_| 0)
         }
-        Some(Command::Config { action }) => {
-            reject_ignored_options(cli, false)?;
-            commands::config_cmd::run(action, mode).map(|_| 0)
-        }
-        Some(Command::List { limit }) => {
-            reject_ignored_options(cli, false)?;
-            commands::list::run(*limit, mode).map(|_| 0)
-        }
-        Some(Command::Completion { shell }) => {
-            reject_ignored_options(cli, false)?;
-            commands::completion::run(*shell).map(|_| 0)
-        }
-        Some(Command::Skill { action }) => {
-            reject_ignored_options(cli, false)?;
-            commands::skill::run(action, mode).map(|_| 0)
-        }
+        Some(Command::Config { action }) => commands::config_cmd::run(action, mode).map(|_| 0),
+        Some(Command::List { limit }) => commands::list::run(*limit, mode).map(|_| 0),
+        Some(Command::Completion { shell }) => commands::completion::run(*shell).map(|_| 0),
+        Some(Command::Skill { action }) => commands::skill::run(action, mode).map(|_| 0),
 
-        Some(Command::Doctor) => {
-            // `--repo` resolves a target, which doctor checks; the upload options
-            // still mean nothing here.
-            reject_ignored_options(cli, true)?;
+        Some(Command::Doctor { .. }) => {
             let cfg = resolve_config(cli)?;
             commands::doctor::run(&cfg, mode).await
         }
-        // No subcommand means the default upload path.
-        Some(Command::Paste) | None => {
+        // No subcommand means the default upload path. `paste` carries the same
+        // upload flags, flattened onto the subcommand rather than marked global.
+        Some(Command::Paste { .. }) | None => {
             let cfg = resolve_config(cli)?;
             commands::upload::run(cli, &cfg, mode).await
         }
     }
-}
-
-/// Refuse options the chosen subcommand would silently ignore.
-///
-/// Upload options are `global = true` so that `gitpic paste --no-copy` works. The
-/// cost was that `gitpic list --compress --max-width 99` also parsed, exited 0,
-/// and quietly did none of it. Reporting that as a usage error is the same rule
-/// this project applies to a mistyped config key or link kind: input that cannot
-/// take effect is an error, not a no-op.
-fn reject_ignored_options(cli: &Cli, repo_allowed: bool) -> Result<()> {
-    let mut ignored = cli.upload_only_flags_set();
-    if !repo_allowed && cli.repo.is_some() {
-        ignored.push("--repo");
-    }
-    if ignored.is_empty() {
-        return Ok(());
-    }
-    Err(error::AppError::usage(format!(
-        "{} {} ignored by this subcommand; drop {}",
-        ignored.join(", "),
-        if ignored.len() == 1 { "is" } else { "are" },
-        if ignored.len() == 1 { "it" } else { "them" },
-    )))
 }
 
 /// Resolve config: file -> env -> CLI overrides.
@@ -141,7 +107,7 @@ fn reject_ignored_options(cli: &Cli, repo_allowed: bool) -> Result<()> {
 fn resolve_config(cli: &Cli) -> Result<Config> {
     let mut cfg = Config::load()?;
     cfg.apply_env()?;
-    if let Some(repo) = &cli.repo {
+    if let Some(repo) = cli.repo_override() {
         cfg.set_repo_spec(repo)?;
         cfg.validate_input()?;
     }

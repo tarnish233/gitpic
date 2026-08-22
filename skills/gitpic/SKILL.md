@@ -78,8 +78,9 @@ problem only when `repo_writable` is also false.
 `branch_protected: true` is a caveat, not a failure: the branch has protection
 rules, which may still permit this account, so a report can be `ok: true` with it
 set. It is the usual explanation when an upload is nevertheless refused with
-`PERMISSION_DENIED` or a 409/422 after every preflight check passed — if that
-happens, say so rather than retrying.
+`PERMISSION_DENIED` or a 422 after every preflight check passed — if that
+happens, say so rather than retrying. A 409 ref conflict is `NETWORK` (5):
+retry once, then report.
 
 The report's compatibility field `token_source` is `"gh"` when a credential was
 obtained and `null` otherwise. `gitpic init` never accepts a token interactively.
@@ -151,7 +152,7 @@ gitpic list --json                                            # recent uploads (
 | 2    | USAGE               | fix the invocation                                |
 | 3    | CONFIG_MISSING      | run `gh auth login` or configure the target repo   |
 | 4    | AUTH_FAILED         | credential invalid/expired — `gh auth login`      |
-| 5    | NETWORK             | retry once, then report                           |
+| 5    | NETWORK             | retry once, then report (includes a 409 ref conflict) |
 | 6    | NOT_FOUND           | check the local input file path                   |
 | 7    | PERMISSION_DENIED   | check token Contents permission/repo access       |
 | 8    | REMOTE_NOT_FOUND    | check GitHub repository, branch, and remote path  |
@@ -185,15 +186,19 @@ instead — `results` is never present and empty.
 ## Constraints
 
 - Always pass `--json` for programmatic calls, and `--no-copy` on the upload
-  commands only (`gitpic <files>`, `--stdin`, `paste`). Every other subcommand
-  **rejects** `--no-copy` with a `USAGE` error (2), so never add it to `doctor`,
-  `list`, `config`, `skill` or `completion`. The same goes for the other
-  upload-only options (`--link`, `--format`, `--name`, `--path`, `--compress`,
-  `--no-compress`, `--max-width`, `--quality`, `--stdin`). `--name` is for
-  stdin, paste, or a single file; with two or more files it is a `USAGE` error.
-  It supplies only the filename *stem* in all three cases — the extension always
-  follows the image bytes, so `--name shot` or `--name shot.png` on JPEG bytes
-  both publish `shot.jpg`. Never rely on `--name` to set the extension.
+  commands only (`gitpic <files>`, `--stdin`, `paste`). Upload-only options
+  (`--no-copy`, `--link`, `--format`, `--name`, `--path`, `--compress`,
+  `--no-compress`, `--max-width`, `--quality`, `--stdin`, `--repo` except on
+  `doctor`) are not accepted on other subcommands — clap rejects them, exit 2 —
+  and they must be written **after** the subcommand: `gitpic paste --json
+  --no-copy`, never `gitpic --no-copy paste`, which is a `USAGE` error (2).
+  `--json`, `--quiet` and `--verbose` work on either side of it.
+  `--name` is for stdin, paste, or a single file; with two or more files it is a
+  `USAGE` error. It supplies only the filename *stem* in all three cases — the
+  extension always follows the image bytes, so `--name shot` or `--name shot.png`
+  on JPEG bytes both publish `shot.jpg`. Never rely on `--name` to set the
+  extension. `gitpic config set` accepts `KEY VALUE` pairs in one invocation
+  (`gitpic config set github.owner me github.repo pics --json`) and writes once.
 - `--json` produces an `ok`-bearing envelope on stdout for every subcommand,
   failures included, with three exceptions — none of which an agent should call:
   `gitpic init` **rejects** `--json` (it is interactive; use `GITPIC_REPO` or
