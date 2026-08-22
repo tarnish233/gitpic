@@ -6,7 +6,7 @@ description: >-
   into a link", "host an image", "get a markdown link for a screenshot",
   "把图片上传图床", or "生成图片 markdown 链接". Requires the `gitpic` CLI installed
   plus GitHub CLI authenticated with `gh auth login` (install gitpic via
-  `brew install tarnish233/tap/gitpic`).
+  `brew install tarnish233/tap/gitpic_cli`).
 ---
 
 # gitpic — GitHub image host uploader
@@ -22,8 +22,9 @@ install it one of these ways, then verify with `gitpic --version`:
 
 - Homebrew (macOS/Linux, recommended — also auto-installs shell completions):
   ```bash
-  brew install tarnish233/tap/gitpic
+  brew install tarnish233/tap/gitpic_cli
   ```
+  The formula is `gitpic_cli`; the command it installs is `gitpic`.
 - Prebuilt binary: download the matching asset from the latest
   [release](https://github.com/tarnish233/gitpic-cli/releases), extract, and put
   `gitpic` on `PATH`. On macOS clear the quarantine flag first:

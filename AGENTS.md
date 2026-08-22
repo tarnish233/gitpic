@@ -13,7 +13,13 @@
 Docs: `README.md` (中文, default), `README.en.md`, `skills/gitpic/SKILL.md` (agent
 usage), `CHANGELOG.zh-CN.md` (中文, Release source), and `CHANGELOG.md` (English). Keep
 both changelogs aligned for every release. CI lives in `.github/workflows/`.
-The Homebrew formula lives in the separate `tarnish233/homebrew-tap` repo.
+The Homebrew formula lives in the separate `tarnish233/homebrew-tap` repo and is
+called **`gitpic_cli`**, not `gitpic`: the formula names the CLI so it cannot be
+read as the app. What it installs is unchanged — the binary, the completions and
+`/opt/homebrew/bin/gitpic` are all still `gitpic`, which is also how GitPic.app
+finds a system CLI. The tap's `formula_renames.json` maps the old name onto the
+new one, so `brew install tarnish233/tap/gitpic` still resolves and an installed keg
+migrates on `brew update` / `brew upgrade` (or `brew migrate gitpic`); don't remove it.
 
 `apps/GitPic/` is a macOS menu-bar app (SwiftUI) that drives the CLI over its
 `--json` contract; `scripts/build-app.sh` builds the bundle with the `gitpic`

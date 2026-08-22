@@ -34,11 +34,18 @@ $ gitpic list
 
 ## 安装
 
+命令行工具和菜单栏应用是两件东西，名字也是分开的：CLI 的 formula 叫 **`gitpic_cli`**，
+App 叫 **GitPic.app**（见下）。装的是 `gitpic_cli`，用的命令仍然是 `gitpic`。
+
 **Homebrew（推荐，自动加入 PATH 并安装命令行补全）**
 
 ```bash
-brew install tarnish233/tap/gitpic
+brew install tarnish233/tap/gitpic_cli
 ```
+
+> 这个 formula 原来叫 `gitpic`。旧名字仍然能装（tap 里留了一份 rename 映射），已经装了的由
+> `brew update` / `brew upgrade` 迁移过去，也可以直接跑 `brew migrate gitpic`。迁移只改 Cellar
+> 里的目录名 —— 命令、补全脚本和 `/opt/homebrew/bin/gitpic` 这个软链都不变。
 
 **下载预编译二进制**
 
@@ -198,7 +205,7 @@ gitpic completion fish > ~/.config/fish/completions/gitpic.fish
 **用 CLI 安装（适用于任意助手）**
 
 技能文档已编入二进制，所以装上的版本永远与你正在运行的 `gitpic` 一致；
-`brew upgrade gitpic` 之后重跑一次即可同步：
+`brew upgrade gitpic_cli` 之后重跑一次即可同步：
 
 ```bash
 gitpic skill install                 # 从检测到的助手中选择
