@@ -82,16 +82,12 @@ struct SettingsWindowView: View {
     @State private var navigation = SettingsNavigation.shared
     @State private var model = AppModel.shared
 
-    /// Whether the sidebar is showing. A real binding, not `.constant(.all)`: the
-    /// toolbar's sidebar toggle writes to this, and against a constant it would be a
-    /// button that visibly does nothing. Kept in the view, so it lasts as long as the
-    /// window does — which is now the whole session.
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
-
     private var activeTab: SettingsTab { navigation.selectedTab ?? .host }
 
+    /// **The sidebar does not collapse, and there is no button offering to collapse
+    /// it.** Both were here and both are gone; the reasoning is on ``sidebar``.
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
+        NavigationSplitView {
             sidebar
         } detail: {
             detail
@@ -197,8 +193,38 @@ struct SettingsWindowView: View {
         .listStyle(.sidebar)
         .scrollEdgeEffectStyleSoftIfAvailable()
         .navigationTitle("设置")
-        .frame(width: 200)
+        // Fixed at 200, and not collapsible at all.
+        //
+        // **This reverses what `192566c` decided**, so here is why. That commit added
+        // the toggle back — `columnVisibility` became a real `@State` binding and this
+        // line was deleted — on the grounds that a missing sidebar toggle "did not
+        // match the platform", citing Passwords and Mail. But those are content
+        // browsers with resizable sidebars, and this window is not modelled on them:
+        // it is modelled on System Settings, which is said out loud twice elsewhere in
+        // this file — and **System Settings has no sidebar toggle.** Four fixed panes
+        // do not need one, and the analogy was to the wrong kind of window.
+        //
+        // The collapse was also measurably broken, which is what brought this back up.
+        // At the window's own minimum width of 680 the sidebar takes 200 and leaves 480
+        // for a `Form` whose rows need very nearly that, while 保存 ends 4pt from the
+        // window's right edge — measured. Every expansion therefore had a frame or two
+        // where the detail content was still laid out at its collapsed width, running
+        // off the right edge, and the toolbar could not fit its items and grew an `»`
+        // overflow chevron that vanished again. Two symptoms, one cause: nothing had
+        // any slack to animate through.
+        //
+        // A leftover made it worse and is worth recording, since it would bite anyone
+        // who tries a toggle again: a `.frame(width: 200)` sat on this content as well
+        // as on the column. It was harmless when written — the sidebar could not
+        // collapse then — but once it could, every collapse animated a column from
+        // 200pt to 0 around content told in absolute points that it may only ever be
+        // 200 wide. No width satisfies both, so the transition had nowhere smooth to go.
+        // `navigationSplitViewColumnWidth` was always the whole of what was wanted.
+        //
+        // The cost, stated: the 200pt is permanent, so a small screen cannot reclaim
+        // it. That is the same deal System Settings offers.
         .navigationSplitViewColumnWidth(min: 200, ideal: 200, max: 200)
+        .toolbar(removing: .sidebarToggle)
     }
 
     // MARK: - Detail
