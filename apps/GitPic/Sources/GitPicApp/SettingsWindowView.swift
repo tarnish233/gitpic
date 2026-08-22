@@ -609,9 +609,7 @@ struct UploadPane: View {
                     }
                     .pickerStyle(.segmented)
                     Text("配置文件里的 `upload.format` 与 `upload.link_kind`，改完按右上角"
-                         + "「保存」才生效 —— 状态栏菜单里改这两项是即时写入。App 复制的 snippet"
-                         + "和终端里 gitpic 的默认值都取它们；六种组合任意切换都不会重新上传，"
-                         + "命令行的 `-f` / `--link` 仍可临时覆盖。")
+                         + "「保存」才生效。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
@@ -628,18 +626,12 @@ struct UploadPane: View {
                         }
                     }
                     .toggleStyle(.switch)
-                    Toggle(isOn: draft.upload.autoCopy) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("自动复制到剪贴板")
-                            // No longer labelled 仅 CLI. The app performs the copy
-                            // itself — `--json` never writes the clipboard — but it
-                            // now reads this key first, so one switch covers both.
-                            Text("上传成功后把链接写进剪贴板。App 和终端里的 gitpic 都听这一项；"
-                                 + "关掉之后链接仍然在「最近上传」和「历史」里，随时能手动复制。")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    .toggleStyle(.switch)
+                    // Label only, no caption: the switch says what it does. The app
+                    // performs the copy itself (`--json` never writes the clipboard)
+                    // and reads this same key, so one switch covers app and CLI alike
+                    // — which is why it is no longer labelled 仅 CLI.
+                    Toggle("自动复制到剪贴板", isOn: draft.upload.autoCopy)
+                        .toggleStyle(.switch)
                 }
 
                 Section("压缩") {
@@ -1131,22 +1123,6 @@ struct AboutPane: View {
         Bundle.main.infoDictionary?["GitPicEmbeddedCLIVersion"] as? String
     }
 
-    /// The three honest states, kept apart rather than collapsed into one string.
-    @ViewBuilder private var versionNote: some View {
-        switch (appVersion, embeddedCLI) {
-        case (let app?, let cli?) where app == cli:
-            Text("App 与 gitpic_cli 同版本发布，打包进来的就是这个版本。")
-                .font(.caption).foregroundStyle(.secondary)
-        case (_?, _?):
-            Text("版本不一致——这份 App 里的 gitpic_cli 与 App 自身版本不符，请重新构建。")
-                .font(.caption).foregroundStyle(.orange)
-        default:
-            Text("开发构建：没有打包成 .app，读不到版本信息。App 与 gitpic_cli 同版本发布，"
-                 + "由 scripts/build-app.sh 在构建时校验。")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-    }
-
     /// The app's own icon, read back out of the bundle.
     ///
     /// `applicationIconName` rather than a resource of its own: the icon is compiled
@@ -1181,15 +1157,14 @@ struct AboutPane: View {
     var body: some View {
         Form {
             Section { header }
+            // Both rows stay even though a real build always makes them agree: the
+            // second is read back out of the bundle, so it is the only place that shows
+            // what was *actually* packaged rather than what the build intended. Two
+            // numbers that differ is the whole signal — the prose that used to spell out
+            // each case said nothing the numbers do not.
             Section("版本") {
                 LabeledContent("App") { Text(appVersion ?? "dev").monospacedDigit() }
                 LabeledContent("gitpic_cli") { Text(embeddedCLI ?? "未知").monospacedDigit() }
-                // Both rows stay even though a real build always makes them agree:
-                // the second is read back out of the bundle, so it is the only
-                // place that shows what was *actually* packaged rather than what
-                // the build intended. A mismatch means build-app.sh's equality
-                // assertion was bypassed.
-                versionNote
             }
             Section("工具位置") {
                 LabeledContent("gitpic") {
@@ -1200,8 +1175,6 @@ struct AboutPane: View {
                     Text(model.tools?.gh?.path ?? "未找到")
                         .font(.caption).textSelection(.enabled)
                 }
-                Text("Finder 启动的 App 只有最小 PATH，gh 由 App 自己探测后显式传给 gitpic。")
-                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("项目") {
                 Text("CLI 与 App 同仓库、同版本发布，凭据只经过 GitHub CLI，配置文件里不存任何密钥。")

@@ -352,7 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         paste.target = self
         menu.addItem(paste)
 
-        let pick = Self.item("选择文件上传…", "folder", #selector(pickFiles))
+        let pick = Self.item("选择文件上传", "folder", #selector(pickFiles))
         pick.target = self
         menu.addItem(pick)
 
@@ -401,11 +401,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // app edits the config file — and naming it after its shape ("a window") said
         // nothing about what clicking it does. `gearshape` replaces `macwindow` for
         // the same reason.
-        let settings = Self.item("打开设置…", "gearshape", #selector(openSettings))
+        let settings = Self.item("打开设置", "gearshape", #selector(openSettings))
         settings.target = self
         menu.addItem(settings)
 
-        let doc = Self.item("连通性测试…", "network", #selector(runDoctor))
+        let doc = Self.item("连通性测试", "network", #selector(runDoctor))
         doc.target = self
         menu.addItem(doc)
 
