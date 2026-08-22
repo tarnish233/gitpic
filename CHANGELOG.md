@@ -4,6 +4,85 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-08-22
+
+### Feedback moves back to where the action happens
+
+No new features in this one. What changed is **where** the app answers you. Three things had the same flaw: the feedback was too far from the action.
+
+### App
+
+- **The copy button reports itself now — no banner, no sound.** Clicking a row's copy
+  button used to post a system notification and play the `.default` sound, for a button
+  sitting directly under the pointer. The glyph on the button now becomes a checkmark in
+  place, for one second. **Failures still go through the notification**, because a failure
+  carries real diagnosis that will not fit in a badge (the whole sentence about a `/` in
+  the branch making jsDelivr unparseable, for one), and `Notifier` itself is untouched —
+  an upload finishing still gets a banner and a sound, because there the premise "the
+  window is usually closed" holds. This change is exactly where that premise does not:
+  the window is open and the pointer is on the button. The two glyphs are **stacked** and
+  switched by opacity rather than swapped conditionally — measured, `doc.on.clipboard` is
+  16×18pt and `checkmark` 14×13, so a conditional swap would shift the byte count 2pt
+  right and take 5pt off the row's height.
+- **A thumbnail no longer cuts in — but it only fades if you actually waited.** The test
+  is not "was it cached" but **"was the placeholder ever on screen"**: elapsed time inside
+  the `.task`, threshold 100 ms. Measured, a warm cache answers all 33 at once in
+  4.0–6.6 ms (slowest single row 6.5 ms) and an all-memory pass in 0.1–0.2 ms, so 100 ms
+  sits ~15× above the slowest warm row and far below anything a network does. Fading a
+  cache hit in would **manufacture flicker where there is none**, once per reopen of the
+  pane.
+- **The app has its first accessibility handling** (`Motion.swift`).
+  `accessibilityDisplayShouldReduceMotion` is read at the moment of use rather than
+  observed: nothing on screen is derived from the flag, and it is consulted at the single
+  instant a thumbnail lands. Note that reduce-motion here is **not** "no fade" — a
+  cross-fade with no displacement is precisely what the setting asks motion to be replaced
+  by — so it stays a fade, just shorter and linear; scale and spring are ruled out in both
+  branches.
+- **The history header says how many thumbnails are still coming** (`正在取缩略图 12/33`).
+  On a cold cache those 33 grey boxes sit there for about four seconds, and with nothing
+  said about it a slow link is indistinguishable from a broken one. **On a warm cache it
+  never flashes**, by two mechanisms: cache hits never enter the denominator (the count is
+  taken below the disk-cache early return, below the ceiling and URL guards, and before the
+  fetch gate — which also makes 正在取缩略图 a true sentence, since a disk read is not a
+  fetch); and a real but very short episode is held back 300 ms, because the first rule
+  cannot catch the one freshly-uploaded image fetched over a link that answers in 200 ms,
+  which would flash `0/1`. Deliberately **no** `ProgressView`: it is taller than this line
+  of text and so the one thing that really would change the header's height, twice per
+  open.
+- **The menu-bar icon now shows that a dragged image will be taken.** The system already
+  badges the drag image with a green "+", so accept-vs-refuse was never invisible — but
+  that badge rides the cursor and says the same thing over any copy destination on screen;
+  nothing marked *this* target as the one that would take it. So the target changes too,
+  and only on the accept side: **refusal stays completely silent**, since the system's own
+  snap-back says it better than any indicator could. No work happens during the hover
+  (`draggingUpdated` fires ~78 times per second of it); the icon changes only on the
+  enter/exit/end transitions.
+- The dedup badge's hardcoded 7pt became `.caption2` + `.imageScale(.small)`. Measured
+  with `ImageRenderer` against the same 44×32 box: it was 13×16 (50% of the box height),
+  `.caption2` alone makes it 17×20 (62%, crowding the corner and competing with the
+  picture), and `.caption2` + `.small` lands at 14×17 (53%). The layout knob was adjusted
+  rather than reverting to a magic number.
+
+### Fixed
+
+- **With `gitpic` missing, one failed upload erased the warning icon for good.** When the
+  CLI cannot be found the status-item icon is a warning triangle — but the "找不到 gitpic"
+  failure the missing tool itself produces goes through `report`, which unconditionally
+  reset the glyph to idle. The warning vanished, and since `resolveTools` runs once at
+  launch, nothing could restore it. The icon's shape is now right (`StatusIcon`): one
+  `State` field (idle / uploading / tool-unavailable, so two cannot be set at once) plus a
+  hover flag, and leaving a hover restores **what was underneath** — the arrow mid-upload,
+  the warning when there is no tool. `report`'s finished case asks `restingState`, read off
+  `AppModel.toolState`, so there is no second copy of "was the tool found" to disagree with
+  the first.
+
+### Testing
+
+- 12 new cases (123 total): 6 for the thumbnail-progress accounting, 6 for the status-icon
+  state machine. The icon rule moved into `GitPicCore` to be reachable at all — `GitPicApp`
+  is an executable target no test can import, the same reason `ImageDrop` and
+  `UploadReport` live there.
+
 ## [0.12.0] - 2026-08-22
 
 ### The history pane shows the pictures now, fetched once each
@@ -1479,7 +1558,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.0
 [0.12.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.12.0
 [0.11.5]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.5
 [0.11.4]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.4
