@@ -92,9 +92,12 @@ The config file and the upload history are shared: change the repository in the 
 the terminal follows, and vice versa.
 
 Install the formula instead if you want the command line only, or you are on Linux or an
-Intel Mac. **Do not install both** — they compete for the same `bin/gitpic`; whichever
-arrived first keeps it, and Homebrew tells the other one it could not link. Uninstall one
-before switching.
+Intel Mac. **Do not install both** — they compete for the same `bin/gitpic` and the same
+three completions, and whichever arrived first keeps them: the formula added second ends
+with a failed `brew link` (installed but unlinked), the cask added second prints
+`skipping link` and `Will not overwrite`. Uninstall one before switching, and after
+switching *from* the formula run `brew reinstall --cask gitpic_app` so the links it
+skipped get made.
 
 Upload the clipboard image or pick files from the menu-bar icon; the link lands on
 your clipboard. The settings window edits the image-host repository and the upload

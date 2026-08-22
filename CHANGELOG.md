@@ -20,11 +20,16 @@ This uses Homebrew's own `generate_completions_from_executable` (the cask flavou
 behind its back — Homebrew removes them itself, verified: after
 `brew uninstall --cask gitpic_app` the symlink and all three completions are gone.
 
-Installing both makes them compete for `bin/gitpic`, and both directions were measured:
-cask first, and the formula installs but cannot link (Homebrew reports `shadowed by`);
-formula first, and the cask prints `skipping link` and finishes anyway. Whichever arrived
-first owns the command and the completions, so the READMEs now say install one — not the
-earlier "installing both is fine".
+Installing both makes them compete for `bin/gitpic` and for the same three completions,
+and both directions were measured: cask first, and the formula installs but ends with
+`Error: The \`brew link\` step did not complete successfully`; formula first, and the cask
+installs the app anyway, printing `skipping link` and three `Will not overwrite` lines —
+and the keg's files are byte-identical afterwards, because Homebrew refuses to write
+through the formula's symlinks. Whichever arrived first owns the command and the
+completions, so the READMEs now say install one — not the earlier "installing both is
+fine". One trap follows and is recorded in the tap's README: uninstalling the formula
+from that state leaves no `bin/gitpic` at all, since the cask skipped the link;
+`brew reinstall --cask gitpic_app` restores it.
 
 **One bug fixed on the way, visible only on a fresh install**: the quarantine strip lived
 in `postflight`, the completion stanza *runs* the binary, and postflight comes after the

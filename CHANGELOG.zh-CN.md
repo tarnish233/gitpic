@@ -17,9 +17,12 @@ fish 三份补全 —— **装 cask 就等于同时装了命令行**，而且升
 generated_completion.rb`），不是 postflight 私自往 prefix 里写 —— 卸载时 brew 自己会清掉，实测
 `brew uninstall --cask gitpic_app` 之后软链和三份补全一起没了。
 
-两个都装会抢同一个 `bin/gitpic`，两个方向都实测了：cask 先在，formula 装得上但 link 失败并提示
-`shadowed by`；formula 先在，cask 打印 `skipping link` 后照样装完。命令和补全归先到的那个，所以
-README 现在写的是「装一个」，而不是之前那句「两个都装也不冲突」。
+两个都装会抢同一个 `bin/gitpic` 和同三份补全，两个方向都实测了：cask 先在 → formula 装得上但整个
+没 link（`Error: The \`brew link\` step did not complete successfully`）；formula 先在 → cask 照样装完
+App，只是打印 `skipping link` 和三条 `Will not overwrite`，而且 keg 里的文件一个字节没动（brew 自己
+拦住了写穿软链，md5 比对过）。命令和补全归先到的那个，所以 README 现在写的是「装一个」，而不是之前
+那句「两个都装也不冲突」。附带一个坑也记在 tap README 里：从「formula 先在」的状态卸掉 formula，
+`bin/gitpic` 会直接消失（cask 当初跳过了没建），要 `brew reinstall --cask gitpic_app` 补回来。
 
 **顺带修掉一个只在全新安装才出现的 bug**：去 quarantine 原来放在 `postflight`，而补全是**跑**那个
 二进制生成的，postflight 又在 artifact 之后 —— 于是全新安装时 macOS 把还带着 quarantine 的自签名
