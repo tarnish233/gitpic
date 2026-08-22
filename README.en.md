@@ -58,7 +58,7 @@ compete for the same `bin/gitpic`.
 **Prebuilt binary**
 
 Download the archive for your platform from the
-[releases page](https://github.com/tarnish233/gitpic-cli/releases). On macOS,
+[releases page](https://github.com/tarnish233/gitpic/releases). On macOS,
 clear the quarantine flag on first run:
 
 ```bash
@@ -73,7 +73,7 @@ chmod +x ./gitpic && mv ./gitpic ~/.local/bin/  # ensure ~/.local/bin is on PATH
 **From source** (needs Rust 1.88 or newer)
 
 ```bash
-cargo install --git https://github.com/tarnish233/gitpic-cli
+cargo install --git https://github.com/tarnish233/gitpic
 ```
 
 ### GitPic.app (optional macOS menu-bar app)
@@ -104,7 +104,7 @@ your clipboard. The settings window edits the image-host repository and the uplo
 options, and browses history.
 
 Or take `GitPic-<version>-macos-arm64.zip` from a
-[release](https://github.com/tarnish233/gitpic-cli/releases) and install it yourself.
+[release](https://github.com/tarnish233/gitpic/releases) and install it yourself.
 The app is ad-hoc signed and not notarised by Apple, so a manual install has to clear
 the quarantine flag before it will open (the cask does this step for you):
 
@@ -281,14 +281,14 @@ of guessing.
 **As a Claude Code plugin**
 
 ```
-/plugin marketplace add tarnish233/gitpic-cli
+/plugin marketplace add tarnish233/gitpic
 /plugin install gitpic@gitpic
 ```
 
 **As a Codex plugin**
 
 ```bash
-codex plugin marketplace add tarnish233/gitpic-cli
+codex plugin marketplace add tarnish233/gitpic
 codex plugin add gitpic@gitpic
 ```
 

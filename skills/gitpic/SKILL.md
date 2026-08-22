@@ -26,14 +26,14 @@ install it one of these ways, then verify with `gitpic --version`:
   ```
   The formula is `gitpic_cli`; the command it installs is `gitpic`.
 - Prebuilt binary: download the matching asset from the latest
-  [release](https://github.com/tarnish233/gitpic-cli/releases), extract, and put
+  [release](https://github.com/tarnish233/gitpic/releases), extract, and put
   `gitpic` on `PATH`. On macOS clear the quarantine flag first:
   ```bash
   xattr -d com.apple.quarantine ./gitpic 2>/dev/null; chmod +x ./gitpic
   ```
 - From source (needs Rust 1.88 or newer):
   ```bash
-  cargo install --git https://github.com/tarnish233/gitpic-cli
+  cargo install --git https://github.com/tarnish233/gitpic
   ```
 
 Also require `command -v gh` and a successful `gh auth status`. `gitpic` obtains

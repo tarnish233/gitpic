@@ -867,8 +867,8 @@ struct AboutPane: View {
             Section("项目") {
                 Text("CLI 与 App 同仓库、同版本发布，凭据只经过 GitHub CLI，配置文件里不存任何密钥。")
                     .font(.caption).foregroundStyle(.secondary)
-                Link("github.com/tarnish233/gitpic-cli",
-                     destination: URL(string: "https://github.com/tarnish233/gitpic-cli")!)
+                Link("github.com/tarnish233/gitpic",
+                     destination: URL(string: "https://github.com/tarnish233/gitpic")!)
                     .font(.caption)
             }
             Section("诊断") {

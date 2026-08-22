@@ -53,7 +53,7 @@ brew install tarnish233/tap/gitpic_cli
 
 **下载预编译二进制**
 
-到 [发布页](https://github.com/tarnish233/gitpic-cli/releases) 下载对应平台的压缩包，解压得到 `gitpic`。macOS 首次运行需解除隔离：
+到 [发布页](https://github.com/tarnish233/gitpic/releases) 下载对应平台的压缩包，解压得到 `gitpic`。macOS 首次运行需解除隔离：
 
 ```bash
 tar -xzf gitpic-aarch64-apple-darwin.tar.gz     # Apple Silicon
@@ -88,7 +88,7 @@ brew install --cask tarnish233/tap/gitpic_app   # 升级：brew upgrade --cask g
 
 从菜单栏图标上传剪贴板图片或选文件，链接自动进剪贴板；设置窗口可以改图床仓库和上传选项，看历史。
 
-也可以从 [发布](https://github.com/tarnish233/gitpic-cli/releases) 里直接下
+也可以从 [发布](https://github.com/tarnish233/gitpic/releases) 里直接下
 `GitPic-<版本>-macos-arm64.zip` 自己装。App 是本机签名、未经 Apple 公证的，所以手装必须解除
 隔离才能打开（用 cask 装的话这一步 brew 替你做了）：
 
@@ -240,14 +240,14 @@ gitpic skill print                   # 把文档打到 stdout
 **作为 Claude Code 插件**
 
 ```
-/plugin marketplace add tarnish233/gitpic-cli
+/plugin marketplace add tarnish233/gitpic
 /plugin install gitpic@gitpic
 ```
 
 **作为 Codex 插件**
 
 ```bash
-codex plugin marketplace add tarnish233/gitpic-cli
+codex plugin marketplace add tarnish233/gitpic
 codex plugin add gitpic@gitpic
 ```
 

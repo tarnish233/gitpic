@@ -174,7 +174,7 @@ GUI 自己写 NSPasteboard（按当前格式）+ 通知 + 落区显示结果
 同仓库，与 Rust crate 并列，互不干扰：
 
 ```
-gitpic-cli/
+gitpic/
 ├─ src/                     Rust CLI（不动）
 ├─ apps/GitPic/             ← 新增
 │  ├─ Package.swift            SwiftPM，可 CLI 构建，CI 友好
