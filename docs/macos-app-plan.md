@@ -59,6 +59,107 @@ Xcode 26.6 / Swift 6.3.3 / macOS 26.5.2 (Tahoe, build 25F84)，本机有刘海�
 
 ---
 
+### C6 — 别的 app 正在拖文件，本进程能知道；不需要辅助功能权限
+
+> **本节的特性已废弃，实测数据保留作为记录。** 拖拽上传（包括菜单栏图标落区）已从 app 中整体删除 ——
+> 落区做过五种形态：图标本身、拖拽即弹的浮窗、屏幕右上角热区、图标下方热区、⌃ 召唤；每一种都
+> 真的做出来上手用过，最终判断是这个交互本身别扭，不是哪一版没调好。代码删了，**下面这些约束仍然是
+> 真的**，谁再想做拖拽都得先跨过它们，所以留在这里。
+>
+> 现在的上传入口是：菜单里「选择文件上传」、「上传剪贴板」，以及 CLI。
+
+菜单栏图标做落区的**天花板是菜单栏本身**。实测本机真实 `NSStatusItem`：
+
+```
+图标图片 20x16 pt  →  落区（button 命中矩形）36 x 29 pt
+系统在图片左右各补 8 pt padding，高度顶到屏幕上边缘（y 1051..1080）
+
+把字号调大也就到此为止：pointSize 17 → 图片 26x20 → 落区 42 x 30
+NSStatusBar.system.thickness = 22，这是上限，不是图标的问题
+```
+
+当时做的第二个落区是一块 240x132 pt 的面板（类型已删除），约 30 倍面积。它依赖三件 AppKit 没有承诺的
+事，探针（macOS 26.5，三轮）逐个验过：
+
+```
+1. 全局鼠标监听在无权限下可用
+   ad-hoc 签名的一次性 bundle，用 open 启动（让 TCC 把责任算给 app 自己而不是终端）
+   → AXIsProcessTrusted() = false
+   → .leftMouseDown / .leftMouseUp 照样到达                              ✅
+   （addGlobalMonitorForEvents 只对*键盘*事件要求辅助功能授权）
+
+2. drag pasteboard 能从发起方之外读到
+   Finder 拖一张 PNG 时 NSPasteboard(name: .drag) 上有
+     public.file-url / NSFilenamesPboardType / com.apple.finder.node
+   readObjects(forClasses:options:) 返回真实文件 URL                      ✅
+   按下后 85 ms 才可读 —— 所以触发不能只看按下那一下
+
+3. .accessory app 的非激活面板能收外部 app 发起的拖拽
+   draggingEntered seq=23 → performDragOperation urls=["drag-test.png"]  ✅
+   （AXIsProcessTrusted() = false 的那一轮里同样成立）
+```
+
+**一件没验成立、因此没有依赖的事**：全局 `.leftMouseDragged`。它确实会到达，但三轮里
+从未在「拖拽 pasteboard 出现」到「松手」这段窗口内出现过——那段时间鼠标归 drag manager。
+所以用的是**按下后开始的轮询**（读 `changeCount`，变了才读内容；上膛后每跳查一次空格键状态），松手停。
+频率跟着显示器刷新率走：本机 120Hz → 8.3ms，外接 60Hz 屏 → 16.7ms，取所有已接屏里最快的那个，每次按下
+时现读。单跳成本实测（各 200 次）：`changeCount` 0.0009ms、图标窗口 frame <0.0001ms、`NSScreen.screens`
+0.0085ms —— 即使 120Hz 也只占一个核的约 0.12%，而且只在鼠标键物理按下期间。
+`NSEvent.pressedMouseButtons` 兜底，万一 `.leftMouseUp` 丢了也不会留下一块面板在屏幕上。
+
+**触发是「拖拽时按住 ⌃ Control」。** 这条路是试错试出来的，中间几版都真的做出来并上手用过：
+
+1. **一开始拖就弹**（面板出现在光标旁）—— 行程为零，但在 Finder 里挪一张 PNG 也会弹，噪音无法接受。
+2. **要求拖到固定区域**（先是屏幕右上角，后来是图标下方的一条带）—— 安静了，但换来两个新问题，而且都是
+   上手才暴露的：固定位置意味着行程；而**看不见的触发区，只要手停短了就悄无声息什么都不发生**。追踪到
+   的真实落点是 y = 1015~1032，而带子从 1038 才开始 —— 当事人认为已经到了，系统什么都没说。
+3. **按键召唤**：撞不短、不用瞄、任意屏幕任意位置行为一致、不按就永远不出现 —— 噪音和瞄准这两个问题
+   是同一个答案解决的。面板回到光标下方 48pt，行程也回到零。
+
+**空格读不到，这是实测结论，不是猜的。** 空格本来是更好的键（哪只手都行、拖拽期间无含义），但两个进程
+同一时刻采样 `CGEventSource.keyState(.combinedSessionState, key: 49)`，用户按住空格：
+
+```
+受信任   (AXIsProcessTrusted() == true)  →  space(hid)=true   space(combined)=true
+不受信任 (AXIsProcessTrusted() == false) →  space(hid)=false  space(combined)=false  全程
+```
+
+所以**读任何普通键都要辅助功能授权**，而这份授权是按代码签名记的 —— 本 app 是 ad-hoc 签名，每次构建
+签名都变，功能会在每次更新后静默失效直到用户再去系统设置勾一次。这笔交易不划算。
+
+**修饰键则不需要授权**：`NSEvent.modifierFlags` 是状态读取而不是事件捕获。⌥（复制）、⌘（移动）、⌥⌘
+（别名）在拖拽里都已经有含义，借用会改变这次拖拽在**别的落点**上的行为；⌃ 是唯一空着的单修饰键。
+规则本身（认 ⌃、无视其他修饰键，所以 ⌃⌥ 也生效）当时放在 `GitPicCore` 里由测试钉住，随特性一并删除。
+
+于是这个特性里**每一处系统级读取都不需要任何授权**：鼠标*事件*的全局监听（键盘事件才要授权）、
+drag pasteboard、`NSEvent.pressedMouseButtons`、`NSEvent.modifierFlags`。启动日志里记着
+`accessibility trusted=false` 而面板工作正常，这是让上面这句话在未来 macOS 更新后仍然可被复核的方式。
+
+**面板与光标保持 48pt，这不是留白。** 松手是一次承诺：如果面板能开在光标周围，那么召唤它的那一下按键
+同时也会完成一次没人瞄准的上传 —— 而上传是图床仓库里的一个 commit，没有撤销（当时拒绝多图拖拽也是这个
+理由）。保持一个"轻推"的距离，让召唤和投放始终是两个动作。
+
+**`changeCount` 变了 ≠ pasteboard 写好了。** 单进程实测，三轮：
+
+```
+clearContents():  changeCount 0 → 1,  types 0,  file urls 0   ← 缝在这里
+writeObjects():   changeCount     1,  types 6,  file urls 1
+写入是否再次递增计数器？  否
+```
+
+`clearContents()` 自己就宣告了新拖拽，条目之后才写，而那次写入**对计数器不可见**。所以轮询不能"一看到
+计数器变化就读条目并采信"——落在缝里读到空就会把整趟拖拽判死，而"等下一次计数器变化"永远等不到。
+正确做法：**计数器只在 pasteboard 确实有 `types` 时才消费**，之前每跳多问一次 `types`（最便宜的那个
+问题，不向发起方取数据）。缝约 1ms：50ms 一跳时约 2% 拖拽命中，跳到屏幕刷新率（8.3ms）后约 12% ——
+性能修复会放大这个坑，两件事要一起看。
+
+**这块面板不能用 `.behindWindow` 模糊。** 120Hz + 4K@2x 上手测三种画法，判据是拖拽图标从面板上经过时
+的卡顿：模糊 + `layer.cornerRadius`/`masksToBounds` 圆角最差（图层遮罩逼整窗每次合成走离屏，模糊又要
+在该区域被重新合成时重算 —— 拖拽期间是每帧）；模糊 + `maskImage` 好一些；**自己填一个圆角矩形（无材质
+无模糊无遮罩）最干净**，整窗就是一张带 alpha 的静态位图。拿 `WindowServer` CPU 量各变体太吵没法用
+（不显示面板的基线反而最高），所以依据是机制 + 手感，不是数字。顺带：`animationBehavior` 要设 `.none`，
+否则 AppKit 会在我们的淡入之上再套一层它自己的出现动画。
+
 ## 2. 架构决策：GUI 怎么和 gitpic 说话
 
 **选定：把 `gitpic` 二进制打进 app bundle，用 `--json` 调用。**
@@ -104,7 +205,7 @@ C1 决定这一节不是可选项——不做，Finder 启动的 app 每次上�
 ### 4.1 菜单栏（NSStatusItem）——主入口
 
 始终可用，不受 C2 限制（popover 完全在菜单栏以下）。点击弹 popover：
-- 拖拽落区 + 「上传剪贴板」按钮
+- 「上传剪贴板」按钮（拖拽落区已删除，见 §C6）
 - 最近上传（读 `history.jsonl`，只读，不与 CLI 争写）
 - 格式切换（md / raw / html / cdn，零重传，见 §2）
 - 打开主窗口 / 设置
@@ -148,7 +249,7 @@ y=934 ┼───────────────────────�
 ## 5. 上传流程与剪贴板归属
 
 ```
-落区收到 fileURL / 剪贴板有图
+剪贴板有图（落区已删除，见 §C6）
       ↓
 spawn  <bundle>/Contents/Resources/gitpic  <paths…>  --json
        env: PATH=<gh dir>:/usr/bin:/bin:/usr/sbin:/sbin
@@ -157,7 +258,7 @@ spawn  <bundle>/Contents/Resources/gitpic  <paths…>  --json
       ↓
 ok:true → results[]        ｜  有 results 且 ok:false → 部分成功  ｜  只有 error → 全败
       ↓
-GUI 自己写 NSPasteboard（按当前格式）+ 通知 + 落区显示结果
+GUI 自己写 NSPasteboard（按当前格式）+ 通知
 ```
 
 要点：
@@ -181,7 +282,6 @@ gitpic/
 │  ├─ Sources/GitPicApp/
 │  │  ├─ GitPicApp.swift       @main, .accessory
 │  │  ├─ StatusItem.swift      菜单栏
-│  │  ├─ StatusItemDropView.swift  图标落区（M1 的最终形态，见 §「M1 的实际结果」）
 │  │  ├─ MainWindow.swift      历史 + 设置
 │  │  ├─ GitpicRunner.swift    进程调用 + JSON 解码 + 串行队列
 │  │  ├─ ToolDiscovery.swift   gh 发现（§3）
@@ -262,6 +362,9 @@ gitpic/
 M1 原本排在功能之前——它是唯一一个失败就要改设计的里程碑（兜底见 §4.3）。
 
 **M1 的实际结果：刘海方案放弃，落区改到菜单栏图标上（上面三个选项里的第 1 个）。**
+
+> **后续（见 §C6）：拖拽落区整体删除了**，包括这个菜单栏图标落区。M1 的结论在当时是对的，后来的问题
+> 不在实现而在交互本身。上传入口现在是「选择文件上传」/「上传剪贴板」/CLI。
 
 刘海面板搁置的原因是验收动作本身做不到：合成一次真实的 Finder→面板拖拽需要辅助功能授权
 下的 CGEvent 拖拽序列，我没做出来，而 §4.3 已经说明这一条只能人手验。`NotchPanel.swift`

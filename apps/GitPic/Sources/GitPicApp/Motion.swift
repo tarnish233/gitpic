@@ -10,8 +10,8 @@ import SwiftUI
 /// already on screen: that swap is a hard cut, and on a cold cache it is 33 of them
 /// spread over the seconds the pane takes to fill.
 ///
-/// It is a named type rather than two literals in a view body because it is also the
-/// app's **first** accessibility-preference handling. The next person to reach for a
+/// It is a named type rather than two literals in a view body because it is also
+/// the app's only accessibility-preference handling. The next person to reach for a
 /// spring in this app should find the policy before they find the API, and one file
 /// named for the concern is where they will look for it.
 enum Motion {

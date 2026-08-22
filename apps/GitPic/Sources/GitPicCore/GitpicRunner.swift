@@ -332,31 +332,29 @@ extension GitpicRunner {
                           as: HistoryEnvelope.self).results
     }
 
-    /// Writes only the keys that changed, one process each, never overlapping
+    /// Writes the keys that changed in one `config set`, never overlapping
     /// another invocation.
     ///
-    /// `config set` is load → mutate one key → write the whole file with no lock
-    /// (`src/commands/config_cmd.rs:82-84`), so two concurrent sets silently drop
-    /// one of the two changes. `gate` is what rules that out — not the actor,
-    /// which happily admits a second `applyConfig` at the `await` below, and not
-    /// this loop, which only orders *this* call's keys.
-    ///
-    /// What that leaves: two overlapping saves interleave their keys, so a pair
-    /// like owner+repo can end up half from each. Deliberately not fixed here —
-    /// holding the gate across the whole batch would make each save's pair
-    /// consistent, but the loser diffed against a config read before the winner
-    /// wrote, so its intent is stale either way. What matters is that no key is
-    /// *lost*: each `config set` is a complete load-mutate-write, and it is only
-    /// running two of them at once that destroys one.
+    /// The CLI accepts `KEY VALUE` pairs and load-mutate-saves once, so a later
+    /// key that fails validation cannot leave the earlier ones on disk. `gate`
+    /// still serialises this against other invocations: two overlapping saves
+    /// would otherwise each load the same file and the second write would drop
+    /// the first. The actor does not provide that — it admits the next caller
+    /// at every `await`.
     ///
     /// Returns the keys written, in the order they were applied.
     @discardableResult
     public func applyConfig(from old: GitpicConfig, to new: GitpicConfig) async throws -> [ConfigKey] {
         let keys = changedKeys(from: old, to: new)
+        guard !keys.isEmpty else { return [] }
+        var args = ["config", "set"]
         for key in keys {
-            let out = try await run(["config", "set", key.rawValue, key.value(in: new), "--json"])
-            guard out.status == 0 else { throw Self.failure(out) }
+            args.append(key.rawValue)
+            args.append(key.value(in: new))
         }
+        args.append("--json")
+        let out = try await run(args)
+        guard out.status == 0 else { throw Self.failure(out) }
         return keys
     }
 }
