@@ -53,6 +53,16 @@ struct ThumbnailTests {
                       sha: sha, size: size, deduped: deduped)
     }
 
+    /// `n` rows of `n` *different* images — distinct shas, distinct paths, so nothing
+    /// here is deduped and each one is a unit of work of its own. What a pane full of
+    /// ordinary history looks like to the store.
+    static func sources(_ n: Int) -> [ThumbnailSource] {
+        (0..<n).map { i in
+            record(sha: String(format: "%040x", i + 0x1000), path: "images/\(i).png")
+                .thumbnailSource(config: config)
+        }
+    }
+
     /// A fresh directory per test, so nothing leaks between them.
     static func tempDir() -> URL {
         let url = FileManager.default.temporaryDirectory
@@ -152,6 +162,21 @@ struct ThumbnailTests {
         // Ties sort by path, so `a` is "newest" and `c` is dropped first.
         #expect(ThumbnailCache.evictions(from: entries, ceiling: 250).map(\.lastPathComponent)
                 == ["c.png"])
+    }
+
+    // MARK: - The one line the pane shows while it waits
+
+    /// `total == 0` is the entire signal the header reads, so it has to mean exactly one
+    /// thing — nothing to say — and it must not be reachable any other way.
+    @Test("idle is the only inactive reading")
+    func progressIdleIsInactive() {
+        #expect(ThumbnailProgress.idle == ThumbnailProgress(done: 0, total: 0))
+        #expect(!ThumbnailProgress.idle.isActive)
+        #expect(ThumbnailProgress(done: 0, total: 1).isActive)
+        #expect(ThumbnailProgress(done: 12, total: 33).isActive)
+        // A finished episode is reported as idle, never as 33/33 the reader has to know
+        // to disregard — but if one is ever constructed by hand it is still "active".
+        #expect(ThumbnailProgress(done: 33, total: 33).isActive)
     }
 
     // MARK: - Decoding
@@ -378,6 +403,215 @@ struct ThumbnailTests {
         #expect(x.thumbnail != nil)
         #expect(y.thumbnail != nil)
         #expect(stub.requests == 1, "the second row must join the first row's fetch")
+    }
+
+    // MARK: Progress, and the silence that matters more
+
+    /// Everything a watcher was told, in order, so a test can assert on the sequence
+    /// rather than on one sampled moment.
+    ///
+    /// `progressUpdates()` buffers only the newest reading — a progress count is a state
+    /// and a late consumer wants the current one — so a slow watcher may legitimately
+    /// miss intermediate values. Nothing here asserts that *every* step was seen; the
+    /// claims are about which readings are possible and which are forbidden.
+    actor Watch {
+        private(set) var seen: [ThumbnailProgress] = []
+        func add(_ p: ThumbnailProgress) { seen.append(p) }
+        var active: [ThumbnailProgress] { seen.filter(\.isActive) }
+    }
+
+    /// **The pane that has nothing to fetch must say nothing, and this is the test that
+    /// says so.**
+    ///
+    /// It is the common case — every open after the first — and a line that appeared and
+    /// vanished inside 10 ms on each of them would be a flash of garbage added to the one
+    /// case that was already fine. Cache hits are not fetches, so no episode ever opens
+    /// and the grace timer is never even armed.
+    ///
+    /// Run with the **default** limits on purpose: 300 ms is the number shipping, so it
+    /// is the number under test. Four disk reads and decodes against a 300 ms budget is
+    /// the same three orders of magnitude of headroom the real pane has.
+    @Test("a pane whose thumbnails are all cached reports nothing at all")
+    func cachedPaneStaysSilent() async throws {
+        let dir = ThumbnailTests.tempDir()
+        let stub = Stub(body: try ThumbnailTests.png(w: 400, h: 300))
+        let sources = ThumbnailTests.sources(4)
+
+        let cold = ThumbnailStore(directory: dir, session: stub.session)
+        for source in sources { _ = await cold.thumbnail(for: source) }
+        #expect(stub.requests == 4)
+
+        // A fresh store over the same directory: empty memory, four disk hits. Exactly
+        // the second open of the window, or the first one after a relaunch.
+        let warm = ThumbnailStore(directory: dir, session: stub.session)
+        let watch = Watch()
+        let stream = await warm.progressUpdates()
+        let watching = Task { for await update in stream { await watch.add(update) } }
+
+        await withTaskGroup(of: Void.self) { group in
+            for source in sources {
+                group.addTask { _ = await warm.thumbnail(for: source) }
+            }
+        }
+        // Comfortably past the 300 ms grace, so a reveal that was going to fire has.
+        try await Task.sleep(for: .milliseconds(500))
+        watching.cancel()
+
+        #expect(stub.requests == 4, "the warm store must not have gone to the network")
+        #expect(await watch.active.isEmpty, "a cached pane must never say 正在取缩略图")
+        // Silence is not the same as an empty stream: a subscriber is always told where
+        // things stand, and here that is `idle`.
+        #expect(await watch.seen == [.idle])
+    }
+
+    /// The cold pane this whole signal exists for: a running count, a denominator that
+    /// does not move, and silence at the end.
+    ///
+    /// `concurrentFetches: 1` staggers the images 60 ms apart so the count is observable
+    /// at all — at the shipping 8 they would finish together and there would be no middle
+    /// to catch. It also pins the claim that matters most about the denominator: all three
+    /// are counted from the start, while two of them are still only *queued* at the gate.
+    /// A total that grew as slots freed up would be a number crawling upward for as long
+    /// as the fill takes.
+    ///
+    /// The grace is short but **not zero**, and that is the point rather than an
+    /// impatience: announcing is a disk miss and one actor hop, so every image in a burst
+    /// is counted within a millisecond or two of the pane opening, and any grace at all
+    /// puts the reveal after all of them. That is the same ordering the shipping 300 ms
+    /// has against a four-second fill — reveal a settled denominator, never a climbing
+    /// one. At exactly zero the reveal races the burst and 0/1 is a legitimate first
+    /// reading, which is a fact about `.zero` and not about the pane.
+    @Test("a slow fill is reported as a running count over a fixed total")
+    func slowFillIsReported() async throws {
+        let stub = Stub(body: try ThumbnailTests.png(w: 400, h: 300),
+                        delay: .milliseconds(60))
+        let store = ThumbnailStore(
+            directory: ThumbnailTests.tempDir(),
+            limits: ThumbnailLimits(concurrentFetches: 1,
+                                    progressGrace: .milliseconds(30)),
+            session: stub.session)
+        let sources = ThumbnailTests.sources(3)
+
+        let watch = Watch()
+        let stream = await store.progressUpdates()
+        let watching = Task { for await update in stream { await watch.add(update) } }
+
+        await withTaskGroup(of: Void.self) { group in
+            for source in sources {
+                group.addTask { _ = await store.thumbnail(for: source) }
+            }
+        }
+        // One more scheduling round for the final `idle` to be delivered.
+        try await Task.sleep(for: .milliseconds(50))
+        watching.cancel()
+
+        let active = await watch.active
+        #expect(!active.isEmpty, "three 60 ms fetches must be reported")
+        #expect(active.allSatisfy { $0.total == 3 },
+                "the denominator is the images asked for, and it does not move")
+        #expect(active.contains { $0.total == 3 && $0.done < 3 },
+                "images waiting at the gate are counted as outstanding, not as absent")
+        #expect(active.contains { $0.done > 0 && $0.done < $0.total },
+                "a running count, not a binary flag")
+        #expect(zip(active, active.dropFirst()).allSatisfy { $0.done <= $1.done },
+                "the count never goes backwards")
+        #expect(await watch.seen.last == .idle,
+                "the line has to go away when the pane is full")
+    }
+
+    /// An image refused by the size ceiling is never requested, so it is not work in
+    /// progress — it is a row that already has its answer. Counting it would leave a
+    /// denominator including images that by definition never arrive.
+    @Test("an image refused without a request is never counted as work")
+    func refusedImagesAreNotWork() async throws {
+        let stub = Stub(body: try ThumbnailTests.png(w: 400, h: 300))
+        let store = ThumbnailStore(
+            directory: ThumbnailTests.tempDir(),
+            // Zero grace, so nothing is being hidden by the timer: if it were counted at
+            // all, it would be reported.
+            limits: ThumbnailLimits(maxSourceBytes: 1024, progressGrace: .zero),
+            session: stub.session)
+        let watch = Watch()
+        let stream = await store.progressUpdates()
+        let watching = Task { for await update in stream { await watch.add(update) } }
+
+        let big = ThumbnailTests.record(size: 4096).thumbnailSource(config: ThumbnailTests.config)
+        #expect(await store.thumbnail(for: big).failure
+                == .tooLarge(bytes: 4096, ceiling: 1024))
+        try await Task.sleep(for: .milliseconds(50))
+        watching.cancel()
+
+        #expect(stub.requests == 0)
+        #expect(await watch.seen == [.idle])
+    }
+
+    /// The count is over *images*, which is what the pane's boxes actually wait on: two
+    /// rows of one deduped upload share a single GET, and one CDN miss that falls through
+    /// to raw is two requests for one picture. Either counted per request would report
+    /// work nobody is waiting on.
+    @Test("one image is one unit of work, however many rows and requests it takes")
+    func oneImageIsOneUnitOfWork() async throws {
+        let png = try ThumbnailTests.png(w: 400, h: 300)
+        // The fresh-upload case: jsDelivr has not caught up, GitHub has it.
+        let stub = Stub(delay: .milliseconds(60)) { url in
+            url.host == "cdn.jsdelivr.net" ? (Data("not yet".utf8), 404) : (png, 200)
+        }
+        let store = ThumbnailStore(
+            directory: ThumbnailTests.tempDir(),
+            limits: ThumbnailLimits(progressGrace: .zero),
+            session: stub.session)
+        let watch = Watch()
+        let stream = await store.progressUpdates()
+        let watching = Task { for await update in stream { await watch.add(update) } }
+
+        // Two rows, one sha, one path — a deduped upload is exactly this.
+        let a = ThumbnailTests.record().thumbnailSource(config: ThumbnailTests.config)
+        let b = ThumbnailTests.record(deduped: true).thumbnailSource(config: ThumbnailTests.config)
+        async let first = store.thumbnail(for: a)
+        async let second = store.thumbnail(for: b)
+        let (x, y) = await (first, second)
+        #expect(x.thumbnail != nil)
+        #expect(y.thumbnail != nil)
+        try await Task.sleep(for: .milliseconds(50))
+        watching.cancel()
+
+        #expect(stub.requests == 2, "one wasted CDN request, then the fallback")
+        let active = await watch.active
+        #expect(!active.isEmpty)
+        #expect(active.allSatisfy { $0.total == 1 },
+                "two rows and two requests, but one image and so one unit of work")
+        #expect(await watch.seen.last == .idle)
+    }
+
+    /// A second pane arriving mid-fill has to be told where things stand, not left blank
+    /// until the next image happens to land — 历史 can be closed and reopened while the
+    /// fill it started is still running, and the fetches deliberately survive that.
+    @Test("a subscriber that arrives late is told the current count immediately")
+    func lateSubscriberSeesCurrentCount() async throws {
+        let stub = Stub(body: try ThumbnailTests.png(w: 400, h: 300),
+                        delay: .milliseconds(120))
+        let store = ThumbnailStore(
+            directory: ThumbnailTests.tempDir(),
+            limits: ThumbnailLimits(concurrentFetches: 1, progressGrace: .zero),
+            session: stub.session)
+        let sources = ThumbnailTests.sources(3)
+
+        let filling = Task {
+            await withTaskGroup(of: Void.self) { group in
+                for source in sources {
+                    group.addTask { _ = await store.thumbnail(for: source) }
+                }
+            }
+        }
+        // Into the second of three 120 ms fetches — one done, one running, one queued —
+        // so there is a count to be told and 60 ms of slack on either side of it.
+        try await Task.sleep(for: .milliseconds(180))
+        var stream = await store.progressUpdates().makeAsyncIterator()
+        let first = await stream.next()
+        #expect(first?.isActive == true, "the very first reading must not be a blank one")
+        #expect(first?.total == 3)
+        #expect((first?.done ?? -1) >= 1, "it is told what has already landed")
+        await filling.value
     }
 
     }
