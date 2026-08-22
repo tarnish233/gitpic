@@ -82,6 +82,15 @@ No new features in this one. What changed is **where** the app answers you. Thre
   state machine. The icon rule moved into `GitPicCore` to be reachable at all — `GitPicApp`
   is an executable target no test can import, the same reason `ImageDrop` and
   `UploadReport` live there.
+- One of them, the late-subscriber case, first **slept 180 ms** to land "into the second of
+  three 120 ms fetches" and then asserted one had already landed. It passed five runs in a
+  row here and failed on CI, where the first fetch had not completed inside that window —
+  so it read 0/3 and failed a claim the store was honouring. **A sleep long enough to be
+  safe on every machine is one nobody can pick**, so the precondition now waits on an
+  event: one subscription is consumed until the store itself reports an image landed with
+  others still outstanding, and only then is the second subscription made and asserted on.
+  The delay is slack now rather than timing. Re-verified under load, with eight CPU-bound
+  processes running.
 
 ## [0.12.0] - 2026-08-22
 

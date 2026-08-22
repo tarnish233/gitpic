@@ -589,7 +589,7 @@ struct ThumbnailTests {
     @Test("a subscriber that arrives late is told the current count immediately")
     func lateSubscriberSeesCurrentCount() async throws {
         let stub = Stub(body: try ThumbnailTests.png(w: 400, h: 300),
-                        delay: .milliseconds(120))
+                        delay: .milliseconds(400))
         let store = ThumbnailStore(
             directory: ThumbnailTests.tempDir(),
             limits: ThumbnailLimits(concurrentFetches: 1, progressGrace: .zero),
@@ -603,11 +603,43 @@ struct ThumbnailTests {
                 }
             }
         }
-        // Into the second of three 120 ms fetches — one done, one running, one queued —
-        // so there is a count to be told and 60 ms of slack on either side of it.
-        try await Task.sleep(for: .milliseconds(180))
-        var stream = await store.progressUpdates().makeAsyncIterator()
-        let first = await stream.next()
+
+        // Wait for the *event*, not for a clock.
+        //
+        // This is the fix for a real flake, and the reason is worth keeping: the first
+        // version slept 180 ms to land "into the second of three 120 ms fetches" and then
+        // asserted that one had finished. It passed here five runs in a row and failed on
+        // CI, where the first fetch had not completed inside that window — so it read 0/3
+        // and failed a claim the store was actually honouring. A sleep long enough to be
+        // safe on every machine is a sleep nobody can pick.
+        //
+        // So the precondition is established by watching the store say so. One
+        // subscription is consumed until it reports an image landed while others are
+        // still outstanding, which is exactly the state a second pane has to be told
+        // about. The 400 ms delay is slack now rather than timing: the loop breaks the
+        // moment the first fetch lands, leaving two serialized fetches — about 800 ms —
+        // before the episode could end and reset the counts underneath the assertions.
+        var watcher = await store.progressUpdates().makeAsyncIterator()
+        var midFill: ThumbnailProgress?
+        var sawWork = false
+        while let update = await watcher.next() {
+            if update.isActive { sawWork = true }
+            if update.done >= 1, update.done < update.total {
+                midFill = update
+                break
+            }
+            // An episode ending resets the counts, so work-then-idle means the fill
+            // outran this loop and the state under test can no longer occur. Break
+            // rather than wait for it forever.
+            if sawWork, !update.isActive { break }
+        }
+        let observed = try #require(midFill, "never observed a partly-finished fill")
+        #expect(observed.total == 3)
+
+        // The claim itself: a subscription made at this moment is handed the count that
+        // already stands, not a blank it has to wait for the next image to fill in.
+        var late = await store.progressUpdates().makeAsyncIterator()
+        let first = await late.next()
         #expect(first?.isActive == true, "the very first reading must not be a blank one")
         #expect(first?.total == 3)
         #expect((first?.done ?? -1) >= 1, "it is told what has already landed")
