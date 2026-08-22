@@ -34,9 +34,9 @@ $ gitpic list
 
 ## Install
 
-The CLI and the menu-bar app are two separate things, and their names are separate
-too: the CLI's formula is **`gitpic_cli`**, the app is **GitPic.app** (below). You
-install `gitpic_cli`; the command stays `gitpic`.
+The CLI and the menu-bar app are two separate things, and two separate names in
+Homebrew: the CLI is the formula **`gitpic_cli`**, the app is the cask
+**`gitpic_app`** (below). You install `gitpic_cli`; the command stays `gitpic`.
 
 **Homebrew (macOS/Linux, recommended — adds it to `PATH` and installs shell completions)**
 
@@ -73,18 +73,27 @@ cargo install --git https://github.com/tarnish233/gitpic-cli
 
 ### GitPic.app (optional macOS menu-bar app)
 
-Every [release](https://github.com/tarnish233/gitpic-cli/releases) includes a
-`GitPic-<version>-macos-arm64.zip`. It carries the same version as the CLI and
-embeds that same `gitpic` build, so installing the app does not also require
-installing the CLI (and vice versa).
+```bash
+brew install --cask tarnish233/tap/gitpic_app   # then: brew upgrade --cask gitpic_app
+```
+
+It carries the same version as the CLI and embeds that same `gitpic` build, so
+installing the app does not also require installing the CLI (and vice versa).
+Installing both is fine: the app only ever runs the `gitpic` inside its own bundle,
+`gitpic_cli` serves the terminal, and the two share one config file and one upload
+history — change the repository in the app and the terminal follows, and vice versa.
 
 Upload the clipboard image or pick files from the menu-bar icon; the link lands on
 your clipboard. The settings window edits the image-host repository and the upload
 options, and browses history.
 
+Or take `GitPic-<version>-macos-arm64.zip` from a
+[release](https://github.com/tarnish233/gitpic-cli/releases) and install it yourself.
+The app is ad-hoc signed and not notarised by Apple, so a manual install has to clear
+the quarantine flag before it will open (the cask does this step for you):
+
 ```bash
 unzip GitPic-<version>-macos-arm64.zip -d /Applications/
-# Ad-hoc signed and not notarised by Apple — clear the quarantine flag to open it:
 xattr -dr com.apple.quarantine /Applications/GitPic.app
 ```
 

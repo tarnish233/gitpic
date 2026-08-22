@@ -4,6 +4,61 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.3] - 2026-08-22
+
+### Two things to install, two names to install them by
+
+The CLI and the app have always been two things shipping from one version and one
+Release, but Homebrew only had one name for them — `gitpic` — so
+`brew install tarnish233/tap/gitpic` left you guessing whether you were getting the
+command line or the menu-bar app. Both are registered in the tap now, under names of
+their own:
+
+    brew install tarnish233/tap/gitpic_cli         # the CLI; the command is still gitpic
+    brew install --cask tarnish233/tap/gitpic_app  # GitPic.app
+
+**Nothing about using it changes.** The formula still installs `bin/gitpic`, the same
+three completion scripts, the same `/opt/homebrew/bin/gitpic` symlink — only the
+formula name and the directory in the Cellar moved. The old name is not dropped
+either: the tap carries a `formula_renames.json`, so
+`brew install tarnish233/tap/gitpic` still resolves, and an installed keg is migrated
+by `brew update` / `brew upgrade` or by `brew migrate gitpic` (measured here: unlink,
+move `Cellar/gitpic` to `Cellar/gitpic_cli`, relink — `gitpic --version` unaffected).
+
+**The two copies of the CLI do not fight.** Install the app *and* `gitpic_cli` and
+there really are two `gitpic` binaries on the machine, but neither addresses the
+other: the app always runs the one in its own bundle
+(`ToolDiscovery.locateGitpic` checks `Contents/Resources/gitpic` first and returns,
+and the PATH lookup below it exists for `swift run` during development, where there is
+no bundle — the launch log reads
+`gitpic=/Applications/GitPic.app/Contents/Resources/gitpic`), while Homebrew's copy
+serves the terminal. What they do share is
+`~/.config/gitpic/config.toml` and `~/.local/share/gitpic/history.jsonl`, and that is
+the design: change the repo in the app and the terminal's `gitpic` follows it
+immediately; drop an image on the menu bar and `gitpic list` shows it. The one thing
+to watch is letting the two versions drift far apart — config keys are validated
+strictly, so a key a newer build writes is a `CONFIG_INVALID` for an older one.
+
+The tap's six-hourly updater now edits the formula and the cask. It reads
+`releases/latest` and does not alarm on failure, so a wrong path after the rename
+would fail **silently**: it was replayed against the renamed files with a fake tag and
+fake checksums, and only pushed once all three urls, all three sha256s and the cask's
+version/sha256 came out rewritten.
+
+### App
+
+- **Installable with brew**: `brew install --cask tarnish233/tap/gitpic_app`, and
+  `brew upgrade --cask gitpic_app` after that. The app is ad-hoc signed on the build
+  machine and not notarised by Apple, so the cask clears the quarantine flag itself —
+  the `xattr -dr com.apple.quarantine` line the README used to ask you to type is
+  Homebrew's job now.
+- `zap` removes only what the app itself creates
+  (`~/Library/Preferences/dev.gitpic.app.plist`, `Logs/GitPic.log`, Caches,
+  HTTPStorages, Saved Application State). It deliberately leaves `~/.config/gitpic`
+  and the upload history alone — those are shared with the CLI, and deleting them
+  would clear the terminal side too.
+- No code changes in the app itself; it carries the repo's version as always.
+
 ## [0.11.2] - 2026-08-22
 
 ### Two pieces of window chrome that did not match the platform
@@ -1259,7 +1314,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.2...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.3...HEAD
+[0.11.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.3
 [0.11.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.2
 [0.11.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.1
 [0.11.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.0
