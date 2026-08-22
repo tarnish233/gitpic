@@ -392,8 +392,16 @@ jobs:
       #
       # `GITHUB_TOKEN` cannot do this: its scope is this repository. A cross-repo
       # dispatch needs write access to the tap, which is what TAP_DISPATCH_TOKEN is
-      # for. The secret guard means the step simply does not run until someone has
-      # set it, so adding this could never break a release before it existed.
+      # for.
+      #
+      # The "nobody has set the token" case is checked **in the script, not in `if:`**.
+      # The obvious spelling — `if: secrets.TAP_DISPATCH_TOKEN != ''` — is not merely
+      # discouraged, it does not parse: the `secrets` context is not among those
+      # available to a step's `if`, and GitHub rejects the whole workflow file for it,
+      # producing a zero-second failed run named after the file with no jobs in it.
+      # Measured the hard way — it took this workflow down on `main` until it was fixed.
+      # Mapping the secret into a job-level `env` would satisfy `if:` but hands the
+      # token to every other step in the job, which is worse than a two-line check.
       #
       # The version travels with the event, and the tap asserts it matches what
       # `releases/latest` tells it. Publishing and `latest` moving are not atomic, so
@@ -401,13 +409,17 @@ jobs:
       # then sit on it until the next cron — a silent wrong answer, which is the one
       # outcome worth failing loudly over.
       - name: Tell the tap a release landed
-        if: ${{ startsWith(github.ref, 'refs/tags/') && secrets.TAP_DISPATCH_TOKEN != '' }}
+        if: startsWith(github.ref, 'refs/tags/')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "TAP_DISPATCH_TOKEN is not set; leaving the tap to its cron." >&2
+            exit 0
+          fi
           # `--input -` with real JSON rather than `-f client_payload[version]=…`,
           # so the nesting is unambiguous and the version is never shell-interpolated
           # into a URL or a query string.
