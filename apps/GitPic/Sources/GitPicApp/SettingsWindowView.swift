@@ -662,6 +662,17 @@ struct UploadPane: View {
 struct HistoryPane: View {
     @Bindable var model: AppModel
 
+    /// How much thumbnail fetching is outstanding, pushed by ``ThumbnailStore``.
+    ///
+    /// View state and not something on ``AppModel``, unlike everything else this pane
+    /// reads. Two reasons. Its lifetime is exactly this pane's: `.task` below subscribes
+    /// when 历史 appears and is cancelled when it goes away, so nothing keeps a
+    /// subscription alive for a window that is closed — and the window now survives
+    /// being closed (see ``SettingsWindowController``). And no other surface wants it:
+    /// the status-item menu has no rows and no thumbnails, so putting it on the model
+    /// would be widening the app's shared state for one `Text`.
+    @State private var progress: ThumbnailProgress = .idle
+
     var body: some View {
         // Same container as every other pane, and that is the whole point.
         //
@@ -713,6 +724,33 @@ struct HistoryPane: View {
                 } header: {
                     HStack(alignment: .firstTextBaseline) {
                         Text("\(model.history.count) 条记录")
+                        // One line for the whole pane. On a cold cache the rows sit as
+                        // grey boxes for about four seconds (``ThumbnailLimits``), and
+                        // with nothing said about it a slow link is indistinguishable
+                        // from a broken one.
+                        //
+                        // Next to the count rather than in place of it, and on the left
+                        // rather than the right: the copy hint over there is a standing
+                        // fact about this pane, and a line that comes and goes must
+                        // neither replace it nor shove it sideways. Growing leftward
+                        // into the `Spacer()` moves nothing.
+                        //
+                        // `.caption`, so the header cannot change height when it
+                        // appears — the count beside it is the taller of the two either
+                        // way — and `.monospacedDigit()` so a climbing number does not
+                        // reflow its own text on every image, the same reason the byte
+                        // sizes in the rows are monospaced.
+                        //
+                        // No `ProgressView` next to it, deliberately. The numbers moving
+                        // already say "working"; a spinner is taller than this text and
+                        // so is the one thing here that *would* change the header's
+                        // height, and it would do it twice per open.
+                        if progress.isActive {
+                            Text("· 正在取缩略图 \(progress.done)/\(progress.total)")
+                                .font(.caption)
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
                         Spacer()
                         Text("复制 \(model.linkForm.label) · 在「上传」页的「链接」改")
                             .font(.caption)
@@ -721,6 +759,19 @@ struct HistoryPane: View {
                 }
             }
             .formChrome()
+            // Pushed, not polled: the store yields on every change and the current
+            // state on subscribe, so this costs one hop onto the actor per image
+            // resolved and nothing at all while the pane sits idle. Cancelled with the
+            // pane, which is what releases the store's side of it.
+            .task {
+                // Subscribing is itself a hop onto the store, so it is its own `await`
+                // rather than one buried in the `for` — the stream is handed back with
+                // the current state already in it.
+                let updates = await model.thumbnails.progressUpdates()
+                for await update in updates {
+                    progress = update
+                }
+            }
         }
     }
 

@@ -306,17 +306,46 @@ public struct ThumbnailLimits: Sendable, Hashable {
     /// serving them for free, and shaving two seconds off a cost paid once per image is
     /// not worth being the app that opens twelve connections at once.
     public var concurrentFetches: Int
+    /// How long fetches have to be outstanding before ``ThumbnailStore`` admits to
+    /// them. Below this, an episode comes and goes with nothing on screen.
+    ///
+    /// **A progress line that appears and vanishes is worse than no progress line**, and
+    /// the pane is opened far more often with little to do than with 33 images to fetch.
+    /// The commonest case of all — everything cached — is already silent for a different
+    /// and better reason: cache hits are not fetches and are never counted (see
+    /// ``ThumbnailStore``'s `beganFetching`). This number is for the short *real*
+    /// episodes that counting rule cannot catch: the one image just uploaded, sitting at
+    /// the top of the pane, fetched over a link that answers in 200 ms. Flashing
+    /// 正在取缩略图 0/1 through that is noise reporting nothing.
+    ///
+    /// 300 ms because it has to separate a round trip worth mentioning from one that is
+    /// already over, and nothing else. For scale, the cache layers it must never trip
+    /// over are far below it: 33 thumbnails read from disk into a fresh store take
+    /// 5.4 / 5.4 / 9.0 ms over three rounds — 30× under — and 0.2 ms once they are in
+    /// memory. (Measured through the test session, which does the same
+    /// `Data(contentsOf:)` and ImageIO decode per image the app does.) It is also under
+    /// the ~1 s at which a person starts wondering whether the window is broken, and the
+    /// cold fill it exists for runs 4.11–5.16 s over those same 33 images
+    /// (``concurrentFetches``), so the line still covers about four of those seconds.
+    ///
+    /// Rejected: pairing this with a minimum on-screen time. That would only matter for
+    /// an episode that crosses 300 ms and then ends immediately, and there is no such
+    /// cluster to protect against — work here either comes out of a cache in single-digit
+    /// milliseconds or waits on a network round trip.
+    public var progressGrace: Duration
 
     public init(maxPixel: Int = 160,
                 maxSourceBytes: Int = 12 * 1024 * 1024,
                 maxDiskBytes: Int = 32 * 1024 * 1024,
                 memoryCount: Int = 120,
-                concurrentFetches: Int = 8) {
+                concurrentFetches: Int = 8,
+                progressGrace: Duration = .milliseconds(300)) {
         self.maxPixel = maxPixel
         self.maxSourceBytes = maxSourceBytes
         self.maxDiskBytes = maxDiskBytes
         self.memoryCount = memoryCount
         self.concurrentFetches = concurrentFetches
+        self.progressGrace = progressGrace
     }
 }
 
@@ -352,6 +381,44 @@ actor FetchGate {
         } else {
             waiting.removeFirst().resume()
         }
+    }
+}
+
+// MARK: - Progress
+
+/// How much of the pane's thumbnail fetching is still outstanding — **one number for
+/// the whole pane, not one per row.**
+///
+/// Per-row spinners were the obvious alternative and they are the wrong answer for the
+/// same reason each row's placeholder is a static glyph rather than a spinner: a
+/// hundred of them chasing each other down the pane reports nothing and is the noisiest
+/// thing on screen. One line saying `12/33` says the thing a person actually wants
+/// known — that this is progressing, and roughly how much of it is left.
+///
+/// **Counts images, not rows.** Two rows of one deduped upload share a single GET (see
+/// ``ThumbnailStore``), so they are one unit of work here; on this machine's history
+/// that is 37 rows and 33 distinct images.
+public struct ThumbnailProgress: Sendable, Hashable {
+    /// Fetches finished in the current episode.
+    public let done: Int
+    /// Fetches started in it, `done` included. Zero exactly when there is nothing to
+    /// report — see ``isActive``.
+    ///
+    /// It does not shrink: an episode's total is fixed until the episode ends, so a
+    /// denominator never counts backwards while someone is reading it.
+    public let total: Int
+
+    /// Nothing outstanding, or nothing outstanding *long enough to mention* — the two
+    /// are deliberately indistinguishable from out here. Which of them it is, is
+    /// ``ThumbnailLimits/progressGrace``'s business and no caller's.
+    public static let idle = ThumbnailProgress(done: 0, total: 0)
+
+    /// Whether there is anything to show. The UI's whole decision.
+    public var isActive: Bool { total > 0 }
+
+    public init(done: Int, total: Int) {
+        self.done = done
+        self.total = total
     }
 }
 
@@ -395,6 +462,30 @@ public actor ThumbnailStore {
     private var bytesSincePrune = ThumbnailStore.pruneInterval
     /// How much writing it takes to be worth enumerating the directory again.
     private static let pruneInterval = 512 * 1024
+
+    // MARK: Progress accounting
+
+    /// Keys that have missed both caches and are being fetched right now — queued at
+    /// the gate counts as being fetched, because from the pane's side it is the same
+    /// grey box either way.
+    private var fetching: Set<String> = []
+    /// The current episode: fetches started, and of those, finished. Both reset the
+    /// moment ``fetching`` empties, which is what makes "episode" mean *one burst of
+    /// pane work* rather than the lifetime of the process.
+    private var episodeStarted = 0
+    private var episodeFinished = 0
+
+    /// Everyone listening. A dictionary rather than one continuation because 历史 can
+    /// be closed and reopened, so subscriptions come and go and a second one must not
+    /// silently steal the first one's values.
+    private var watchers: [UUID: AsyncStream<ThumbnailProgress>.Continuation] = [:]
+
+    /// Whether the current episode has outlived ``ThumbnailLimits/progressGrace`` and
+    /// is therefore worth mentioning. Until it has, watchers are told nothing at all.
+    private var revealed = false
+    /// The pending "has it been long enough yet" timer, cancelled when an episode ends
+    /// before it fires — which on a cached pane is every time.
+    private var revealTimer: Task<Void, Never>?
 
     public init(directory: URL = ThumbnailStore.defaultDirectory(),
                 limits: ThumbnailLimits = ThumbnailLimits(),
@@ -462,9 +553,18 @@ public actor ThumbnailStore {
         let limits = self.limits
         let gate = self.gate
         let session = self.session
+        // The one tie back to the store from inside the detached work, and deliberately
+        // the only one: a single actor hop taken before the request goes out, nothing
+        // reached for during the download or the decode.
+        //
+        // Built out here rather than inline in the task, and strongly, because a `weak
+        // self` capture cannot be re-captured by a nested `@Sendable` closure. The
+        // reference it holds lives exactly as long as the fetch — the task always
+        // returns, and `inFlight[key] = nil` below is what lets go of the task.
+        let announce: @Sendable () async -> Void = { await self.beganFetching(key) }
         let task = Task<Result<Loaded, ThumbnailFailure>, Never>.detached(priority: .utility) {
             await Self.load(source, directory: dir, limits: limits,
-                            gate: gate, session: session)
+                            gate: gate, session: session, announceFetch: announce)
         }
         inFlight[key] = task
         let result = await task.value
@@ -472,6 +572,7 @@ public actor ThumbnailStore {
         // with no `await` in between: that is what keeps a second caller from reaching
         // this path for the same URL and counting the same write twice.
         inFlight[key] = nil
+        finishedFetching(key)
         if case .success(let loaded) = result {
             remember(loaded.thumbnail, for: key)
             bytesSincePrune += loaded.bytesWritten
@@ -500,6 +601,126 @@ public actor ThumbnailStore {
         Task.detached(priority: .background) { Self.prune(dir, ceiling: ceiling) }
     }
 
+    // MARK: Progress
+
+    /// How much fetching is outstanding, pushed as it changes — starting with where
+    /// things stand right now, so a subscriber that arrives mid-burst is not blind
+    /// until the next image lands.
+    ///
+    /// A stream and not an `isLoading` the UI can read, because the alternative is the
+    /// UI asking again and again: this store is an actor, every read is a hop onto it,
+    /// and a timer polling it would be 33 pointless hops a second through the exact
+    /// four seconds it is meant to describe. It also keeps this file free of SwiftUI —
+    /// `AsyncStream` is Foundation, so nothing here knows a view exists.
+    ///
+    /// `.bufferingNewest(1)`: a progress reading is a *state*, not an event. A
+    /// subscriber that fell behind wants the current count, never a backlog of counts
+    /// that were true a moment ago, and the unbounded default would keep every one of
+    /// them.
+    ///
+    /// Each call gets its own stream. Reopening 历史 subscribes again, and two live
+    /// subscriptions both see everything rather than one of them quietly winning.
+    public func progressUpdates() -> AsyncStream<ThumbnailProgress> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<ThumbnailProgress>.makeStream(
+            bufferingPolicy: .bufferingNewest(1))
+        watchers[id] = continuation
+        continuation.yield(visibleProgress)
+        // Fires when the consumer's `for await` ends — the pane closing, or its task
+        // being cancelled. Hops back onto the actor because that is where `watchers`
+        // lives; without this every open of the window would leak a continuation.
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.dropWatcher(id) }
+        }
+        return stream
+    }
+
+    private func dropWatcher(_ id: UUID) { watchers[id] = nil }
+
+    /// What watchers are allowed to see: the truth once the episode has earned it, and
+    /// ``ThumbnailProgress/idle`` before that. The grace period is enforced here, in
+    /// one place, rather than by each caller remembering to ask.
+    private var visibleProgress: ThumbnailProgress {
+        revealed ? ThumbnailProgress(done: episodeFinished, total: episodeStarted) : .idle
+    }
+
+    private func broadcast() {
+        let now = visibleProgress
+        for watcher in watchers.values { watcher.yield(now) }
+    }
+
+    /// Called from ``load`` once both caches have missed and the guards have passed, so
+    /// a request really is about to go out.
+    ///
+    /// **Counting here rather than in ``thumbnail(for:)`` is the whole point.** Up there
+    /// the store cannot yet tell a network fetch from a disk hit — finding out means
+    /// doing the disk read, which is precisely the work kept off this actor — so
+    /// counting there would count every cached image as "fetching". A line reading
+    /// 正在取缩略图 while 33 images come off the local disk in 9 ms is not a true
+    /// sentence, and the size-ceiling refusals it would also count are images that by
+    /// definition never get fetched at all.
+    ///
+    /// Rejected: a `fileExists` check on the actor to decide up front. It is a second,
+    /// less reliable copy of a decision ``load`` already makes — a cache file that
+    /// exists but will not decode falls through to the network and would go uncounted —
+    /// bought with a synchronous filesystem call on the actor.
+    private func beganFetching(_ key: String) {
+        // De-duplication happens upstream: one key has one in-flight task, so a second
+        // announcement for a live key cannot arrive. Guarded anyway, because the cost
+        // of being wrong is a total that never comes back down.
+        guard fetching.insert(key).inserted else { return }
+        episodeStarted += 1
+        if revealed {
+            broadcast()
+        } else if revealTimer == nil {
+            // One timer per episode, armed by whichever fetch opened it. Every later
+            // fetch joins the episode already being timed rather than pushing the
+            // reveal further out — otherwise a steady trickle of work would keep
+            // resetting the clock and the line would never appear at all.
+            let grace = limits.progressGrace
+            revealTimer = Task { [weak self] in
+                try? await Task.sleep(for: grace)
+                await self?.reveal()
+            }
+        }
+    }
+
+    private func reveal() {
+        // A cancelled timer belongs to an episode that has already ended; the store may
+        // by now be timing a *new* one, whose registration this must not clobber.
+        guard !Task.isCancelled else { return }
+        revealTimer = nil
+        guard !fetching.isEmpty else { return }
+        revealed = true
+        broadcast()
+    }
+
+    /// The counterpart to ``beganFetching(_:)``, and it is on the actor's side of the
+    /// task boundary on purpose: whatever happened to the fetch — image, 404, transport
+    /// error, or a waiter that walked away — ``thumbnail(for:)`` still returns, so this
+    /// still runs and the count cannot get stuck.
+    private func finishedFetching(_ key: String) {
+        // Nothing to settle for a memory hit, a disk hit, or a refusal: those never
+        // announced themselves.
+        guard fetching.remove(key) != nil else { return }
+        episodeFinished += 1
+        guard fetching.isEmpty else {
+            if revealed { broadcast() }
+            return
+        }
+        // Episode over. Reset before the last broadcast, so what watchers see is
+        // `idle` and not a final 33/33 they would have to know to ignore.
+        episodeStarted = 0
+        episodeFinished = 0
+        revealTimer?.cancel()
+        revealTimer = nil
+        let wasVisible = revealed
+        revealed = false
+        // Only if something was actually on screen. On a cached pane this is the path
+        // every single time, and it must stay completely silent.
+        if wasVisible { broadcast() }
+    }
+
     // MARK: The actual work, off the actor
 
     /// A resolved thumbnail plus what it cost the disk — zero when it came *from* the
@@ -513,7 +734,9 @@ public actor ThumbnailStore {
                              directory: URL,
                              limits: ThumbnailLimits,
                              gate: FetchGate,
-                             session: URLSession) async -> Result<Loaded, ThumbnailFailure> {
+                             session: URLSession,
+                             announceFetch: @escaping @Sendable () async -> Void)
+                             async -> Result<Loaded, ThumbnailFailure> {
         let cacheFile = ThumbnailCache.fileName(sha: source.sha)
             .map { directory.appendingPathComponent($0) }
 
@@ -531,6 +754,14 @@ public actor ThumbnailStore {
         guard !candidates.isEmpty else {
             return .failure(.badURL(source.urls.first ?? ""))
         }
+
+        // Announced here and not a line earlier or later: below both cache layers, so
+        // nothing already cached is counted, and below the ceiling and URL guards, so
+        // nothing that fails without a request is either. Above `acquire()`, because an
+        // image waiting its turn at the gate is outstanding work — 25 of the 33 start
+        // there, and a total that grew as slots freed up would be a denominator
+        // crawling upward for four seconds.
+        await announceFetch()
 
         // Acquired around the whole walk and released on the single path out of it,
         // rather than in a `defer` that would have to spawn a task to do its `await`:
