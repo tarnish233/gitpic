@@ -4,6 +4,28 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### App 那份 CLI 现在也是终端里那份
+
+装了 App 又用 `brew install tarnish233/tap/gitpic_cli`，机器上就有两份同一个构建的 `gitpic`：装两次、
+升两次，两次之间还可能对不上。现在 cask 把 App bundle 里那份软链成 `bin/gitpic`，并生成 bash、zsh、
+fish 三份补全 —— **装 cask 就等于同时装了命令行**，而且升 App 就是升命令，版本对不上这件事从结构上
+没有了。formula 留着：Linux、Intel Mac、CI，以及只想要命令行的人只能走它。
+
+用的是 Homebrew 自己的 `generate_completions_from_executable`（cask 版，`cask/artifact/
+generated_completion.rb`），不是 postflight 私自往 prefix 里写 —— 卸载时 brew 自己会清掉，实测
+`brew uninstall --cask gitpic_app` 之后软链和三份补全一起没了。
+
+两个都装会抢同一个 `bin/gitpic`，两个方向都实测了：cask 先在，formula 装得上但 link 失败并提示
+`shadowed by`；formula 先在，cask 打印 `skipping link` 后照样装完。命令和补全归先到的那个，所以
+README 现在写的是「装一个」，而不是之前那句「两个都装也不冲突」。
+
+**顺带修掉一个只在全新安装才出现的 bug**：去 quarantine 原来放在 `postflight`，而补全是**跑**那个
+二进制生成的，postflight 又在 artifact 之后 —— 于是全新安装时 macOS 把还带着 quarantine 的自签名
+二进制 SIGKILL 掉，三份补全一个都没生成（重装看不出来，因为重装用的是上一轮已经去过 quarantine 的
+bundle）。现在移到 `preflight`、在 staging 目录里做，`app` 用 `mv` 搬走时那个「已清除」的状态跟着走。
+
 ## [0.11.3] - 2026-08-22
 
 ### 装的时候分得清：`gitpic_cli` 和 `gitpic_app`

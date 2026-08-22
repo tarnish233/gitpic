@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### The app's CLI is now the terminal's CLI too
+
+Install the app and then `brew install tarnish233/tap/gitpic_cli` and the machine holds
+two copies of the same build: installed twice, upgraded twice, and able to disagree in
+between. The cask now links the copy inside the bundle to `bin/gitpic` and generates the
+bash, zsh and fish completions — **installing the cask installs the command line**, and
+upgrading the app upgrades the command, so version skew is gone by construction. The
+formula stays: it is the only option on Linux, on Intel, and for anyone who wants no app.
+
+This uses Homebrew's own `generate_completions_from_executable` (the cask flavour, in
+`cask/artifact/generated_completion.rb`) rather than a postflight writing into the prefix
+behind its back — Homebrew removes them itself, verified: after
+`brew uninstall --cask gitpic_app` the symlink and all three completions are gone.
+
+Installing both makes them compete for `bin/gitpic`, and both directions were measured:
+cask first, and the formula installs but cannot link (Homebrew reports `shadowed by`);
+formula first, and the cask prints `skipping link` and finishes anyway. Whichever arrived
+first owns the command and the completions, so the READMEs now say install one — not the
+earlier "installing both is fine".
+
+**One bug fixed on the way, visible only on a fresh install**: the quarantine strip lived
+in `postflight`, the completion stanza *runs* the binary, and postflight comes after the
+artifacts — so on a fresh install macOS SIGKILLed the still-quarantined ad-hoc-signed
+binary and not one completion file was written. (A reinstall hid it, because it reuses the
+bundle whose flag was cleared the round before.) It happens in `preflight` now, in the
+staging directory, and `app` moves the cleared bundle with `mv`.
+
 ## [0.11.3] - 2026-08-22
 
 ### Two things to install, two names to install them by
