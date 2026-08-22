@@ -20,6 +20,10 @@ read as the app. What it installs is unchanged — the binary, the completions a
 finds a system CLI. The tap's `formula_renames.json` maps the old name onto the
 new one, so `brew install tarnish233/tap/gitpic` still resolves and an installed keg
 migrates on `brew update` / `brew upgrade` (or `brew migrate gitpic`); don't remove it.
+The app is in the same tap, as the cask **`gitpic_app`** built from the Release's
+`GitPic-<version>-macos-arm64.zip`. The tap's six-hourly updater bumps the formula
+and the cask together off `releases/latest`, and does not alarm on failure — so
+renaming a release asset here breaks both of them silently.
 
 `apps/GitPic/` is a macOS menu-bar app (SwiftUI) that drives the CLI over its
 `--json` contract; `scripts/build-app.sh` builds the bundle with the `gitpic`

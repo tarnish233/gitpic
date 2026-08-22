@@ -4,6 +4,45 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.11.3] - 2026-08-22
+
+### 装的时候分得清：`gitpic_cli` 和 `gitpic_app`
+
+CLI 和 App 一直是同一个版本、同一个 Release 里的两件东西，但 Homebrew 里只有一个名字叫
+`gitpic`，于是 `brew install tarnish233/tap/gitpic` 装的是命令行还是菜单栏应用，只能靠猜。现在
+两件都在 tap 里注册，名字各归各的：
+
+    brew install tarnish233/tap/gitpic_cli         # 命令行，装出来的命令仍然是 gitpic
+    brew install --cask tarnish233/tap/gitpic_app  # 菜单栏应用 GitPic.app
+
+**用法一个字都没变。** formula 装的还是 `bin/gitpic`、还是那三份补全脚本、还是
+`/opt/homebrew/bin/gitpic` 这个软链 —— 变的只有 formula 名和 Cellar 里的目录名。旧名字也没废：
+tap 里留了一份 `formula_renames.json`，`brew install tarnish233/tap/gitpic` 照样能装，已经装了的
+由 `brew update` / `brew upgrade` 迁移，也可以直接 `brew migrate gitpic`（本机实测：unlink → 把
+`Cellar/gitpic` 移成 `Cellar/gitpic_cli` → relink，之后 `gitpic --version` 照旧）。
+
+**两份 CLI 不会打架。** 装了 App 又装了 `gitpic_cli`，机器上确实有两个 `gitpic` 二进制，但它们
+互不寻址：App 永远跑自己 bundle 里那份（`ToolDiscovery.locateGitpic` 先看
+`Contents/Resources/gitpic` 并直接返回，PATH 上那份只在没有 bundle 的 `swift run` 开发场景兜底
+—— 启动日志实测 `gitpic=/Applications/GitPic.app/Contents/Resources/gitpic`），brew 那份只服务
+终端。共享的是 `~/.config/gitpic/config.toml` 和 `~/.local/share/gitpic/history.jsonl`，而那是
+设计：在 App 里改仓库，终端里的 `gitpic` 立刻照新的走；从菜单栏传的图，`gitpic list` 里就看得
+到。唯一要留意的是别让两边版本拉开太远 —— 配置是严格校验的，新版本写进去的键旧版本会拒。
+
+tap 里每六小时跑一次的 updater 现在同时改 formula 和 cask。它读 `releases/latest`，失败不报警，
+所以改名之后路径写错会**静默**失效：拿假 tag 和假 sha 重放了一遍，三处 url、三个 sha256 加 cask
+的 version/sha256 都被正确改写才推的。
+
+### App
+
+- **可以用 brew 装了**：`brew install --cask tarnish233/tap/gitpic_app`，升级是
+  `brew upgrade --cask gitpic_app`。App 是本机自签名、未经 Apple 公证的，所以 cask 装完自己把
+  quarantine 去掉 —— README 里那条要手抄的 `xattr -dr com.apple.quarantine` 现在归 brew 做。
+- `zap` 只清 App 自己的东西（`~/Library/Preferences/dev.gitpic.app.plist`、`Logs/GitPic.log`、
+  Caches、HTTPStorages、Saved Application State），**不动** `~/.config/gitpic` 和上传历史 —— 那
+  两份是和 CLI 共用的，删掉等于把终端那边也一并清了。
+- App 本体没有代码改动，版本号跟着仓库走。
+
 ## [0.11.2] - 2026-08-22
 
 ### 窗口的两处装配件，和平台不一样
@@ -957,7 +996,8 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.2...HEAD
+[未发布]: https://github.com/tarnish233/gitpic-cli/compare/v0.11.3...HEAD
+[0.11.3]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.3
 [0.11.2]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.2
 [0.11.1]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.1
 [0.11.0]: https://github.com/tarnish233/gitpic-cli/releases/tag/v0.11.0

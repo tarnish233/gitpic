@@ -34,8 +34,9 @@ $ gitpic list
 
 ## 安装
 
-命令行工具和菜单栏应用是两件东西，名字也是分开的：CLI 的 formula 叫 **`gitpic_cli`**，
-App 叫 **GitPic.app**（见下）。装的是 `gitpic_cli`，用的命令仍然是 `gitpic`。
+命令行工具和菜单栏应用是两件东西，在 Homebrew 里也是两个名字：CLI 是 formula
+**`gitpic_cli`**，App 是 cask **`gitpic_app`**（见下）。装的是 `gitpic_cli`，用的命令仍然是
+`gitpic`。
 
 **Homebrew（推荐，自动加入 PATH 并安装命令行补全）**
 
@@ -67,15 +68,22 @@ cargo install --path .
 
 ### GitPic.app（macOS 菜单栏应用，可选）
 
-每个 [发布](https://github.com/tarnish233/gitpic-cli/releases) 里都有一个
-`GitPic-<版本>-macos-arm64.zip`。它和 CLI 同版本，并且内嵌了同一版本的 `gitpic`，所以装了
-App 不必再单独装 CLI（反之也不必装 App）。
+```bash
+brew install --cask tarnish233/tap/gitpic_app   # 升级：brew upgrade --cask gitpic_app
+```
+
+它和 CLI 同版本，并且内嵌了同一版本的 `gitpic`，所以装了 App 不必再单独装 CLI（反之也不必装
+App）。两个都装也不冲突：App 只跑自己 bundle 里那份 `gitpic`，`gitpic_cli` 只服务终端，两边
+共用同一份配置和上传历史 —— 在 App 里改仓库，终端里立刻生效，反之也一样。
 
 从菜单栏图标上传剪贴板图片或选文件，链接自动进剪贴板；设置窗口可以改图床仓库和上传选项，看历史。
 
+也可以从 [发布](https://github.com/tarnish233/gitpic-cli/releases) 里直接下
+`GitPic-<版本>-macos-arm64.zip` 自己装。App 是本机签名、未经 Apple 公证的，所以手装必须解除
+隔离才能打开（用 cask 装的话这一步 brew 替你做了）：
+
 ```bash
 unzip GitPic-<版本>-macos-arm64.zip -d /Applications/
-# 本机签名、未经 Apple 公证，下载后必须解除隔离才能打开：
 xattr -dr com.apple.quarantine /Applications/GitPic.app
 ```
 
