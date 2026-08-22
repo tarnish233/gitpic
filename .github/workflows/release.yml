@@ -189,9 +189,20 @@ jobs:
         run: |
           set -euo pipefail
           name="GitPic-${VERSION}-macos-arm64"
-          ( cd dist-app && ditto -c -k --sequesterRsrc --keepParent GitPic.app "${name}.zip" )
-          ( cd dist-app && shasum -a 256 "${name}.zip" > "${name}.zip.sha256" )
-          echo "asset=$name.zip" >> "$GITHUB_OUTPUT"
+          # A dmg, not a zip. The staging directory is what makes it worth being one:
+          # a symlink to /Applications beside the app turns opening the disk image into
+          # the drag-across everyone already knows, which a zip cannot offer.
+          #
+          # UDZO because the image is a download; it compresses about as well as the
+          # zip did. `-ov` so a re-run in the same workspace overwrites rather than
+          # failing on an existing image.
+          rm -rf dmgroot && mkdir dmgroot
+          cp -R dist-app/GitPic.app dmgroot/GitPic.app
+          ln -s /Applications dmgroot/Applications
+          hdiutil create -volname "GitPic" -srcfolder dmgroot \
+            -ov -format UDZO "dist-app/${name}.dmg"
+          ( cd dist-app && shasum -a 256 "${name}.dmg" > "${name}.dmg.sha256" )
+          echo "asset=$name.dmg" >> "$GITHUB_OUTPUT"
           # The bundle must carry the version this job was told to build, not
           # whatever happened to be on disk.
           got="$(plutil -extract CFBundleShortVersionString raw dist-app/GitPic.app/Contents/Info.plist)"
@@ -203,26 +214,36 @@ jobs:
           set -euo pipefail
           cd dist-app
           shasum -c "${{ steps.package.outputs.asset }}.sha256"
-          rm -rf verify && mkdir verify
-          ditto -x -k "${{ steps.package.outputs.asset }}" verify
-          test -x verify/GitPic.app/Contents/MacOS/GitPic
+          # Mounted read-only and asserted in place, rather than extracted: what ships
+          # is the image, so the image is what has to be checked. `-nobrowse` keeps it
+          # out of the Finder sidebar, and the trap detaches it however this step ends
+          # — a leaked mount would make a re-run fail on the volume name.
+          mnt="$(mktemp -d)"
+          hdiutil attach "${{ steps.package.outputs.asset }}" \
+            -mountpoint "$mnt" -nobrowse -readonly
+          trap 'hdiutil detach "$mnt" -quiet || true' EXIT
+          app="$mnt/GitPic.app"
+          # The alias is the reason this is a dmg at all; a build that lost it would
+          # still install fine by hand and would silently stop being a drag-across.
+          test -L "$mnt/Applications"
+          test -x "$app/Contents/MacOS/GitPic"
           # The embedded CLI is the whole reason a Finder-launched app works.
-          test -x verify/GitPic.app/Contents/Resources/gitpic
+          test -x "$app/Contents/Resources/gitpic"
           # Both halves of what actool emits, because they serve different macOS
           # versions: Assets.car carries every Tahoe appearance, the icns is the
           # flattened fallback for macOS 14-25. A build that dropped either would
           # still launch and would still show *an* icon, so only an assertion
           # catches it.
-          test -s verify/GitPic.app/Contents/Resources/AppIcon.icns
-          test -s verify/GitPic.app/Contents/Resources/Assets.car
-          verify/GitPic.app/Contents/Resources/gitpic --version
-          codesign --verify --deep --strict verify/GitPic.app
-          plutil -lint verify/GitPic.app/Contents/Info.plist
+          test -s "$app/Contents/Resources/AppIcon.icns"
+          test -s "$app/Contents/Resources/Assets.car"
+          "$app/Contents/Resources/gitpic" --version
+          codesign --verify --deep --strict "$app"
+          plutil -lint "$app/Contents/Info.plist"
           # CFBundleIconName resolves the Assets.car icon; CFBundleIconFile is what
           # older macOS reads. Both, or the icon silently falls back to the generic
           # executable one on one OS or the other.
-          test "$(plutil -extract CFBundleIconFile raw verify/GitPic.app/Contents/Info.plist)" = "AppIcon"
-          test "$(plutil -extract CFBundleIconName raw verify/GitPic.app/Contents/Info.plist)" = "AppIcon"
+          test "$(plutil -extract CFBundleIconFile raw "$app/Contents/Info.plist")" = "AppIcon"
+          test "$(plutil -extract CFBundleIconName raw "$app/Contents/Info.plist")" = "AppIcon"
 
       # Deliberately NOT named `dist-*`: `publish` downloads that pattern with
       # `merge-multiple: true` into `dist/`, so an artifact called `dist-app` would
@@ -305,8 +326,9 @@ jobs:
 
           ## GitPic.app
 
-          `GitPic-<version>-macos-arm64.zip` in this release is the macOS menu-bar
-          app, same version as the CLI and with that CLI embedded.
+          `GitPic-<version>-macos-arm64.dmg` in this release is the macOS menu-bar
+          app, same version as the CLI and with that CLI embedded. Open it and drag
+          GitPic across to Applications.
 
           It is ad-hoc signed and **not notarised**, so macOS refuses to open it
           after download until you clear the quarantine flag:
@@ -334,7 +356,7 @@ jobs:
 
       # Guards against publishing a partial set. Every expected file is named
       # explicitly rather than counted through a glob: with both artifact families
-      # in play, `ls gitpic-*` also matches `GitPic-…zip` on any case-insensitive
+      # in play, `ls gitpic-*` also matches `GitPic-…dmg` on any case-insensitive
       # filesystem, so the old `-eq 4` count was correct only by virtue of this job
       # running on Linux. Each sidecar is re-verified against the bytes that will
       # actually be uploaded rather than the ones a build job had on disk.
@@ -350,7 +372,7 @@ jobs:
             dist/gitpic-x86_64-apple-darwin.tar.gz
             dist/gitpic-x86_64-unknown-linux-gnu.tar.gz
             dist/gitpic-x86_64-pc-windows-msvc.zip
-            "dist-app/GitPic-${VERSION}-macos-arm64.zip"
+            "dist-app/GitPic-${VERSION}-macos-arm64.dmg"
           )
           for archive in "${expected[@]}"; do
             test -s "$archive"

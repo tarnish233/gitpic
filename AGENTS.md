@@ -22,6 +22,12 @@ binary. The bare name belongs to the cask because that is what most people want,
 deleted in 0.11.5 because keeping it made `gitpic` ambiguous between a formula and a
 cask, which Homebrew resolves silently and in favour of the formula.
 
+The app asset is `GitPic-<version>-macos-arm64.dmg` — a disk image with an
+`/Applications` symlink beside the app, so a manual install is the usual drag-across. It
+was a `.zip` up to 0.13.1; the tap's updater reads whichever of the two a release
+actually shipped and writes that extension into the cask's `url`, which is what let the
+format change without the cask and the release having to be edited in one breath.
+
 The cask also provides the *command*: it links the CLI inside the bundle to
 `bin/gitpic` and generates the three completions, so the app and the terminal share one
 file and cannot be at different versions. The two entries therefore compete for
