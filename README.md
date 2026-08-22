@@ -34,15 +34,18 @@ $ gitpic list
 
 ## 安装
 
-命令行工具和菜单栏应用是两件东西，在 Homebrew 里也是两个名字：CLI 是 formula
-**`gitpic_cli`**，App 是 cask **`gitpic_app`**（见下）。装的是 `gitpic_cli`，用的命令仍然是
+命令行工具和菜单栏应用在 Homebrew 里是两个名字，但**只需装一个**：cask **`gitpic_app`**
+（App + 终端命令，见下）或 formula **`gitpic_cli`**（只要命令行）。两者同版本同源，命令都叫
 `gitpic`。
 
-**Homebrew（推荐，自动加入 PATH 并安装命令行补全）**
+**Homebrew（自动加入 PATH 并安装命令行补全）**
 
 ```bash
 brew install tarnish233/tap/gitpic_cli
 ```
+
+只要命令行时用它。如果你装了 GitPic.app，终端里已经有 `gitpic` 了（见下），不必再装这个 —— 两个
+都装会抢同一个 `bin/gitpic`。
 
 > 这个 formula 原来叫 `gitpic`。旧名字仍然能装（tap 里留了一份 rename 映射），已经装了的由
 > `brew update` / `brew upgrade` 迁移过去，也可以直接跑 `brew migrate gitpic`。迁移只改 Cellar
@@ -72,9 +75,14 @@ cargo install --path .
 brew install --cask tarnish233/tap/gitpic_app   # 升级：brew upgrade --cask gitpic_app
 ```
 
-它和 CLI 同版本，并且内嵌了同一版本的 `gitpic`，所以装了 App 不必再单独装 CLI（反之也不必装
-App）。两个都装也不冲突：App 只跑自己 bundle 里那份 `gitpic`，`gitpic_cli` 只服务终端，两边
-共用同一份配置和上传历史 —— 在 App 里改仓库，终端里立刻生效，反之也一样。
+它和 CLI 同版本，内嵌的就是同一份 `gitpic`，而 cask 会把那份接到 `$(brew --prefix)/bin/gitpic`
+并生成 bash、zsh、fish 补全 —— 所以**装 App 就等于同时装了命令行**：终端里直接有 `gitpic`，不用再
+装 formula，也不可能出现 App 和命令版本不一致（升 App 就是升命令）。
+
+配置和上传历史两边共用：在 App 里改仓库，终端里立刻生效，反之也一样。
+
+只想要命令行、或者用 Linux / Intel Mac 的话装 formula。**两个别都装** —— 它们抢同一个
+`bin/gitpic`，谁先到归谁，后装的那个 brew 会提示 link 失败或 `skipping link`。要换先卸掉另一个。
 
 从菜单栏图标上传剪贴板图片或选文件，链接自动进剪贴板；设置窗口可以改图床仓库和上传选项，看历史。
 

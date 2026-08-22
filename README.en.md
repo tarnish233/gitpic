@@ -34,15 +34,20 @@ $ gitpic list
 
 ## Install
 
-The CLI and the menu-bar app are two separate things, and two separate names in
-Homebrew: the CLI is the formula **`gitpic_cli`**, the app is the cask
-**`gitpic_app`** (below). You install `gitpic_cli`; the command stays `gitpic`.
+The CLI and the menu-bar app are two names in Homebrew but you only need **one** of
+them: the cask **`gitpic_app`** (app *and* the terminal command, below) or the formula
+**`gitpic_cli`** (command line only). Same version, same source, and the command is
+`gitpic` either way.
 
-**Homebrew (macOS/Linux, recommended — adds it to `PATH` and installs shell completions)**
+**Homebrew (macOS/Linux — adds it to `PATH` and installs shell completions)**
 
 ```bash
 brew install tarnish233/tap/gitpic_cli
 ```
+
+Use this if you want the command line only. If you install GitPic.app you already have
+`gitpic` in the terminal (see below) and do not need this — installing both makes them
+compete for the same `bin/gitpic`.
 
 > The formula used to be called `gitpic`. The old name still installs (the tap
 > carries a rename map), and an existing install is migrated by `brew update` /
@@ -77,11 +82,19 @@ cargo install --git https://github.com/tarnish233/gitpic-cli
 brew install --cask tarnish233/tap/gitpic_app   # then: brew upgrade --cask gitpic_app
 ```
 
-It carries the same version as the CLI and embeds that same `gitpic` build, so
-installing the app does not also require installing the CLI (and vice versa).
-Installing both is fine: the app only ever runs the `gitpic` inside its own bundle,
-`gitpic_cli` serves the terminal, and the two share one config file and one upload
-history — change the repository in the app and the terminal follows, and vice versa.
+It carries the same version as the CLI and embeds that same `gitpic` build, and the
+cask links that copy to `$(brew --prefix)/bin/gitpic` and generates the bash, zsh and
+fish completions — so **installing the app installs the command line too**: `gitpic` is
+in the terminal, the formula is not needed, and the command cannot be a different
+version from the app (upgrading one upgrades both).
+
+The config file and the upload history are shared: change the repository in the app and
+the terminal follows, and vice versa.
+
+Install the formula instead if you want the command line only, or you are on Linux or an
+Intel Mac. **Do not install both** — they compete for the same `bin/gitpic`; whichever
+arrived first keeps it, and Homebrew tells the other one it could not link. Uninstall one
+before switching.
 
 Upload the clipboard image or pick files from the menu-bar icon; the link lands on
 your clipboard. The settings window edits the image-host repository and the upload
