@@ -1,0 +1,487 @@
+import Testing
+import Foundation
+import AppKit
+@testable import GitPicCore
+
+/// The history pane's thumbnails: what gets fetched, what gets cached, and what is
+/// refused.
+///
+/// The store is tested through a stubbed `URLProtocol` rather than mocked out, because
+/// the claims worth pinning are all about *how many* requests a sequence of lookups
+/// makes — one per image, ever. A fake that cannot count requests would leave exactly
+/// the interesting part untested.
+@Suite("History thumbnails")
+struct ThumbnailTests {
+
+    // MARK: - Fixtures
+
+    /// A `w`×`h` PNG with a recognisable gradient, built rather than checked in so the
+    /// suite needs no binary fixtures.
+    static func png(w: Int, h: Int) throws -> Data {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: w * 4, bitsPerPixel: 32),
+              let plane = rep.bitmapData else { throw Trouble.cannotMakeImage }
+        for y in 0..<h {
+            for x in 0..<w {
+                let i = (y * w + x) * 4
+                plane[i + 0] = UInt8(255 * x / max(1, w - 1))
+                plane[i + 1] = UInt8(255 * y / max(1, h - 1))
+                plane[i + 2] = 0x40
+                plane[i + 3] = 0xFF
+            }
+        }
+        guard let data = rep.representation(using: .png, properties: [:]) else {
+            throw Trouble.cannotMakeImage
+        }
+        return data
+    }
+
+    enum Trouble: Error { case cannotMakeImage }
+
+    static let config = GitpicConfig(
+        github: .init(owner: "o", repo: "r", branch: "main"),
+        upload: .init(pathTemplate: "images/{year}/{month}/{hash8}-{name}.{ext}",
+                      format: "md", linkKind: "cdn", dedup: true, autoCopy: true,
+                      compress: false, maxWidth: 0, quality: 82))
+
+    static func record(sha: String = "abc123def456", path: String = "images/a.png",
+                       size: Int = 1024, deduped: Bool = false) -> HistoryRecord {
+        HistoryRecord(time: "2026-08-22T10:00:00+08:00", name: "a", path: path,
+                      url: "https://cdn.jsdelivr.net/gh/o/r@main/\(path)",
+                      sha: sha, size: size, deduped: deduped)
+    }
+
+    /// A fresh directory per test, so nothing leaks between them.
+    static func tempDir() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitpic-thumb-test-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    // MARK: - Which address a row is fetched from
+
+    @Test("the CDN is tried first and raw is kept behind it")
+    func sourceTriesCDNThenRaw() {
+        let source = Self.record().thumbnailSource(config: Self.config)
+        #expect(source.urls == ["https://cdn.jsdelivr.net/gh/o/r@main/images/a.png",
+                                "https://raw.githubusercontent.com/o/r/main/images/a.png"])
+        #expect(source.sha == "abc123def456")
+        #expect(source.byteSize == 1024)
+    }
+
+    /// A slashed branch has no parseable jsDelivr ref at all, so it must not be *tried*
+    /// — a dead address in the list is one wasted request per row, on every row.
+    @Test("a slashed branch skips the CDN rather than 404ing on it")
+    func slashedBranchIsRawOnly() {
+        var c = Self.config
+        c.github.branch = "feat/x"
+        #expect(LinkURL.cdnBranchIsAmbiguous(c.github.branch))
+        #expect(Self.record().thumbnailSource(config: c).urls
+                == ["https://raw.githubusercontent.com/o/r/feat/x/images/a.png"])
+    }
+
+    /// Both addresses of one image are one cache entry, because the key is the content.
+    @Test("the cache key is the content, not the address")
+    func cacheKeyIsContent() {
+        #expect(Self.record().thumbnailSource(config: Self.config).cacheKey
+                == "abc123def456.png")
+        // A history line whose sha is not a sha still has to resolve to something.
+        let broken = ThumbnailSource(sha: "../etc", urls: ["https://x/y.png"], byteSize: 1)
+        #expect(broken.cacheKey == "https://x/y.png")
+    }
+
+    // MARK: - Cache keys are not allowed to be paths
+
+    @Test("a blob sha becomes a filename, or nothing")
+    func cacheFileNames() {
+        #expect(ThumbnailCache.fileName(sha: "abc123") == "abc123.png")
+        #expect(ThumbnailCache.fileName(sha: "ABC123") == "abc123.png")
+        #expect(ThumbnailCache.fileName(sha: String(repeating: "a", count: 64))
+                == String(repeating: "a", count: 64) + ".png")
+    }
+
+    /// `sha` is read out of `history.jsonl` and joined onto a directory path, so this
+    /// is the guard that keeps a hostile or corrupt line from naming a file outside
+    /// the cache. `appendingPathComponent` will not refuse any of these.
+    @Test("a sha that is not hex is refused, separators and dots included")
+    func cacheFileNamesRefuseTraversal() {
+        #expect(ThumbnailCache.fileName(sha: "../../../../etc/passwd") == nil)
+        #expect(ThumbnailCache.fileName(sha: "..") == nil)
+        #expect(ThumbnailCache.fileName(sha: "a/b") == nil)
+        #expect(ThumbnailCache.fileName(sha: "a.b") == nil)
+        #expect(ThumbnailCache.fileName(sha: "abc123\u{0}") == nil)
+        #expect(ThumbnailCache.fileName(sha: "~") == nil)
+        #expect(ThumbnailCache.fileName(sha: "") == nil)
+        #expect(ThumbnailCache.fileName(sha: String(repeating: "a", count: 65)) == nil)
+        // Hex-adjacent but not hex: `g` is out of range.
+        #expect(ThumbnailCache.fileName(sha: "abcdefg") == nil)
+    }
+
+    // MARK: - Pruning
+
+    @Test("nothing is evicted while the cache is under the ceiling")
+    func evictsNothingWhenSmall() {
+        let entries = (0..<3).map {
+            ThumbnailCache.Entry(url: URL(fileURLWithPath: "/c/\($0).png"), bytes: 100,
+                                 modified: Date(timeIntervalSince1970: Double($0)))
+        }
+        #expect(ThumbnailCache.evictions(from: entries, ceiling: 1000).isEmpty)
+    }
+
+    @Test("the oldest go first, and only as many as it takes")
+    func evictsOldestFirst() {
+        let entries = (0..<5).map {
+            ThumbnailCache.Entry(url: URL(fileURLWithPath: "/c/\($0).png"), bytes: 100,
+                                 modified: Date(timeIntervalSince1970: Double($0)))
+        }
+        // 250 keeps the two newest (4, 3) and drops the rest.
+        let evicted = ThumbnailCache.evictions(from: entries, ceiling: 250)
+        #expect(Set(evicted.map(\.lastPathComponent)) == ["0.png", "1.png", "2.png"])
+    }
+
+    @Test("files written in the same second are ordered deterministically")
+    func evictionTieBreak() {
+        let same = Date(timeIntervalSince1970: 42)
+        let entries = ["b", "a", "c"].map {
+            ThumbnailCache.Entry(url: URL(fileURLWithPath: "/c/\($0).png"),
+                                 bytes: 100, modified: same)
+        }
+        // Ties sort by path, so `a` is "newest" and `c` is dropped first.
+        #expect(ThumbnailCache.evictions(from: entries, ceiling: 250).map(\.lastPathComponent)
+                == ["c.png"])
+    }
+
+    // MARK: - Decoding
+
+    @Test("decoding downscales to the requested edge and keeps the aspect ratio")
+    func decodeDownscales() throws {
+        let data = try Self.png(w: 800, h: 400)
+        let image = try #require(ThumbnailDecoder.decode(data, maxPixel: 160))
+        #expect(image.width == 160)
+        #expect(image.height == 80)
+    }
+
+    @Test("an image already smaller than the ceiling is not blown up")
+    func decodeDoesNotUpscale() throws {
+        let data = try Self.png(w: 40, h: 20)
+        let image = try #require(ThumbnailDecoder.decode(data, maxPixel: 160))
+        #expect(max(image.width, image.height) <= 160)
+        #expect(image.width == 40)
+    }
+
+    @Test("bytes that are not an image decode to nothing")
+    func decodeRefusesGarbage() {
+        #expect(ThumbnailDecoder.decode(Data("not an image".utf8), maxPixel: 160) == nil)
+        #expect(ThumbnailDecoder.decode(Data(), maxPixel: 160) == nil)
+        // A truncated PNG: the header is real, the rest is missing.
+        let truncated = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        #expect(ThumbnailDecoder.decode(truncated, maxPixel: 160) == nil)
+    }
+
+    @Test("the disk cache round-trips through PNG")
+    func pngRoundTrip() throws {
+        let image = try #require(ThumbnailDecoder.decode(try Self.png(w: 300, h: 300),
+                                                         maxPixel: 64))
+        let encoded = try #require(ThumbnailDecoder.pngData(image))
+        let back = try #require(ThumbnailDecoder.decode(encoded, maxPixel: 64))
+        #expect(back.width == image.width)
+        #expect(back.height == image.height)
+    }
+
+    // MARK: - The gate
+
+    @Test("the gate never admits more than its limit at once")
+    func gateBoundsConcurrency() async {
+        let gate = FetchGate(limit: 2)
+        let peak = Peak()
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    await gate.acquire()
+                    await peak.enter()
+                    // Long enough that overlapping holders would be observed.
+                    try? await Task.sleep(for: .milliseconds(20))
+                    await peak.leave()
+                    await gate.release()
+                }
+            }
+        }
+        #expect(await peak.highest <= 2)
+        // And it really did run concurrently, or the bound above proves nothing.
+        #expect(await peak.highest == 2)
+    }
+
+    actor Peak {
+        private var current = 0
+        private(set) var highest = 0
+        func enter() { current += 1; highest = max(highest, current) }
+        func leave() { current -= 1 }
+    }
+
+    // MARK: - The store, counted request by request
+
+    /// Serialized, and that is not caution — it is measured.
+    ///
+    /// A `URLProtocol` stub is process-global however it is registered: `protocolClasses`
+    /// picks the class per session, but the class's own state is shared by every
+    /// instance Foundation makes of it. Run in parallel, these tests counted each
+    /// other's requests — the 404 test saw 2 requests where 1 was made, and the
+    /// shared-fetch test saw 0 and got the 404 test's response body. Serializing the
+    /// suite is what makes "one request, ever" a statement about the store rather than
+    /// about which test won a race.
+    @Suite("Thumbnail store", .serialized)
+    struct StoreTests {
+
+    @Test("one image is fetched once, then served from memory")
+    func fetchesOnceThenMemory() async throws {
+        let stub = Stub(body: try ThumbnailTests.png(w: 400, h: 300))
+        let store = ThumbnailStore(directory: ThumbnailTests.tempDir(), session: stub.session)
+        let source = ThumbnailTests.record().thumbnailSource(config: ThumbnailTests.config)
+
+        let first = await store.thumbnail(for: source)
+        #expect(first.thumbnail?.pixelWidth == 160)
+        #expect(stub.requests == 1)
+
+        // Same row again, and a second row of the same image: neither may hit the
+        // network. This is the whole reason the store exists.
+        _ = await store.thumbnail(for: source)
+        _ = await store.thumbnail(for: source)
+        #expect(stub.requests == 1)
+    }
+
+    @Test("a second store on the same directory reads the disk, not the network")
+    func diskCacheSurvivesTheStore() async throws {
+        let dir = ThumbnailTests.tempDir()
+        let stub = Stub(body: try ThumbnailTests.png(w: 400, h: 300))
+        let source = ThumbnailTests.record().thumbnailSource(config: ThumbnailTests.config)
+
+        let first = ThumbnailStore(directory: dir, session: stub.session)
+        _ = await first.thumbnail(for: source)
+        #expect(stub.requests == 1)
+        // The cache file is named by the blob sha, nothing else.
+        let cached = dir.appendingPathComponent("abc123def456.png")
+        #expect(FileManager.default.fileExists(atPath: cached.path))
+
+        // A fresh store is what a relaunch looks like: empty memory, same directory.
+        let second = ThumbnailStore(directory: dir, session: stub.session)
+        let hit = await second.thumbnail(for: source)
+        #expect(hit.thumbnail?.pixelWidth == 160)
+        #expect(stub.requests == 1, "a cached thumbnail must not be re-downloaded")
+    }
+
+    /// Content-addressed, so it is the *bytes* that are cached and not the address:
+    /// after `github.repo` changes, the same image is still one disk read.
+    @Test("the cache follows the content, not the URL")
+    func cacheKeyedByContent() async throws {
+        let dir = ThumbnailTests.tempDir()
+        let stub = Stub(body: try ThumbnailTests.png(w: 400, h: 300))
+        let store = ThumbnailStore(directory: dir, session: stub.session)
+        let record = ThumbnailTests.record()
+
+        _ = await store.thumbnail(for: record.thumbnailSource(config: ThumbnailTests.config))
+        #expect(stub.requests == 1)
+
+        var moved = ThumbnailTests.config
+        moved.github.repo = "elsewhere"
+        let relocated = record.thumbnailSource(config: moved)
+        #expect(relocated.urls.allSatisfy { $0.contains("elsewhere") })
+        let hit = await store.thumbnail(for: relocated)
+        #expect(hit.thumbnail != nil)
+        #expect(stub.requests == 1, "same sha, so the new address is still a cache hit")
+    }
+
+    @Test("an original past the size ceiling is never requested")
+    func oversizedIsNotRequested() async throws {
+        let stub = Stub(body: try ThumbnailTests.png(w: 400, h: 300))
+        let store = ThumbnailStore(
+            directory: ThumbnailTests.tempDir(),
+            limits: ThumbnailLimits(maxSourceBytes: 1024),
+            session: stub.session)
+        let big = ThumbnailTests.record(size: 4096).thumbnailSource(config: ThumbnailTests.config)
+
+        let result = await store.thumbnail(for: big)
+        #expect(result.failure == .tooLarge(bytes: 4096, ceiling: 1024))
+        #expect(stub.requests == 0, "the recorded size is enough to refuse it")
+    }
+
+    @Test("a CDN miss falls through to raw instead of showing a hole")
+    func cdnMissFallsBackToRaw() async throws {
+        // Exactly the fresh-upload case: jsDelivr has not caught up, GitHub has it.
+        let png = try ThumbnailTests.png(w: 400, h: 300)
+        let stub = Stub { url in
+            url.host == "cdn.jsdelivr.net" ? (Data("not yet".utf8), 404) : (png, 200)
+        }
+        let store = ThumbnailStore(directory: ThumbnailTests.tempDir(), session: stub.session)
+        let result = await store.thumbnail(
+            for: ThumbnailTests.record().thumbnailSource(config: ThumbnailTests.config))
+        #expect(result.thumbnail?.pixelWidth == 160)
+        #expect(stub.requests == 2, "one wasted CDN request, then the fallback")
+    }
+
+    @Test("when both addresses fail it is raw's answer that is reported")
+    func bothFailReportsRaw() async throws {
+        // raw is authoritative, so its 410 is the one worth showing — not the CDN 404
+        // that precedes it and means nothing here.
+        let stub = Stub { url in
+            url.host == "cdn.jsdelivr.net" ? (Data(), 404) : (Data(), 410)
+        }
+        let store = ThumbnailStore(directory: ThumbnailTests.tempDir(), session: stub.session)
+        let result = await store.thumbnail(
+            for: ThumbnailTests.record().thumbnailSource(config: ThumbnailTests.config))
+        #expect(result.failure == .http(status: 410))
+        #expect(stub.requests == 2)
+    }
+
+    @Test("a 404 is reported as a 404, and nothing is cached")
+    func notFound() async throws {
+        let dir = ThumbnailTests.tempDir()
+        let stub = Stub(body: Data("nope".utf8), status: 404)
+        let store = ThumbnailStore(directory: dir, session: stub.session)
+
+        let result = await store.thumbnail(for: ThumbnailTests.record().thumbnailSource(config: ThumbnailTests.config))
+        #expect(result.failure == .http(status: 404))
+        #expect(stub.requests == 2, "both addresses tried before giving up")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).isEmpty)
+        // The message has to name both causes: raw answers 404 for a private
+        // repository exactly as it does for a missing file.
+        let message = try #require(result.failure?.message)
+        #expect(message.contains("404"))
+        #expect(message.contains("私有"))
+    }
+
+    @Test("bytes that are not an image are reported as undecodable, not as success")
+    func servedGarbage() async throws {
+        let stub = Stub(body: Data("<html>rate limited</html>".utf8))
+        let store = ThumbnailStore(directory: ThumbnailTests.tempDir(), session: stub.session)
+        let result = await store.thumbnail(for: ThumbnailTests.record().thumbnailSource(config: ThumbnailTests.config))
+        #expect(result.failure == .undecodable)
+        // Bytes that will not decode are a failed candidate like any other, so the
+        // fallback is still tried rather than the row giving up on the first host.
+        #expect(stub.requests == 2)
+    }
+
+    @Test("two rows of the same image share one request")
+    func concurrentRowsShareOneFetch() async throws {
+        let stub = Stub(body: try ThumbnailTests.png(w: 400, h: 300), delay: .milliseconds(60))
+        let store = ThumbnailStore(directory: ThumbnailTests.tempDir(), session: stub.session)
+        // A deduped upload is exactly this: a second history row, same sha, same path.
+        let a = ThumbnailTests.record().thumbnailSource(config: ThumbnailTests.config)
+        let b = ThumbnailTests.record(deduped: true).thumbnailSource(config: ThumbnailTests.config)
+        #expect(a == b)
+
+        async let first = store.thumbnail(for: a)
+        async let second = store.thumbnail(for: b)
+        let (x, y) = await (first, second)
+        #expect(x.thumbnail != nil)
+        #expect(y.thumbnail != nil)
+        #expect(stub.requests == 1, "the second row must join the first row's fetch")
+    }
+
+    }
+
+    // MARK: - The glyphs the pane draws
+
+    /// A misspelled SF Symbol draws nothing at all and is invisible in review.
+    @Test("the pane's symbols exist on this system", arguments: [
+        "photo", "photo.badge.exclamationmark", "doc.on.doc.fill", "doc.on.clipboard",
+    ])
+    func symbolsResolve(name: String) {
+        #expect(NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil)
+    }
+}
+
+// MARK: - Test doubles
+
+extension Result where Success == Thumbnail, Failure == ThumbnailFailure {
+    var thumbnail: Thumbnail? { try? get() }
+    var failure: ThumbnailFailure? {
+        if case .failure(let f) = self { return f }
+        return nil
+    }
+}
+
+/// A `URLProtocol` that answers every request from memory and counts them.
+///
+/// Counting is the point: "fetched once, ever" is not observable any other way.
+///
+/// Registered per-session through `protocolClasses` rather than
+/// `URLProtocol.registerClass`, which keeps it out of the way of every other suite —
+/// but it is **not** isolation between two stubs, because the protocol class's own
+/// state is shared. `StoreTests` is serialized for that reason.
+final class Stub: @unchecked Sendable {
+    let session: URLSession
+    private let lock = NSLock()
+    private var count = 0
+
+    var requests: Int {
+        lock.lock(); defer { lock.unlock() }
+        return count
+    }
+
+    /// One answer for every address.
+    convenience init(body: Data, status: Int = 200, delay: Duration = .zero) {
+        self.init(delay: delay) { _ in (body, status) }
+    }
+
+    /// A different answer per address — how the CDN-then-raw walk is observed.
+    init(delay: Duration = .zero, answer: @escaping @Sendable (URL) -> (Data, Int)) {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubProtocol.self]
+        session = URLSession(configuration: config)
+        StubProtocol.install(.init(answer: answer, delay: delay)) { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); self.count += 1; self.lock.unlock()
+        }
+    }
+}
+
+final class StubProtocol: URLProtocol {
+    struct Response: Sendable {
+        let answer: @Sendable (URL) -> (Data, Int)
+        let delay: Duration
+    }
+
+    /// One installed response at a time, guarded by a lock: `URLProtocol` is
+    /// instantiated by Foundation on its own threads, so this cannot be actor state.
+    private nonisolated(unsafe) static var current: Response?
+    private nonisolated(unsafe) static var onRequest: (@Sendable () -> Void)?
+    private static let lock = NSLock()
+
+    static func install(_ response: Response, onRequest: @escaping @Sendable () -> Void) {
+        lock.lock()
+        current = response
+        self.onRequest = onRequest
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        StubProtocol.lock.lock()
+        let response = StubProtocol.current
+        let notify = StubProtocol.onRequest
+        StubProtocol.lock.unlock()
+        notify?()
+        guard let response, let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        if response.delay != .zero {
+            let c = response.delay.components
+            Thread.sleep(forTimeInterval: Double(c.seconds) + Double(c.attoseconds) / 1e18)
+        }
+        let (body, status) = response.answer(url)
+        let http = HTTPURLResponse(url: url, statusCode: status,
+                                   httpVersion: "HTTP/1.1",
+                                   headerFields: ["Content-Type": "image/png"])!
+        client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}

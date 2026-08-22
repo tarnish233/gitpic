@@ -4,6 +4,74 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### App
+
+- **Every history row now shows a thumbnail.** A row used to carry one SF Symbol —
+  `photo`, or `doc.on.doc` when the upload was deduped — so 37 rows looked identical and
+  finding an image meant reading filenames. Each row now leads with a fixed 44×32 box
+  holding the picture, fitted whole. **Not cropped**: centre-cropping a screenshot to a
+  square leaves nothing worth looking at. The cost is letterboxing, which is why the box
+  is a visible surface rather than nothing, and the width is fixed because the text
+  column has to start at one constant x — the one thing a list of a hundred rows cannot
+  give up.
+- **History records no local file, so a thumbnail is a network read — once per image,
+  ever.** A row carries `path`, `sha` and `size` and no trace of the file it came from
+  (`src/commands/upload.rs:187-195`), which is usually gone or moved by the time anyone
+  opens the pane. Three layers: memory by content, disk by blob sha, network gated and
+  de-duplicated. What lands on disk is the **decoded, downscaled** PNG rather than the
+  original — measured here, 13.3 MB of originals became 472 KB of cache, ~14 KB each, a
+  29× reduction. The sha is content-addressed, so the cache is never invalidated: the
+  same bytes stay one entry after `github.repo` changes, and different bytes are a
+  different key.
+- **Addresses are jsDelivr first, `raw.githubusercontent.com` behind it.** Not a speed
+  choice — that was measured and between these two hosts it is a wash. All 33 distinct
+  images of this machine's history, eight at a time, two rounds each: jsDelivr 5.16 s
+  then 4.11 s, raw 6.03 s then 3.59 s. (One file re-fetched three times had suggested
+  jsDelivr was 2–3× ahead, TTFB 0.29–0.31 s against 0.79–0.94 s; over 33 files cold at
+  the edge it is not, and the single-file figure does not generalise.) The CDN leads for
+  two other reasons: it is the address the config points at by default
+  (`upload.link_kind = "cdn"`), so the pane exercises the same host the user's published
+  links do, and it is reachable from networks that cannot reach
+  `raw.githubusercontent.com` at all. Raw is the fallback because it is the one that
+  cannot be missing or behind: a branch containing `/` has no parseable jsDelivr ref, so
+  such a repository gets raw alone and not one wasted request; and jsDelivr resolves a
+  branch ref through its own cache, so an upload from minutes ago — the top of this pane
+  — can 404 there while GitHub serves it fine. That 404 costs one request and then falls
+  through, once, because the result is cached by content afterwards. When both fail it is
+  raw's answer that is reported, since a CDN 404 says nothing here.
+- **Opening the pane fetches every row at once: `Form` + `ForEach` on macOS is not
+  lazy.** Measured — opening 历史 on a 37-row history and touching nothing, without one
+  scroll, put all 33 distinct images in the cache. So the concurrency limit is the only
+  number that decides how long a cold pane takes; over those same 33 images: four at a
+  time 6.26 s, eight 4.11–5.16 s, twelve 2.21 s. Eight rather than twelve is politeness,
+  not a client limit — these come off a CDN serving them for free, and shaving two
+  seconds off a once-per-image cost is not worth being the app that opens twelve
+  connections at once.
+- **Ceilings, written down rather than incidental**: originals past 12 MB are not
+  downloaded at all (the recorded `size` is enough to refuse them without a request);
+  thumbnails are 160 px on the long edge (a 44×32 box needs 88×64 on Retina); the disk
+  cache is capped at 32 MB and pruned oldest-first past it, the same shape as the CLI's
+  `history::trim_file`; memory holds 120, enough for a full `list --limit 100`.
+- **A `sha` becomes a filename, so it has to be validated first.** It is read out of
+  `history.jsonl` — an append-only text file any process can write — and joined onto a
+  directory path, and `appendingPathComponent` will not refuse
+  `../../../../Library/Preferences/…`. Hex only, at most 64 characters: that admits
+  git's 40-character SHA-1 and a future SHA-256, and admits no separator, no `.`, no
+  `..`.
+- **Dedup moved from the icon to a badge.** `deduped` used to be expressed by swapping
+  the row's glyph, and the thumbnail took that slot. It became a corner badge rather than
+  being dropped, because a deduped row shows the *same picture* as the row it deduped
+  against — which is exactly why the distinction has to be stated somewhere. Rows sharing
+  a sha also share one request: 4 of this machine's 37 rows are deduped, and the cache
+  holds exactly 33 files.
+- Adds `ThumbnailTests` (14 cases, including a request-counting `URLProtocol` stub)
+  pinning "fetched once, ever", "a second store on the same directory reads the disk not
+  the network", "a CDN miss falls through to raw", "when both fail it is raw's answer
+  that is reported", "an oversized original is never requested", and the path-injection
+  cases for `sha`.
+
 ## [0.11.5] - 2026-08-22
 
 ### The names line up: the repo and the cask are both `gitpic`
