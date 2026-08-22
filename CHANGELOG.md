@@ -4,6 +4,51 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.5] - 2026-08-22
+
+### The names line up: the repo and the cask are both `gitpic`
+
+**This repository is [`gitpic`](https://github.com/tarnish233/gitpic) now**, not
+`gitpic-cli`. The name had to be freed first: the pure-Swift app repo `GitPic` (stopped
+at 2.0.5) was holding it, because GitHub repository names are **case-insensitive** —
+`GitPic` and `gitpic` are one name — and archiving does not release a name, while an
+archived repo is read-only and cannot even be renamed. So the order was forced: leave a
+pointer at the top of both of its READMEs, rename it to
+[`GitPic-legacy`](https://github.com/tarnish233/GitPic-legacy), then archive it.
+
+GitHub redirects the old URLs, but **a redirect is not a name**: all 78 references were
+rewritten — 28 release/compare links in each changelog, `Cargo.toml`'s
+repository/homepage/documentation, both READMEs, `SKILL.md`, both plugin manifests, the
+app's About-pane link, and the repository root label in `docs/macos-app-plan.md`. The
+marketplace line you type is `tarnish233/gitpic` too.
+
+**In Homebrew the cask `gitpic_app` became `gitpic`, and the formula's old-name map was
+dropped.** Those two go together: with the map still in place, a cask also called
+`gitpic` makes the name permanently ambiguous — measured, Homebrew prints
+
+    Warning: Treating …/gitpic as a formula. For the cask, use …/gitpic or specify the `--cask` flag.
+
+which cannot even state the alternative, since both tokens are the same string, and then
+quietly picks the formula. Without the map the bare name resolves to the cask, no warning:
+
+    brew install tarnish233/tap/gitpic       # the app plus the gitpic command (--cask optional)
+    brew install tarnish233/tap/gitpic_cli   # command line only
+
+So `brew install tarnish233/tap/gitpic` **means something different** now: it used to
+install the CLI, it installs the app — which has carried the CLI since 0.11.4. An
+installed `gitpic_app` is migrated by `cask_renames.json` (verified here: `Caskroom/gitpic`
+becomes the real directory and `gitpic_app` stays as a compatibility symlink). On the
+formula side the old name `gitpic` no longer resolves to `gitpic_cli`; the tap's README
+carries the way out.
+
+The crate, the binary and the skill keep their names. Nothing about building or using it
+changes.
+
+### App
+
+- The About pane's repository link points at `github.com/tarnish233/gitpic`.
+- No other change in the app.
+
 ## [0.11.4] - 2026-08-22
 
 ### The app's CLI is now the terminal's CLI too
@@ -1348,7 +1393,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.11.4...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.11.5...HEAD
+[0.11.5]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.5
 [0.11.4]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.4
 [0.11.3]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.3
 [0.11.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.2
