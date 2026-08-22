@@ -4,6 +4,44 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.11.5] - 2026-08-22
+
+### 名字归位：仓库和 cask 都叫 `gitpic`
+
+**仓库从 `gitpic-cli` 改成了 [`gitpic`](https://github.com/tarnish233/gitpic)。** 这件事需要先腾名字：
+纯 Swift 的老 App 仓库 `GitPic`（停在 2.0.5）占着它 —— GitHub 的仓库名**不区分大小写**，`GitPic` 和
+`gitpic` 是同一个名字，而封存并不腾名字，封存之后仓库还只读、连改名都做不了。所以顺序只能是：先在老
+仓库两份 README 顶部留一行指路，再把它改名成
+[`GitPic-legacy`](https://github.com/tarnish233/GitPic-legacy)，最后封存。
+
+旧 URL 由 GitHub 重定向，但**重定向不是名字**：仓库里 78 处引用全部改写了 —— 两份 changelog 的历史
+release/compare 链接各 28 处、`Cargo.toml` 的 repository/homepage/documentation、两份 README、
+`SKILL.md`、两个插件 manifest、App 关于页那个链接，以及 `docs/macos-app-plan.md` 目录树里的仓库根名。
+你要输入的插件市场地址也跟着变成 `tarnish233/gitpic`。
+
+**Homebrew 里 cask `gitpic_app` 改成 `gitpic`，同时删掉了 formula 的旧名映射。** 这两件事是一个包，
+不能只做一半：映射还在的时候，cask 也叫 `gitpic` 会让这个名字永久二义 —— 实测 brew 会打印
+
+    Warning: Treating …/gitpic as a formula. For the cask, use …/gitpic or specify the `--cask` flag.
+
+它连替代写法都说不出来（两个 token 是同一个字符串），然后默默按 formula 处理。删掉映射之后，裸名字
+干净地归 cask，零警告：
+
+    brew install tarnish233/tap/gitpic       # App + 终端命令 gitpic（--cask 可省）
+    brew install tarnish233/tap/gitpic_cli   # 只要命令行
+
+所以 `brew install tarnish233/tap/gitpic` 的**含义变了**：以前装的是命令行，现在装的是 App —— 而 App
+从 0.11.4 起本来就带命令行。已经装了 `gitpic_app` 的由 `cask_renames.json` 自动迁移（本机实测：
+`Caskroom/gitpic` 成为实体，`gitpic_app` 留成兼容软链）。formula 那侧的旧名 `gitpic` 不再解析成
+`gitpic_cli`，tap 的 README 里留了退路。
+
+crate、二进制、skill 的名字都没动，构建方式和用法一个字没变。
+
+### App
+
+- 关于页里的仓库链接指向新地址 `github.com/tarnish233/gitpic`。
+- 除此之外 App 没有代码改动。
+
 ## [0.11.4] - 2026-08-22
 
 ### App 那份 CLI 现在也是终端里那份
@@ -1021,7 +1059,8 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic/compare/v0.11.4...HEAD
+[未发布]: https://github.com/tarnish233/gitpic/compare/v0.11.5...HEAD
+[0.11.5]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.5
 [0.11.4]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.4
 [0.11.3]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.3
 [0.11.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.2
