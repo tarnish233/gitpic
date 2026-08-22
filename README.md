@@ -30,10 +30,10 @@ brew install tarnish233/tap/gitpic      # App + 终端命令
 
 > 仅 Apple Silicon，需要 macOS 14+。App 是本机签名、未经 Apple 公证的 —— 用 brew 装时隔离属性由
 > brew 解除；若从[发布页](https://github.com/tarnish233/gitpic/releases)下
-> `GitPic-<版本>-macos-arm64.zip` 手动装，需要自己解，否则打不开：
+> `GitPic-<版本>-macos-arm64.dmg` 手动装（打开后把 GitPic 拖到 Applications），**必须**自己解除
+> 隔离，否则打不开：
 >
 > ```bash
-> unzip GitPic-<版本>-macos-arm64.zip -d /Applications/
 > xattr -dr com.apple.quarantine /Applications/GitPic.app
 > ```
 

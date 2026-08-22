@@ -35,11 +35,11 @@ To get started, open the settings window and fill in owner / repo / branch — o
 
 > Apple Silicon only, macOS 14+. The app is locally signed and not notarised by Apple —
 > installing with brew clears the quarantine attribute for you. If you install by hand
-> from the [releases page](https://github.com/tarnish233/gitpic/releases), clear it
-> yourself or the app will not open:
+> from the [releases page](https://github.com/tarnish233/gitpic/releases), open
+> `GitPic-<version>-macos-arm64.dmg`, drag GitPic across to Applications, and then clear
+> the quarantine yourself or it will not open:
 >
 > ```bash
-> unzip GitPic-<version>-macos-arm64.zip -d /Applications/
 > xattr -dr com.apple.quarantine /Applications/GitPic.app
 > ```
 
