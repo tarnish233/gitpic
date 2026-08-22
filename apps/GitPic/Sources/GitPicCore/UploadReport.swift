@@ -1,24 +1,12 @@
 import Foundation
 
-/// What one upload is currently doing, in the form the UI needs to present it.
-///
-/// Replaces `NotchModel.Phase`, which lived in the deleted notch panel and carried
-/// two cases this app no longer has a surface for:
-///
-/// - `.idle` existed to reset a transient icon on a timer. Reset is now driven by
-///   the upload finishing, so there is nothing to schedule and nothing to cancel.
-/// - `.hovering` existed to open the notch on hover. The status-item icon *does* now
-///   change for an accepted hover, but as ``StatusIcon.dropTargeted`` and not as a
-///   case here: hovering is not a stage of an upload — no upload exists yet, and the
-///   drag may still be refused or dropped somewhere else — so putting it in this enum
-///   would force every `switch` over an upload's progress to answer for a state in
-///   which nothing is being uploaded. The line this replaces claimed the cursor's copy
-///   badge was "the whole of the hover feedback"; it is still the clearest part of it,
-///   but it rides the cursor and looks the same over every copy destination on screen,
-///   so it never marked *this* icon as the one that would take the file.
+/// Started, succeeded, or failed — one upload, in the form the UI needs to present it.
+/// `.idle` is not a case: reset is driven by the upload finishing, so there is nothing
+/// to schedule and nothing to cancel. `.hovering` is not a case: hovering is not a
+/// stage of an upload.
 public enum UploadReport: Equatable, Sendable {
-    /// An upload is in flight. Carries the file count because the file picker still
-    /// allows a multiple selection even though a drag accepts only one.
+    /// An upload is in flight. Carries the file count because the file picker allows a
+    /// multiple selection.
     case started(count: Int)
     case succeeded(summary: String)
     case failed(summary: String)
@@ -26,7 +14,7 @@ public enum UploadReport: Equatable, Sendable {
     /// The system notification this report should post, or `nil` for a report that
     /// gets no notification.
     ///
-    /// `.started` deliberately returns `nil`. A banner for every drag would be
+    /// `.started` deliberately returns `nil`. A banner for every upload begun would be
     /// noise, and the in-flight state is already visible as the status-item icon;
     /// the banner is reserved for outcomes the user may have walked away from.
     public var notice: UploadNotice? {

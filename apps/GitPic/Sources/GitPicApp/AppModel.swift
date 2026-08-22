@@ -35,10 +35,10 @@ final class AppModel {
     /// `runner == nil` used to mean two different things — still probing, and
     /// probed and absent — and every surface assumed the second. `reload()` returned
     /// early without setting `loadFailed`, so the pane sat on "读取配置中…" with
-    /// nothing to retry, and a drop in the first seconds after launch reported
-    /// "找不到 gitpic" for a binary that simply had not been located yet. The probe
-    /// shells out to a login shell and to `gh auth status`, up to 8 s each, so that
-    /// window is wide enough to hit by hand.
+    /// nothing to retry, and a picker or clipboard upload in the first seconds after
+    /// launch reported "找不到 gitpic" for a binary that simply had not been located
+    /// yet. The probe shells out to a login shell and to `gh auth status`, up to 8 s
+    /// each, so that window is wide enough to hit by hand.
     enum ToolState: Sendable { case resolving, ready, missing }
     private(set) var toolState: ToolState = .resolving
 
@@ -162,8 +162,8 @@ final class AppModel {
     /// report for work that is already over is not a report, it is a flicker.
     ///
     /// So `busy` now means "still running after a quarter second". Work that is
-    /// genuinely slow — a save writing one process per changed key, an upload, a
-    /// connectivity test — crosses that line and reports normally.
+    /// genuinely slow — a save, an upload, a connectivity test — crosses that
+    /// line and reports normally.
     private static let busyDelay = Duration.milliseconds(250)
 
     /// Pending "announce it now" for the debounce above, cancelled if the work
@@ -375,7 +375,17 @@ final class AppModel {
     }
 
     func runDoctor() async {
-        guard let runner else { return }
+        guard let runner else {
+            // Reachable from the status-item menu while discovery is still running,
+            // and from the pane if `toolState` races the button. A silent return
+            // left the 连通性 section on "还没测过", which is a claim this did not test.
+            lastDoctor = nil
+            doctorFailure = switch toolState {
+            case .resolving: "还在查找 gitpic，稍后再试"
+            case .missing, .ready: "找不到 gitpic 可执行文件，请重新安装 GitPic。"
+            }
+            return
+        }
         beginWork()
         defer { endWork() }
         do {

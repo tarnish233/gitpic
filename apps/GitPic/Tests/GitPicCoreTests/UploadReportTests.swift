@@ -17,30 +17,6 @@ private func result(name: String, deduped: Bool = false) -> ItemResult {
                output: "![\(name)](https://cdn.example/\(name))")
 }
 
-@Suite("Menu-bar drop policy")
-struct ImageDropTests {
-
-    @Test("one image is what a drag is allowed to carry")
-    func single() throws {
-        let url = URL(fileURLWithPath: "/tmp/a.png")
-        #expect(ImageDrop.accepted(imageURLs: [url]) == url)
-    }
-
-    @Test("a drag carrying no image is refused, so the icon never highlights")
-    func none() {
-        #expect(ImageDrop.accepted(imageURLs: []) == nil)
-    }
-
-    @Test("several images are refused outright rather than partly uploaded")
-    func several() {
-        // The refusal matters more than it looks: uploading the first of three and
-        // silently dropping the rest would leave two files the user believes are
-        // hosted. Refusing means the drag visibly snaps back instead.
-        let urls = [URL(fileURLWithPath: "/tmp/a.png"), URL(fileURLWithPath: "/tmp/b.png")]
-        #expect(ImageDrop.accepted(imageURLs: urls) == nil)
-    }
-}
-
 @Suite("Upload report")
 struct UploadReportTests {
 

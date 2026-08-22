@@ -114,8 +114,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>$APP_VERSION</string>
   <key>GitPicEmbeddedCLIVersion</key><string>$CLI_VERSION</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
-  <!-- Menu-bar app: no Dock icon. Also means the app is never active, which is
-       why StatusItemDropView returns true from acceptsFirstMouse. -->
+  <!-- Menu-bar app: no Dock icon. Also means the app is never active, which is why
+       the open panel has to borrow .regular for its lifetime — see AppActivationPolicy. -->
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict>

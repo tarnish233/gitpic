@@ -99,8 +99,9 @@ public enum ToolDiscovery {
     /// has already spoken on stdout — nvm/conda/rbenv init chatter, a motd,
     /// `fortune`, a stray `echo` in `.zprofile` — so joining it all tested
     /// `"Using node v20.11.0\n/opt/homebrew/bin/gh"` as a filename, failed
-    /// `isExecutableFile`, and reported gh as missing (`GitPicApp.swift:510`) on
-    /// exactly the machines this probe exists for: nix, asdf, a custom prefix,
+    /// `isExecutableFile`, and reported gh as missing. A noise line from
+    /// `command -v` must not be taken as the tool path; that is what this parse
+    /// is for, on the machines the probe exists for: nix, asdf, a custom prefix,
     /// anything `ghCandidates` does not list.
     ///
     /// Lines are read last-first, since `command -v` answers after the profile

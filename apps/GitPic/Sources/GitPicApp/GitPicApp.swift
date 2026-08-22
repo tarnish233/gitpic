@@ -14,8 +14,8 @@ enum Main {
         let d = AppDelegate()
         delegate = d
         app.delegate = d
-        // Menu-bar app: no Dock icon, never becomes the active app. That second
-        // part is why StatusItemDropView must return true from acceptsFirstMouse.
+        // Menu-bar app: no Dock icon, never becomes the active app — which is why the
+        // open panel has to borrow `.regular` for its lifetime; see `pickFiles()`.
         app.setActivationPolicy(.accessory)
         app.run()
     }
@@ -27,19 +27,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var runner: GitpicRunner?
     private var tools: ToolPaths?
 
-    /// What the menu-bar icon is saying, as one value.
+    /// What the menu-bar icon is saying: idle, uploading, or unavailable.
     ///
     /// Mutate this and let `refreshIcon()` draw; nothing else may assign
-    /// `statusItem.button?.image`. Three things now want the icon — the resting
-    /// mark, an upload in flight, and a drag hovering over it — and while the icon
-    /// was "whatever was assigned last" they could only take turns clobbering each
-    /// other. ``StatusIcon`` holds the combination and the precedence between them;
-    /// see its doc for the clobber this replaces.
-    private var statusIcon = StatusIcon() {
-        // Only on a real change. Nothing on the hot path touches this today — the
-        // hover is set on entry, not in `draggingUpdated`, which `StatusItemDropView`
-        // measured at ~78 calls for a one-second hover — and an icon that redraws only
-        // when it differs is one less thing that goes wrong if something ever does.
+    /// `statusItem.button?.image`. `didSet` skips the redraw when the value did
+    /// not change — overlapping uploads share `.uploading`, so a second start
+    /// or a first finish must not flicker the same glyph.
+    private var statusIcon: StatusIcon = .idle {
         didSet { if statusIcon != oldValue { refreshIcon() } }
     }
     /// Bounded to the same 8 the menu shows. Unbounded growth used to keep every
@@ -51,7 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var recent: [UploadedLink] = []
 
     /// `GITPIC_APP_DRY_RUN=1` records what would be uploaded and skips the network
-    /// entirely. Exists so the drag and clipboard plumbing can be verified without
+    /// entirely. Exists so the file-picker and clipboard plumbing can be verified without
     /// committing anything to the image-host repository.
     ///
     /// Every upload entry point must check this. A dry run that silently uploads
@@ -89,7 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let version = Bundle.main
             .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
         guard let paths = discovered.0 else {
-            statusIcon.state = .unavailable
+            statusIcon = .unavailable
             // The model has to be told the search *finished*, not just that there is
             // no runner: until then every pane reads a nil runner as "still looking"
             // and offers no way forward.
@@ -134,6 +128,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// `GHProbe.status` spawns and waits. Same queue as `discover`, same reason:
+    /// never `Task.detached` — that parks a cooperative thread for up to 8 s.
+    private static func probeGH(gh: URL?) async -> GHStatus {
+        await withCheckedContinuation { cont in
+            discoveryQueue.async {
+                cont.resume(returning: GHProbe.status(gh: gh))
+            }
+        }
+    }
+
     /// What to say when `runner` is nil.
     ///
     /// "找不到 gitpic" while discovery is still running is a lie the user can act on
@@ -146,48 +150,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Feedback
 
-    /// Report an outcome.
+    /// Log an outcome and post its notification, if any.
     ///
-    /// Two surfaces, split by what each is good at. The status-item icon shows that
-    /// an upload is *in flight* — a state, held for exactly as long as the upload
-    /// runs. A system notification says what *happened* — an event the user may not
-    /// have been watching for.
-    ///
-    /// There is no timer here, and that is the point. The icon used to be reset by a
-    /// 2.6 s task, which needed a token to stop a stale reset from wiping a newer
-    /// message; now the outcome itself resets the icon, so both the timer and the
-    /// token are gone rather than merely tidied.
-    ///
-    /// The settings window's status line was a third surface and is gone — see
-    /// `SettingsWindowView`. The log line below replaces what it was worth keeping: with
-    /// notification permission denied, this is where an outcome can still be read
-    /// back afterwards.
+    /// Does not touch the menu-bar icon. Overlapping uploads share one glyph, so
+    /// a last-writer-wins assignment here would idle it while a later upload was
+    /// still queued. `beginUpload` / `endUpload` own that count. Copies never
+    /// come through here either — they are not uploads, and a failed copy must
+    /// not banner as 「GitPic 上传失败」.
     private func report(_ report: UploadReport) {
         switch report {
         case .started(let n):
-            statusIcon.state = .uploading
             Diagnostics.log("upload started: \(n) file(s)")
         case .succeeded(let summary), .failed(let summary):
-            statusIcon.state = restingState
             Diagnostics.log("upload outcome: \(summary)")
         }
         if let notice = report.notice { Notifier.post(notice) }
     }
 
+    /// Icon lifecycle is a refcount, not `report()`. Overlapping uploads share
+    /// `.uploading`; the glyph returns to rest only when the last one ends.
+    private var uploadsInFlight = 0
+
+    private func beginUpload() {
+        uploadsInFlight += 1
+        statusIcon = .uploading
+    }
+
+    private func endUpload() {
+        uploadsInFlight = max(0, uploadsInFlight - 1)
+        if uploadsInFlight == 0 {
+            statusIcon = restingState
+        }
+    }
+
     /// What the icon goes back to once nothing is in flight.
     ///
-    /// Not `.idle` unconditionally, which is what the line above used to hardcode.
-    /// With `gitpic` missing, `upload` and `uploadClipboard` both fail immediately
-    /// through `report(.failed)` — so the very failure the missing tool causes was
-    /// what erased the warning triangle it had put in the menu bar, and nothing set
-    /// it back for the rest of the session.
+    /// Not `.idle` unconditionally. With `gitpic` missing, a failed upload used
+    /// to reset the glyph to idle — so the warning the missing tool put in the
+    /// menu bar was erased by the failure it caused, and nothing set it back.
     ///
-    /// Read off `AppModel.toolState` rather than kept as a flag here: that is already
-    /// the app's answer to "was the tool found", and two copies of it could disagree.
-    /// `.resolving` counts as idle on purpose — a failure reported while discovery is
-    /// still running (the "正在查找 gitpic" case) is not evidence the tool is absent,
-    /// and discovery is the only thing that decides that.
-    private var restingState: StatusIcon.State {
+    /// Read off `AppModel.toolState` rather than kept as a flag here: that is
+    /// already the app's answer to "was the tool found", and two copies of it
+    /// could disagree. `.resolving` counts as idle on purpose — a failure
+    /// reported while discovery is still running is not evidence the tool is
+    /// absent, and discovery is the only thing that decides that.
+    private var restingState: StatusIcon {
         AppModel.shared.toolState == .missing ? .unavailable : .idle
     }
 
@@ -203,7 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// Keeps the previous glyph if the symbol will not resolve, rather than assigning
     /// `nil` and leaving a blank gap in the menu bar where the app's only affordance
-    /// used to be. All four symbols do resolve — each checked through
+    /// used to be. All three symbols do resolve — each checked through
     /// `NSImage(systemSymbolName:)` on macOS 26.5 — so this guards against a future
     /// rename, and is not a live fallback.
     private func refreshIcon() {
@@ -214,31 +221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         refreshIcon()
-        attachDropTarget()
         rebuildMenu()
-    }
-
-    /// Make the icon itself a drop target.
-    ///
-    /// Attached here rather than in `rebuildMenu()` on purpose: the menu is rebuilt
-    /// on every format change and after every successful upload, and it only ever
-    /// replaces `statusItem.menu` — the button, and so this subview, survive
-    /// untouched. Adding the view alongside the menu would re-add it each time.
-    ///
-    /// `docs/macos-app-plan.md` §C2 measured that no window at any level receives
-    /// events in the menu-bar strip, which is what parked the notch drop zone. This
-    /// route is not subject to that: the button belongs to the system's own status
-    /// bar window, so its subviews get the drag the strip would otherwise swallow.
-    private func attachDropTarget() {
-        guard let button = statusItem.button else { return }
-        let drop = StatusItemDropView(frame: button.bounds)
-        drop.autoresizingMask = [.width, .height]
-        drop.onDrop = { [weak self] url in self?.upload(paths: [url]) }
-        // The whole of the target-side feedback: one flag into the icon's state, so
-        // an accepted hover cannot lose an in-flight upload's glyph and leaving
-        // cannot restore the wrong one. See ``StatusIcon``.
-        drop.onTargeted = { [weak self] targeted in self?.statusIcon.dropTargeted = targeted }
-        button.addSubview(drop)
     }
 
     /// Builds one status-bar menu item.
@@ -444,14 +427,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // causes have different fixes, and one of them is a config value only the
         // user can change — instead of copying the other under the label they picked.
         guard let text = r.snippet(form) else {
-            report(.failed(summary: r.unavailable(form.target)?.message
-                                    ?? "没有 \(form.target.label) 链接"))
+            AppModel.shared.notify(title: "复制失败",
+                                   body: r.unavailable(form.target)?.message
+                                         ?? "没有 \(form.target.label) 链接")
             return
         }
         if copy(text) {
-            report(.succeeded(summary: "已复制 \(form.label)"))
+            AppModel.shared.notify(title: "GitPic", body: "已复制 \(form.label)")
         } else {
-            report(.failed(summary: "写剪贴板失败"))
+            AppModel.shared.notify(title: "写剪贴板失败", body: r.name)
         }
     }
 
@@ -483,7 +467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Upload
 
     private func upload(paths: [URL]) {
-        Diagnostics.log("drop received: \(paths.count) item(s) -> "
+        Diagnostics.log("upload requested: \(paths.count) item(s) -> "
                         + paths.map(\.lastPathComponent).joined(separator: ", "))
         guard let runner else {
             report(.failed(summary: missingToolSummary()))
@@ -494,8 +478,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             report(.succeeded(summary: "DRY RUN 收到 \(paths.count) 个文件"))
             return
         }
+        beginUpload()
         report(.started(count: paths.count))
         Task { @MainActor in
+            defer { endUpload() }
             do {
                 let env = try await runner.upload(paths: paths)
                 self.present(env)
@@ -535,8 +521,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 report(.succeeded(summary: "DRY RUN 收到剪贴板图片 \(data.count) 字节"))
                 return
             }
+            beginUpload()
             report(.started(count: 1))
             Task { @MainActor in
+                defer { endUpload() }
                 do {
                     let env = try await runner.upload(pngData: data)
                     self.present(env)
@@ -659,20 +647,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // throws gh's stderr away, so re-probe and say something actionable.
         if let code = GitpicErrorCode(wire: err.code), code.needsToolDiagnosis {
             let gh = tools?.gh
+            // Probe off the main actor; do not `report(.failed)` — that would
+            // banner a second time if a first report is ever added, and today
+            // there is none. `present` returns, `defer { endUpload() }` clears
+            // the icon, then this notifies with the diagnosed string.
             Task { @MainActor in
-                let status = await Task.detached { GHProbe.status(gh: gh) }.value
+                let status = await Self.probeGH(gh: gh)
+                let summary: String
                 switch status {
                 case .notInstalled:
-                    self.report(.failed(summary: "找不到 gh，请 brew install gh"))
+                    summary = "找不到 gh，请 brew install gh"
                 case .notLoggedIn:
-                    self.report(.failed(summary: "gh 未登录，请 gh auth login"))
+                    summary = "gh 未登录，请 gh auth login"
                 case .failed(let detail):
-                    self.report(.failed(summary: "gh 异常：\(detail.prefix(60))"))
+                    summary = "gh 异常：\(detail.prefix(60))"
                 case .ready:
                     // gh is fine, so the credential problem is elsewhere — show what
                     // the CLI actually said rather than guessing.
-                    self.report(.failed(summary: err.message))
+                    summary = err.message
                 }
+                AppModel.shared.notify(title: "GitPic 上传失败", body: summary)
             }
             return
         }

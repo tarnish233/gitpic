@@ -125,8 +125,8 @@ struct RunnerSerialisationTests {
     @Test("two overlapping applyConfig calls never put two gitpic processes side by side")
     func applyConfigNeverOverlaps() async throws {
         // The invariant the whole type rests on, and the one an actor does not
-        // provide: `config set` is load → mutate one key → write the whole file
-        // with no lock, so two of them at once silently drops one change.
+        // provide: two concurrent `config set` processes each load-mutate-save
+        // the whole file, so the second write drops the first.
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("gitpic-serial-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -140,8 +140,9 @@ struct RunnerSerialisationTests {
         var a = old; a.upload.quality = 90; a.github.branch = "gh-pages"
         var b = old; b.upload.quality = 91; b.github.branch = "gh-pages-2"
 
-        // Two callers, two keys each. Both tasks are running before either awaits,
-        // which is what lets them reach the actor at the same time.
+        // Two callers, two keys each, one process per caller. Both tasks are
+        // running before either awaits, which is what lets them reach the actor
+        // at the same time.
         async let first = runner.applyConfig(from: old, to: a)
         async let second = runner.applyConfig(from: old, to: b)
         let (wroteFirst, wroteSecond) = try await (first, second)
@@ -150,7 +151,7 @@ struct RunnerSerialisationTests {
 
         let lines = try String(contentsOf: log, encoding: .utf8)
             .split(whereSeparator: \.isNewline).map(String.init)
-        #expect(lines.count == 8, "expected four invocations, saw \(lines)")
+        #expect(lines.count == 4, "expected two invocations, saw \(lines)")
         var live = 0, peak = 0
         for line in lines {
             live += line == "start" ? 1 : -1
