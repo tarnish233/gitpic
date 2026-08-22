@@ -4,6 +4,46 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### README 先讲 App，以及一条会把人装错东西的安装说明
+
+**旧 README 里的 `brew install tarnish233/tap/gitpic` 被写成"仍然装命令行"，而它现在装的是
+App。** 0.11.5 把 cask 改名成 `gitpic` 并删掉了 formula 的旧名映射，那次发布只改了 changelog 和
+manifest，两份 README 没跟上。实测确认过：这条命令解析到 cask（0.13.1），而 `--formula` 加同一个
+名字会报 `No available formula ... Found a cask named "tarnish233/tap/gitpic" instead` —— 也就是说
+照旧文敲、想装命令行的人会装到 App。只要命令行的正确写法一直是 `brew install
+tarnish233/tap/gitpic_cli`。旧 cask 名 `gitpic_app` 仍由 `cask_renames.json` 兜着，已经装了的不会断。
+
+**两份 README 重排了顺序，也短了不少**：先 GitPic.app，再讲命令行和 App 是同一个东西（同一个文件、
+不可能版本不一致、配置和历史共用）以及 CLI 用法，最后是 AI 助手技能。271 → 178 行，英文 315 → 202。
+砍掉的是重复和过度细节 —— 开头那段长 console 演示、formula/cask 冲突的逐种情形展开、独立的「命令行
+补全」和「Downloads」两节（各折成一行）、以及关于 `--json`、严格键校验、`doctor` 的几段长散文。留下
+的是照着敲会用到的东西：完整的 `config.toml`、占位符列表、退出码表、`--json` 的三个例外、给助手的
+两条约定。新 README 里每条命令都实跑验过。
+
+**AGENTS.md 现在写清了 tap 是怎么知道有新版本的**，顺带修掉同一段里两处已经不成立的说法（说 cask 叫
+`gitpic_app`；说 `formula_renames.json` 别删 —— 那个文件 0.11.5 就删了，正是因为留着会让 `gitpic`
+在 formula 和 cask 之间二义）。
+
+### CI
+
+- **发布之后 tap 不用再等最多 6 小时了。** `release.yml` 的 `publish` job 在 release 发布成功后向
+  tap 派发一个 `repository_dispatch`（`gitpic-released`，载荷带版本号），tap 秒级跟上 —— 实测 10 秒
+  跑完。这件事的动机是量出来的：0.13.0 在 05:17Z 发布时 tap 还钉着 0.11.5，`brew upgrade` 对一个已
+  经发布的版本无话可说。需要 `secrets.TAP_DISPATCH_TOKEN`（限定 tap 单仓库的 fine-grained PAT，
+  Contents: write），因为 `GITHUB_TOKEN` 的作用域到不了别的仓库。
+- **tap 那条六小时 cron 保留**，降级成兜底。这是设计而不是遗漏：token 没设、过期、被撤，或者 GitHub
+  抖一下，都必须退回旧行为而不是让 tap 永久卡住。同理，派发步骤带 secret 守卫（secret 不存在就整个
+  不运行，所以加它的那段时间里不可能弄坏发布）和 `continue-on-error`（跑到它的时候 release 已经发布
+  了，为一件 cron 会自己修好的事把好 release 标成失败是不划算的）。
+- **派发带着版本号，tap 核对不上就响亮地失败。** 发布和 `releases/latest` 更新不是一个原子操作，早跑
+  一秒的 run 会读到上一个版本、把 tap 钉在它上面、然后报成功 —— 接着一直坐到下一次 cron。那种静默的
+  错答案比失败更糟。两个方向都实测了：版本对上 → success；故意派发 `0.0.1` → failure，日志打出
+  `dispatch was fired for v0.0.1 but releases/latest is v0.13.1` / `refusing to pin the tap to a
+  release the dispatch did not name`，而且是在下载校验和、重写 formula/cask 之前就死的 —— 事后核对
+  tap 一个字节都没被动过。
+
 ## [0.13.1] - 2026-08-22
 
 ### 边栏不再折叠：那个按钮对标错了窗口
