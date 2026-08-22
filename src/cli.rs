@@ -1,6 +1,6 @@
 //! Command-line interface definition (clap derive).
 
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use std::path::PathBuf;
 
@@ -20,6 +20,82 @@ pub enum OutputFormat {
     Html,
     /// Plain URL only
     Url,
+}
+
+/// Flags that only mean something on an upload (`gitpic <files>` or `paste`).
+///
+/// Flattened onto those two commands rather than marked `global`, so `gitpic list
+/// --compress` is a clap error instead of a silent no-op. `--json` / `--quiet` /
+/// `--verbose` stay on [`Cli`]: they mean something everywhere.
+///
+/// `PartialEq` is what [`UploadArgs::any_set`] is built on — see there.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Args)]
+pub struct UploadArgs {
+    /// Read image bytes from stdin instead of a file
+    #[arg(long)]
+    pub stdin: bool,
+
+    /// Filename stem for stdin, clipboard, or a single-file upload; the extension
+    /// follows the image bytes, not this (e.g. `--name shot` on a JPEG → shot.jpg)
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Link kind override: cdn (jsDelivr) or raw (GitHub)
+    #[arg(long, value_enum)]
+    pub link: Option<LinkKind>,
+
+    // `//`, not `///`: a doc comment's second paragraph becomes clap's *long* help,
+    // so this rationale — rustdoc link and all — was printed to anyone who ran
+    // `gitpic --help` or `gitpic paste --help`.
+    //
+    // `Option` rather than a defaulted value so that "the user asked for md" stays
+    // distinguishable from "nobody said anything". The default lives in
+    // [`Cli::effective_format`].
+    /// Output format: md | html | url
+    #[arg(short, long, value_enum)]
+    pub format: Option<OutputFormat>,
+
+    /// Do not copy the result to the clipboard
+    #[arg(long)]
+    pub no_copy: bool,
+
+    /// Compress/resize the image before uploading
+    #[arg(long)]
+    pub compress: bool,
+
+    /// Disable compression even if enabled in config
+    #[arg(long)]
+    pub no_compress: bool,
+
+    /// Resize so width <= N pixels (0 = keep original)
+    #[arg(long)]
+    pub max_width: Option<u32>,
+
+    /// JPEG quality 1-100 when compressing (default from config)
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=100))]
+    pub quality: Option<u8>,
+
+    /// Override the upload path template
+    #[arg(short, long)]
+    pub path: Option<String>,
+
+    /// Override target repo (owner/repo)
+    #[arg(long)]
+    pub repo: Option<String>,
+}
+
+impl UploadArgs {
+    /// Whether this invocation set any upload option.
+    ///
+    /// Compared against `Default` rather than enumerating the flags: an option
+    /// added to this struct later is covered without anyone remembering to add it
+    /// here, which the hand-written list this replaces could not promise.
+    ///
+    /// Only [`Cli::reject_misplaced_upload_args`] asks. It is a plain "anything?"
+    /// because the user's own command line already names which flag it was.
+    pub fn any_set(&self) -> bool {
+        *self != Self::default()
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -45,67 +121,72 @@ pub struct Cli {
     #[arg(short, long, global = true, action = ArgAction::Count)]
     pub verbose: u8,
 
-    /// Read image bytes from stdin instead of a file
-    #[arg(long, global = true)]
-    pub stdin: bool,
-
-    /// Filename stem for stdin, clipboard, or a single-file upload; the extension
-    /// follows the image bytes, not this (e.g. `--name shot` on a JPEG → shot.jpg)
-    #[arg(long, global = true)]
-    pub name: Option<String>,
-
-    /// Link kind override: cdn (jsDelivr) or raw (GitHub)
-    #[arg(long, value_enum, global = true)]
-    pub link: Option<LinkKind>,
-
-    /// Output format: md | html | url
-    ///
-    /// `Option` rather than a defaulted value so that "the user asked for md" is
-    /// distinguishable from "nobody said anything" — which is what lets
-    /// `upload_only_flags_set` report it. The default lives in `effective_format`.
-    #[arg(short, long, value_enum, global = true)]
-    pub format: Option<OutputFormat>,
-
-    /// Do not copy the result to the clipboard
-    #[arg(long, global = true)]
-    pub no_copy: bool,
-
-    /// Compress/resize the image before uploading
-    #[arg(long, global = true)]
-    pub compress: bool,
-
-    /// Disable compression even if enabled in config
-    #[arg(long, global = true)]
-    pub no_compress: bool,
-
-    /// Resize so width <= N pixels (0 = keep original)
-    #[arg(long, global = true)]
-    pub max_width: Option<u32>,
-
-    /// JPEG quality 1-100 when compressing (default from config)
-    #[arg(long, global = true, value_parser = clap::value_parser!(u8).range(1..=100))]
-    pub quality: Option<u8>,
-
-    /// Override the upload path template
-    #[arg(short, long, global = true)]
-    pub path: Option<String>,
-
-    /// Override target repo (owner/repo)
-    #[arg(long, global = true)]
-    pub repo: Option<String>,
+    #[command(flatten)]
+    pub upload: UploadArgs,
 
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
 impl Cli {
+    /// Upload options for this invocation.
+    ///
+    /// `paste` carries its own copy so the flags can follow the subcommand without
+    /// being global. Every other path reads the top-level flatten (empty unless
+    /// this is a default-command upload).
+    pub fn upload_args(&self) -> &UploadArgs {
+        match &self.command {
+            Some(Command::Paste { upload }) => upload,
+            _ => &self.upload,
+        }
+    }
+
+    /// Refuse upload options typed *before* a subcommand.
+    ///
+    /// Clap covers the other side of this on its own: an upload option after a
+    /// subcommand that does not declare it — `gitpic list --compress` — is an
+    /// unknown-argument error, which is the whole reason these are flattened
+    /// rather than `global`. Before the subcommand they parse into [`Cli::upload`],
+    /// which nothing then reads: `paste` carries its own copy, and no other
+    /// subcommand uploads. That is the "accepted, then silently dropped" shape
+    /// this project closes wherever it appears, so it is a usage error.
+    ///
+    /// **Deliberately not `args_conflicts_with_subcommands`.** That setting says
+    /// exactly this, and it was tried — but it also stops clap from recognising a
+    /// subcommand at all once any top-level argument has been seen, the globals
+    /// included, so `gitpic --json doctor` parsed `doctor` as a *filename* and
+    /// reported `NOT_FOUND: file not found: doctor`. Pinned by
+    /// `a_global_flag_before_a_subcommand_still_selects_it`.
+    pub fn reject_misplaced_upload_args(&self) -> crate::error::Result<()> {
+        if self.command.is_none() || !self.upload.any_set() {
+            return Ok(());
+        }
+        // Says where they *do* work rather than only "not here". Without the last
+        // clause this was a two-step dead end for `list` and friends: move the flag
+        // after the subcommand as told, and clap rejects it there too, because no
+        // subcommand but `paste` and `doctor` takes any of these.
+        Err(crate::error::AppError::usage(
+            "upload options apply to nothing before a subcommand: pass them to the \
+             upload itself (`gitpic a.png --compress`), after `paste` (`gitpic paste \
+             --no-copy`), or as `--repo` after `doctor`. No other subcommand takes \
+             them.",
+        ))
+    }
+
+    /// `--repo`, from whichever command actually accepts it.
+    pub fn repo_override(&self) -> Option<&str> {
+        match &self.command {
+            Some(Command::Doctor { repo }) => repo.as_deref(),
+            _ => self.upload_args().repo.as_deref(),
+        }
+    }
+
     /// The output format to actually use: the flag if given, else the config's
     /// `upload.format`.
     ///
-    /// The flag stays an `Option` for the reason its own doc comment gives — "the
-    /// user asked for md" has to stay distinguishable from "nobody said anything" —
-    /// and this is where that distinction is spent: only the second case falls
-    /// through to the file.
+    /// The flag stays an `Option` so "the user asked for md" stays distinguishable
+    /// from "nobody said anything" — only the second case falls through to the
+    /// file.
     ///
     /// The final `unwrap_or` is unreachable through any supported path, because
     /// `Config::validate` rejects a format it cannot parse before a config is ever
@@ -113,57 +194,10 @@ impl Cli {
     /// defensible answer to a config file, and Markdown is what every version before
     /// this key existed produced.
     pub fn effective_format(&self, cfg: &crate::config::Config) -> OutputFormat {
-        self.format
+        self.upload_args()
+            .format
             .or_else(|| crate::link::parse_output_format_strict(&cfg.upload.format))
             .unwrap_or(OutputFormat::Md)
-    }
-
-    /// Which upload-only options this invocation actually set.
-    ///
-    /// Every upload option is `global = true`, which is what lets `gitpic paste
-    /// --no-copy` work (see `upload_options_work_after_subcommand`). The side
-    /// effect was that `gitpic list --compress --max-width 99` also parsed, exited
-    /// 0, and ignored every one of them — the same "accepted, then silently
-    /// dropped" shape this project has been closing elsewhere. `main::dispatch`
-    /// turns a non-empty result into a usage error on subcommands that upload
-    /// nothing.
-    ///
-    /// Only options that can be distinguished from their default appear here; that
-    /// is why `format` is an `Option`. `--json`, `--quiet` and `--verbose` are
-    /// deliberately absent: they mean something everywhere.
-    pub fn upload_only_flags_set(&self) -> Vec<&'static str> {
-        let mut set = Vec::new();
-        if self.stdin {
-            set.push("--stdin");
-        }
-        if self.name.is_some() {
-            set.push("--name");
-        }
-        if self.link.is_some() {
-            set.push("--link");
-        }
-        if self.format.is_some() {
-            set.push("--format");
-        }
-        if self.no_copy {
-            set.push("--no-copy");
-        }
-        if self.compress {
-            set.push("--compress");
-        }
-        if self.no_compress {
-            set.push("--no-compress");
-        }
-        if self.max_width.is_some() {
-            set.push("--max-width");
-        }
-        if self.quality.is_some() {
-            set.push("--quality");
-        }
-        if self.path.is_some() {
-            set.push("--path");
-        }
-        set
     }
 }
 
@@ -172,14 +206,21 @@ pub enum Command {
     /// Interactively initialize configuration
     Init,
     /// Read an image from the clipboard and upload it
-    Paste,
+    Paste {
+        #[command(flatten)]
+        upload: UploadArgs,
+    },
     /// View or modify configuration
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
     /// Health check: config present, token valid, repo writable
-    Doctor,
+    Doctor {
+        /// Override target repo (owner/repo)
+        #[arg(long)]
+        repo: Option<String>,
+    },
     /// List recent uploads from local history
     List {
         /// Max number of records to show
@@ -235,8 +276,18 @@ pub enum AgentKind {
 pub enum ConfigAction {
     /// Print a config value (or the whole config)
     Get { key: Option<String> },
-    /// Set a config value (e.g. github.repo owner/name)
-    Set { key: String, value: String },
+    /// Set one or more config values (`KEY VALUE` pairs)
+    Set {
+        /// Alternating key and value, e.g. `github.repo owner/name upload.format md`
+        // Neither clap spelling says "pairs": `value_names = ["KEY", "VALUE"]` renders
+        // `<KEY> <VALUE>...`, where the `...` attaches to the last name and can be read
+        // as one key with many values, and a single `value_name = "KEY VALUE"` renders
+        // `<KEY VALUE> <KEY VALUE>...`, which claims a two-pair minimum that is not
+        // real. Kept as the pair, with the rule stated in the help text above, which is
+        // the line anyone who gets this wrong will actually read.
+        #[arg(required = true, num_args = 2.., value_names = ["KEY", "VALUE"])]
+        pairs: Vec<String>,
+    },
     /// Print the config file path
     Path,
     /// Open the config file in $EDITOR
@@ -250,7 +301,7 @@ mod tests {
 
     #[test]
     fn upload_options_work_after_subcommand() {
-        // Regression: these used to be rejected after `paste` (not global).
+        // Flattened onto `paste`, so they follow the subcommand without being global.
         let cli = Cli::try_parse_from([
             "gitpic",
             "paste",
@@ -263,20 +314,135 @@ mod tests {
             "url",
         ])
         .expect("paste should accept upload options");
-        assert!(matches!(cli.command, Some(Command::Paste)));
-        assert!(cli.no_copy);
-        assert_eq!(cli.link, Some(LinkKind::Raw));
-        assert_eq!(cli.name.as_deref(), Some("shot.png"));
-        assert_eq!(cli.format, Some(OutputFormat::Url));
+        assert!(matches!(cli.command, Some(Command::Paste { .. })));
+        let u = cli.upload_args();
+        assert!(u.no_copy);
+        assert_eq!(u.link, Some(LinkKind::Raw));
+        assert_eq!(u.name.as_deref(), Some("shot.png"));
+        assert_eq!(u.format, Some(OutputFormat::Url));
     }
 
     #[test]
-    fn upload_options_work_before_and_default() {
+    fn upload_options_work_on_the_default_command() {
         let cli = Cli::try_parse_from(["gitpic", "a.png", "--json", "--max-width", "800"])
             .expect("default upload should parse");
         assert!(cli.command.is_none());
         assert!(cli.json);
-        assert_eq!(cli.max_width, Some(800));
+        assert_eq!(cli.upload_args().max_width, Some(800));
+    }
+
+    #[test]
+    fn a_global_flag_before_a_subcommand_still_selects_it() {
+        // Regression, and the reason `args_conflicts_with_subcommands` is not set:
+        // with it, clap stopped looking for a subcommand as soon as any top-level
+        // argument had been seen, so `--json doctor` parsed `doctor` into `files`
+        // and the run reported `NOT_FOUND: file not found: doctor` — a subcommand
+        // silently turned into an upload of a file nobody named.
+        for sub in [
+            vec!["doctor"],
+            vec!["list"],
+            vec!["config", "get"],
+            vec!["skill", "path"],
+            vec!["completion", "bash"],
+            vec!["init"],
+            vec!["paste"],
+        ] {
+            for global in [vec!["--json"], vec!["-q"], vec!["-vv"]] {
+                let mut argv = vec!["gitpic"];
+                argv.extend(global.iter().copied());
+                argv.extend(sub.iter().copied());
+                let cli = Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+                assert!(cli.command.is_some(), "{argv:?} must select a subcommand");
+                assert!(
+                    cli.files.is_empty(),
+                    "{argv:?} must not swallow the subcommand as a filename, got {:?}",
+                    cli.files
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn upload_options_before_a_subcommand_are_refused() {
+        // They parse — they are `Cli`'s own flatten — and then nothing reads them:
+        // `paste` has its own copy and no other subcommand uploads. Refused rather
+        // than dropped, which is the same rule `list --compress` gets from clap.
+        for argv in [
+            vec!["gitpic", "--compress", "paste"],
+            vec!["gitpic", "--no-copy", "paste"],
+            vec!["gitpic", "--name", "shot", "paste"],
+            vec!["gitpic", "--repo", "o/r", "doctor"],
+            vec!["gitpic", "--max-width", "800", "list"],
+            vec!["gitpic", "-f", "url", "config", "get"],
+        ] {
+            let cli = Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            let err = cli
+                .reject_misplaced_upload_args()
+                .expect_err(&format!("{argv:?} must be refused"));
+            assert_eq!(err.code, crate::error::ErrorCode::Usage);
+        }
+    }
+
+    #[test]
+    fn the_paths_that_do_use_upload_options_are_untouched() {
+        for argv in [
+            vec!["gitpic", "a.png", "--compress"],
+            vec!["gitpic", "--stdin", "--name", "shot"],
+            vec!["gitpic", "paste", "--no-copy"],
+            vec!["gitpic", "doctor", "--repo", "o/r"],
+            vec!["gitpic", "list", "--json"],
+        ] {
+            let cli = Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            cli.reject_misplaced_upload_args()
+                .unwrap_or_else(|e| panic!("{argv:?} must be accepted: {}", e.message));
+        }
+        // The comparison the guard rests on: an untouched flatten is its default.
+        assert!(!UploadArgs::default().any_set());
+        assert!(Cli::try_parse_from(["gitpic", "a.png", "--quality", "80"])
+            .unwrap()
+            .upload
+            .any_set());
+    }
+
+    #[test]
+    fn list_rejects_upload_flags() {
+        // The whole point of not making them global: clap, not a second list in
+        // dispatch, is what refuses `gitpic list --compress`.
+        for args in [
+            vec!["gitpic", "list", "--compress"],
+            vec!["gitpic", "list", "--no-copy"],
+            vec!["gitpic", "list", "--stdin"],
+            vec!["gitpic", "list", "--name", "x.png"],
+            vec!["gitpic", "list", "--link", "raw"],
+            vec!["gitpic", "list", "-f", "url"],
+            vec!["gitpic", "list", "--no-compress"],
+            vec!["gitpic", "list", "--max-width", "99"],
+            vec!["gitpic", "list", "--quality", "50"],
+            vec!["gitpic", "list", "-p", "t/{name}.{ext}"],
+            vec!["gitpic", "list", "--repo", "o/r"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "{args:?} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_accepts_repo_and_rejects_upload_flags() {
+        let cli = Cli::try_parse_from(["gitpic", "doctor", "--repo", "o/r", "--json"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Command::Doctor { ref repo }) if repo.as_deref() == Some("o/r"))
+        );
+        assert!(cli.json);
+        assert!(Cli::try_parse_from(["gitpic", "doctor", "--compress"]).is_err());
+    }
+
+    #[test]
+    fn global_flags_still_work_on_every_subcommand() {
+        let cli = Cli::try_parse_from(["gitpic", "list", "--json", "-q", "-vv"]).unwrap();
+        assert!(cli.json && cli.quiet && cli.verbose == 2);
+        assert!(cli.repo_override().is_none());
     }
 
     #[test]
@@ -376,7 +542,7 @@ mod tests {
         for q in ["1", "82", "100"] {
             let cli = Cli::try_parse_from(["gitpic", "a.png", "--quality", q])
                 .unwrap_or_else(|e| panic!("quality {q} should parse: {e}"));
-            assert_eq!(cli.quality, Some(q.parse().unwrap()));
+            assert_eq!(cli.upload_args().quality, Some(q.parse().unwrap()));
         }
     }
 
@@ -385,7 +551,7 @@ mod tests {
         // `format` became `Option` so it could be told apart from its default;
         // md must still be what an unadorned upload produces.
         let cli = Cli::try_parse_from(["gitpic", "a.png"]).unwrap();
-        assert_eq!(cli.format, None);
+        assert_eq!(cli.upload_args().format, None);
         assert_eq!(
             cli.effective_format(&crate::config::Config::default()),
             OutputFormat::Md
@@ -406,41 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn an_untouched_invocation_reports_no_upload_only_flags() {
-        // The flags that mean something everywhere must never be reported.
-        let cli = Cli::try_parse_from(["gitpic", "list", "--json", "-q", "-vv"]).unwrap();
-        assert!(cli.upload_only_flags_set().is_empty());
-        assert!(cli.repo.is_none());
-    }
-
-    #[test]
-    fn every_upload_only_flag_is_detected() {
-        // Regression: these all parsed on `list`/`completion`/`config`, exited 0,
-        // and were silently ignored. Each must be reportable so dispatch can
-        // refuse it. Listed one per line so a newly added upload option that
-        // nobody wired up shows here as a missing entry.
-        for (args, want) in [
-            (vec!["--stdin"], "--stdin"),
-            (vec!["--name", "x.png"], "--name"),
-            (vec!["--link", "raw"], "--link"),
-            (vec!["-f", "url"], "--format"),
-            (vec!["--no-copy"], "--no-copy"),
-            (vec!["--compress"], "--compress"),
-            (vec!["--no-compress"], "--no-compress"),
-            (vec!["--max-width", "99"], "--max-width"),
-            (vec!["--quality", "50"], "--quality"),
-            (vec!["-p", "t/{name}.{ext}"], "--path"),
-        ] {
-            let mut argv = vec!["gitpic", "list"];
-            argv.extend(args.iter().copied());
-            let cli = Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
-            assert_eq!(cli.upload_only_flags_set(), vec![want], "for {argv:?}");
-        }
-    }
-
-    #[test]
-    fn the_upload_path_still_accepts_all_of_them() {
-        // The rejection must not leak into the paths that do use these options.
+    fn paste_still_accepts_every_upload_option() {
         let cli = Cli::try_parse_from([
             "gitpic",
             "paste",
@@ -458,18 +590,31 @@ mod tests {
             "90",
         ])
         .expect("paste must still accept every upload option");
-        assert_eq!(
-            cli.upload_only_flags_set(),
-            vec![
-                "--name",
-                "--link",
-                "--format",
-                "--no-copy",
-                "--compress",
-                "--max-width",
-                "--quality"
-            ]
-        );
-        assert!(matches!(cli.command, Some(Command::Paste)));
+        let u = cli.upload_args();
+        assert!(u.no_copy && u.compress);
+        assert_eq!(u.link, Some(LinkKind::Raw));
+        assert_eq!(u.max_width, Some(800));
+        assert_eq!(u.quality, Some(90));
+        assert!(matches!(cli.command, Some(Command::Paste { .. })));
+    }
+
+    #[test]
+    fn config_set_accepts_several_pairs() {
+        let cli = Cli::try_parse_from([
+            "gitpic",
+            "config",
+            "set",
+            "github.owner",
+            "me",
+            "github.repo",
+            "pics",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Config {
+                action: ConfigAction::Set { pairs },
+            }) => assert_eq!(pairs, vec!["github.owner", "me", "github.repo", "pics"]),
+            other => panic!("expected config set, got {other:?}"),
+        }
     }
 }

@@ -28,12 +28,24 @@ struct ConfigEnvelope<'a> {
     config: &'a Config,
 }
 
-/// `config set`.
+/// One key that landed, as stored — `link_kind` is lowercased and `repo` may
+/// have been split, so this is not always the raw argument.
+#[derive(Serialize)]
+struct SetChange<'a> {
+    key: &'a str,
+    value: String,
+}
+
+/// `config set`. One pair still carries `key`/`value` at the top level so
+/// existing agents keep working; several pairs are `changes` only.
 #[derive(Serialize)]
 struct SetEnvelope<'a> {
     ok: bool,
-    key: &'a str,
-    value: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<&'a str>,
+    changes: Vec<SetChange<'a>>,
     path: &'a str,
 }
 
@@ -78,24 +90,33 @@ pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
                 }
             }
         }
-        ConfigAction::Set { key, value } => {
+        ConfigAction::Set { pairs } => {
+            let kv = pair_args(pairs)?;
             let mut cfg = Config::load()?;
-            set_key(&mut cfg, key, value)?;
+            for (key, value) in &kv {
+                set_key(&mut cfg, key, value)?;
+            }
             let path = cfg.save()?;
             let shown = path.display().to_string();
+            // Stored values, not the raw arguments: `link_kind` is lowercased
+            // and `repo` may have been split.
+            let changes: Vec<SetChange> = kv
+                .iter()
+                .map(|(key, _)| get_key(&cfg, key).map(|value| SetChange { key, value }))
+                .collect::<Result<_>>()?;
             if mode.is_json() {
-                // The stored value, not the raw argument: `link_kind` is
-                // lowercased and `repo` may have been split, so echoing the input
-                // would misreport what is now on disk.
-                let stored = get_key(&cfg, key)?;
+                let single_key = (changes.len() == 1).then_some(changes[0].key);
+                let single_value = (changes.len() == 1).then(|| changes[0].value.clone());
                 crate::output::print_json(&SetEnvelope {
                     ok: true,
-                    key,
-                    value: &stored,
+                    key: single_key,
+                    value: single_value.as_deref(),
+                    changes,
                     path: &shown,
                 });
             } else {
-                crate::output::line(&format!("\u{2713} set {key} in {shown}"));
+                let keys = changes.iter().map(|c| c.key).collect::<Vec<_>>().join(", ");
+                crate::output::line(&format!("\u{2713} set {keys} in {shown}"));
             }
         }
         ConfigAction::Edit => {
@@ -124,6 +145,20 @@ pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `config set KEY VALUE [KEY VALUE ...]`. Clap's `num_args = 2..` still
+/// admits an odd count (`github.owner me leftover`).
+fn pair_args(pairs: &[String]) -> Result<Vec<(&str, &str)>> {
+    if !pairs.len().is_multiple_of(2) {
+        return Err(AppError::usage(
+            "config set expects KEY VALUE pairs; got an odd number of arguments",
+        ));
+    }
+    Ok(pairs
+        .chunks_exact(2)
+        .map(|c| (c[0].as_str(), c[1].as_str()))
+        .collect())
 }
 
 fn get_key(cfg: &Config, key: &str) -> Result<String> {
@@ -228,5 +263,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn pair_args_rejects_an_odd_count() {
+        let err =
+            pair_args(&["github.owner".into(), "me".into(), "leftover".into()]).expect_err("odd");
+        assert_eq!(err.code, crate::error::ErrorCode::Usage);
+        assert!(pair_args(&["github.owner".into(), "me".into()]).is_ok());
+    }
+
+    #[test]
+    fn a_later_key_that_fails_does_not_reach_save() {
+        // Mutations happen in memory; `run` only saves after every pair succeeds.
+        let mut cfg = Config::default();
+        set_key(&mut cfg, "github.owner", "me").unwrap();
+        set_key(&mut cfg, "github.repo", "pics").unwrap();
+        assert!(set_key(&mut cfg, "upload.quality", "0").is_err());
+        assert_eq!(cfg.github.owner, "me");
+        assert_eq!(cfg.github.repo, "pics");
     }
 }

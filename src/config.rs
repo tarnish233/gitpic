@@ -208,11 +208,13 @@ impl Config {
                 self.upload.quality
             ));
         }
-        // Rendered, because that is what an upload actually uses and what
-        // `is_safe_remote_path` is written against.
-        let sample =
-            crate::naming::render_path(&self.upload.path_template, "sample.png", &"0".repeat(64));
-        if !crate::naming::is_safe_remote_path(&sample) {
+        // Same dummy-render as `--path`: `{name}` cannot inject `..` (slugify).
+        if !crate::naming::template_renders_safe(&self.upload.path_template) {
+            let sample = crate::naming::render_path(
+                &self.upload.path_template,
+                "sample.png",
+                &"0".repeat(64),
+            );
             return Err(format!(
                 "upload.path_template {:?} must be repo-relative with no empty or `..` segments (renders to {sample:?})",
                 self.upload.path_template
@@ -335,10 +337,10 @@ impl Config {
             }
             drop(file);
 
-            #[cfg(windows)]
-            if path.exists() {
-                fs::remove_file(path)?;
-            }
+            // Replaces an existing destination on Unix and on Windows
+            // (`MoveFileExW(MOVEFILE_REPLACE_EXISTING)`). Unlinking first on
+            // Windows left a window with no `config.toml`; `Config::load`
+            // treats that as defaults.
             fs::rename(&temp_path, path)
         })();
 

@@ -1,6 +1,6 @@
 //! Upload orchestration for files, stdin, and clipboard sources.
 
-use crate::cli::{Cli, Command, LinkKind, OutputFormat};
+use crate::cli::{Cli, Command, LinkKind, OutputFormat, UploadArgs};
 use crate::config::Config;
 use crate::error::{AppError, Result};
 use crate::github::{GitHub, PutOutcome};
@@ -17,11 +17,11 @@ struct InputImage {
     bytes: Vec<u8>,
 }
 
-fn resolve_compress(cli: &Cli, cfg: &Config) -> CompressOpts {
+fn resolve_compress(u: &UploadArgs, cfg: &Config) -> CompressOpts {
     CompressOpts {
-        enabled: (cfg.upload.compress || cli.compress) && !cli.no_compress,
-        max_width: cli.max_width.unwrap_or(cfg.upload.max_width),
-        quality: cli.quality.unwrap_or(cfg.upload.quality),
+        enabled: (cfg.upload.compress || u.compress) && !u.no_compress,
+        max_width: u.max_width.unwrap_or(cfg.upload.max_width),
+        quality: u.quality.unwrap_or(cfg.upload.quality),
     }
 }
 
@@ -66,24 +66,25 @@ fn build_item(
 /// code of the first failure. Inputs that already uploaded are still reported
 /// so their links are never lost.
 pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
-    let is_paste = matches!(cli.command, Some(Command::Paste));
+    let is_paste = matches!(cli.command, Some(Command::Paste { .. }));
+    let u = cli.upload_args();
 
     // Guard against silently dropping inputs when sources are mixed. (`paste`
     // plus file args needs no check: clap rejects positionals after the
     // subcommand, and `gitpic a.png paste` parses `paste` as a filename.)
-    if cli.stdin && !cli.files.is_empty() {
+    if u.stdin && !cli.files.is_empty() {
         return Err(AppError::usage(
             "--stdin reads the image from stdin; do not also pass file arguments",
         ));
     }
-    if is_paste && cli.stdin {
+    if is_paste && u.stdin {
         return Err(AppError::usage("--stdin cannot be combined with `paste`"));
     }
 
     let mut inputs = if is_paste {
-        vec![read_clipboard(cli)?]
-    } else if cli.stdin {
-        vec![read_stdin(cli)?]
+        vec![read_clipboard(u.name.as_deref())?]
+    } else if u.stdin {
+        vec![read_stdin(u.name.as_deref())?]
     } else {
         read_files(&cli.files)?
     };
@@ -94,16 +95,21 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
         ));
     }
 
-    apply_explicit_name(&mut inputs, cli.name.as_deref(), is_paste, cli.stdin)?;
+    apply_explicit_name(&mut inputs, u.name.as_deref(), is_paste, u.stdin)?;
 
     cfg.require_target()?;
 
-    let kind = cli.link.unwrap_or_else(|| {
+    let kind = u.link.unwrap_or_else(|| {
         link::parse_link_kind_strict(&cfg.upload.link_kind).unwrap_or(crate::cli::LinkKind::Cdn)
     });
     // Deliberately ahead of `auth::token` and every PUT: nothing may be committed
     // for a link this cannot produce.
     reject_dead_cdn_link(kind, &cfg.github.branch)?;
+
+    let template = u.path.as_deref().unwrap_or(&cfg.upload.path_template);
+    // Same timing: a `--path` that would 404 as a `..` Contents path must not
+    // wait until after the credential to fail.
+    reject_unsafe_path_template(template)?;
 
     // Resolved here, after the inputs are in hand: a credential helper may take
     // a moment, and there is no point paying for it to upload a broken image.
@@ -116,10 +122,9 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
         &cfg.github.branch,
     )?;
 
-    let template = cli.path.as_deref().unwrap_or(&cfg.upload.path_template);
     let dedup = cfg.upload.dedup;
 
-    let compress = resolve_compress(cli, cfg);
+    let compress = resolve_compress(u, cfg);
 
     if cli.verbose > 0 {
         eprintln!(
@@ -201,7 +206,7 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
     }
 
     // Copy to clipboard only for interactive/human use.
-    let want_copy = cfg.upload.auto_copy && !cli.no_copy && matches!(mode, Mode::Human);
+    let want_copy = cfg.upload.auto_copy && !u.no_copy && matches!(mode, Mode::Human);
     if want_copy && !results.is_empty() {
         let joined = results
             .iter()
@@ -285,6 +290,22 @@ fn reject_dead_cdn_link(kind: LinkKind, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Refuse a path template that dummy-renders to an unusable Contents path.
+///
+/// Same check as `Config::validate`, on the effective template (`--path` or the
+/// file). Split out of `run` so it can be tested without a token. The per-file
+/// `is_safe_remote_path` on the rendered result stays as belt-and-suspenders.
+fn reject_unsafe_path_template(template: &str) -> Result<()> {
+    if !naming::template_renders_safe(template) {
+        let sample = naming::render_path(template, "sample.png", &"0".repeat(64));
+        return Err(AppError::usage(format!(
+            "path template {template:?} must be repo-relative with no empty or `..` segments \
+             (renders to {sample:?})"
+        )));
+    }
+    Ok(())
+}
+
 /// Apply `--name` to a file upload. Paste and stdin already consume it in
 /// their readers; a multi-file upload cannot honour a single name, so that is
 /// a usage error rather than a silent drop.
@@ -308,44 +329,16 @@ fn apply_explicit_name(
             "--name can only be used with a single file, --stdin, or paste",
         ));
     }
-    let renamed = renamed_file(&inputs[0].name, &inputs[0].bytes, name);
+    let renamed = display_name(
+        Some(name),
+        &inputs[0].bytes,
+        ExtFallback::File {
+            original: &inputs[0].name,
+        },
+    )
+    .expect("a file upload always has a name to fall back on");
     inputs[0].name = renamed;
     Ok(())
-}
-
-/// Re-name a file upload without letting `--name` change what the bytes are.
-///
-/// `--name` replaced the whole filename, extension included, so `gitpic photo.jpg
-/// --name shot.png` published JPEG bytes at a `.png` path — and `--name shot`
-/// published them at `.png` too, because `render_path` defaults `{ext}` when the
-/// name carries none (`src/naming.rs:80-84`) — which GitHub and jsDelivr then
-/// serve as `image/png`. That is the same defect 9ee5320 fixed for `paste --name
-/// shot.jpg` and [`stdin_name`] fixed for `--stdin`, on the third and last
-/// `--name` consumer. The rule is theirs, unchanged: the stem is the user's, the
-/// extension is the content's.
-///
-/// Authority runs bytes, then `original`, then `explicit`. The bytes are the only
-/// real evidence; the extension the file arrived with is what an upload *without*
-/// `--name` would have used, so preferring it keeps `--name` a pure rename; and
-/// `--name`'s own extension is a wish, taken only when nothing else knows. That
-/// last fallback is why this cannot fail the way [`stdin_name`] must — a file
-/// upload always has a filename to fall back on, so an SVG (or anything else the
-/// `image` crate cannot decode) keeps its extension instead of erroring.
-fn renamed_file(original: &str, bytes: &[u8], explicit: &str) -> String {
-    let original = Path::new(original);
-    let stem = explicit_stem(Some(explicit))
-        .or_else(|| original.file_stem().and_then(|s| s.to_str()))
-        // What `render_path` and `alt_text` call a nameless input.
-        .unwrap_or("image");
-    match sniffed_ext(bytes)
-        .or_else(|| original.extension().and_then(|s| s.to_str()))
-        .or_else(|| Path::new(explicit).extension().and_then(|s| s.to_str()))
-    {
-        Some(ext) => format!("{stem}.{ext}"),
-        // Nothing here knows what these bytes are; leaving the extension off lets
-        // `render_path` default it, exactly as it does without `--name` at all.
-        None => stem.to_string(),
-    }
 }
 
 fn read_files(files: &[std::path::PathBuf]) -> Result<Vec<InputImage>> {
@@ -369,7 +362,7 @@ fn read_files(files: &[std::path::PathBuf]) -> Result<Vec<InputImage>> {
     Ok(out)
 }
 
-fn read_stdin(cli: &Cli) -> Result<InputImage> {
+fn read_stdin(name: Option<&str>) -> Result<InputImage> {
     let mut bytes = Vec::new();
     std::io::stdin()
         .read_to_end(&mut bytes)
@@ -378,30 +371,9 @@ fn read_stdin(cli: &Cli) -> Result<InputImage> {
         return Err(AppError::usage("stdin was empty"));
     }
     Ok(InputImage {
-        name: stdin_name(cli.name.as_deref(), &bytes)?,
+        name: display_name(name, &bytes, ExtFallback::Stdin)?,
         bytes,
     })
-}
-
-/// Name a stdin capture from what the bytes actually are.
-///
-/// Everything used to be called `image.png`, so `cat photo.jpg | gitpic --stdin`
-/// published JPEG bytes at a `.png` path and GitHub and jsDelivr then served them
-/// as `image/png`. That is the same defect 9ee5320 fixed for `paste --name
-/// shot.jpg`; the clipboard path got the fix and this one did not.
-///
-/// The extension therefore comes from the content, never from `--name` — only the
-/// stem is taken from there. When the format cannot be identified and no `--name`
-/// was given there is nothing to guess from, so it is a usage error rather than a
-/// wrong `.png`; with a `--name`, the user has asserted an extension and it stands.
-fn stdin_name(explicit: Option<&str>, bytes: &[u8]) -> Result<String> {
-    match (sniffed_ext(bytes), explicit) {
-        (Some(ext), _) => Ok(content_name(explicit, ext)),
-        (None, Some(name)) => Ok(name.to_string()),
-        (None, None) => Err(AppError::usage(
-            "cannot tell what kind of image this is from the bytes; pass --name to set the filename",
-        )),
-    }
 }
 
 /// The canonical extension for whatever these bytes actually are, if the format is
@@ -415,7 +387,7 @@ fn sniffed_ext(bytes: &[u8]) -> Option<&'static str> {
         .and_then(|f| f.extensions_str().first().copied())
 }
 
-fn read_clipboard(cli: &Cli) -> Result<InputImage> {
+fn read_clipboard(name: Option<&str>) -> Result<InputImage> {
     use image::ImageEncoder;
     let mut clip =
         arboard::Clipboard::new().map_err(|e| AppError::general(format!("clipboard: {e}")))?;
@@ -437,24 +409,78 @@ fn read_clipboard(cli: &Cli) -> Result<InputImage> {
 
     Ok(InputImage {
         // Always PNG, because that is what was just encoded above.
-        name: content_name(cli.name.as_deref(), "png"),
+        name: display_name(name, &png, ExtFallback::Fixed("png"))
+            .expect("a fixed extension cannot fail"),
         bytes: png,
     })
 }
 
-/// Name a byte stream by what it actually contains.
+/// Where a missing extension may be taken from, once the bytes have said nothing.
+enum ExtFallback<'a> {
+    /// A file that already had a name: original, then `--name`, then stem-only
+    /// (`render_path` defaults `{ext}`). Never a usage error — a file upload
+    /// always has something to fall back on, so an SVG keeps `.svg` instead of
+    /// erroring.
+    File { original: &'a str },
+    /// Stdin: bytes, else `--name` if it carries an extension, else `USAGE`.
+    Stdin,
+    /// Already encoded (clipboard PNG). `--name` supplies only the stem.
+    Fixed(&'static str),
+}
+
+/// One name for one blob: the stem is the user's, the extension is the content's.
 ///
-/// The extension always comes from `ext` — the format of the bytes in hand — never
-/// from `--name`. Honouring a user-supplied `--name shot.jpg` for PNG data would
-/// publish it at a `.jpg` path, which GitHub and jsDelivr then serve as
-/// `image/jpeg`. Only the stem is taken from `--name`.
-///
-/// Shared by the clipboard path (always PNG, since it re-encodes) and stdin (the
-/// sniffed format), because they had the same bug and only one of them was fixed.
-/// The file path applies the same rule through [`renamed_file`], which differs only
-/// in having a real filename to fall back on instead of `clipboard`.
-fn content_name(explicit: Option<&str>, ext: &str) -> String {
-    format!("{}.{ext}", explicit_stem(explicit).unwrap_or("clipboard"))
+/// `--name` used to replace the whole filename, so `gitpic photo.jpg --name
+/// shot.png` published JPEG bytes at a `.png` path — and `--name shot` did the
+/// same via `render_path`'s `{ext}` default. File, stdin and paste each had their
+/// own copy of the rule, and they drifted. Authority is: bytes, then the fallback,
+/// then `--name`'s own extension (file only).
+fn display_name(explicit: Option<&str>, bytes: &[u8], fallback: ExtFallback<'_>) -> Result<String> {
+    let stem = match fallback {
+        ExtFallback::File { original } => explicit_stem(explicit)
+            .or_else(|| Path::new(original).file_stem().and_then(|s| s.to_str()))
+            .unwrap_or("image"),
+        ExtFallback::Stdin | ExtFallback::Fixed(_) => {
+            explicit_stem(explicit).unwrap_or("clipboard")
+        }
+    };
+
+    let ext = match fallback {
+        ExtFallback::Fixed(ext) => Some(ext),
+        ExtFallback::File { original } => sniffed_ext(bytes)
+            .or_else(|| Path::new(original).extension().and_then(|s| s.to_str()))
+            .or_else(|| {
+                explicit
+                    .map(Path::new)
+                    .and_then(|p| p.extension())
+                    .and_then(|s| s.to_str())
+            }),
+        ExtFallback::Stdin => match sniffed_ext(bytes) {
+            Some(ext) => Some(ext),
+            None if explicit.is_some_and(name_asserts_ext) => explicit
+                .map(Path::new)
+                .and_then(|p| p.extension())
+                .and_then(|s| s.to_str()),
+            None => None,
+        },
+    };
+
+    match (fallback, ext) {
+        (ExtFallback::Stdin, None) => Err(AppError::usage(
+            "cannot tell what kind of image this is from the bytes; pass --name to set the filename",
+        )),
+        (_, Some(ext)) => Ok(format!("{stem}.{ext}")),
+        (ExtFallback::File { .. }, None) => Ok(stem.to_string()),
+        (ExtFallback::Fixed(_), None) => unreachable!("fixed extension is Some"),
+    }
+}
+
+/// Whether `--name` carries an extension `render_path` would not have to invent.
+fn name_asserts_ext(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|ext| !ext.is_empty() && ext.chars().any(|c| c.is_ascii_alphanumeric()))
 }
 
 /// The stem `--name` asks for, when it carries a usable one.
@@ -488,15 +514,21 @@ mod tests {
         let mut cfg = Config::default();
         cfg.upload.compress = true;
         let cli = parse(&["gitpic", "a.png", "--compress", "--no-compress"]);
-        assert!(!resolve_compress(&cli, &cfg).enabled);
+        assert!(!resolve_compress(cli.upload_args(), &cfg).enabled);
     }
 
     #[test]
     fn flag_or_config_enables_compression() {
         let mut cfg = Config::default();
-        assert!(resolve_compress(&parse(&["gitpic", "a.png", "--compress"]), &cfg).enabled);
+        assert!(
+            resolve_compress(
+                parse(&["gitpic", "a.png", "--compress"]).upload_args(),
+                &cfg
+            )
+            .enabled
+        );
         cfg.upload.compress = true;
-        assert!(resolve_compress(&parse(&["gitpic", "a.png"]), &cfg).enabled);
+        assert!(resolve_compress(parse(&["gitpic", "a.png"]).upload_args(), &cfg).enabled);
     }
 
     #[test]
@@ -505,37 +537,53 @@ mod tests {
         cfg.upload.max_width = 100;
         cfg.upload.quality = 50;
         let overridden = resolve_compress(
-            &parse(&["gitpic", "a.png", "--max-width", "800", "--quality", "90"]),
+            parse(&["gitpic", "a.png", "--max-width", "800", "--quality", "90"]).upload_args(),
             &cfg,
         );
         assert_eq!((overridden.max_width, overridden.quality), (800, 90));
-        let inherited = resolve_compress(&parse(&["gitpic", "a.png"]), &cfg);
+        let inherited = resolve_compress(parse(&["gitpic", "a.png"]).upload_args(), &cfg);
         assert_eq!((inherited.max_width, inherited.quality), (100, 50));
     }
 
-    #[test]
-    fn content_name_defaults_when_unnamed() {
-        assert_eq!(content_name(None, "png"), "clipboard.png");
+    fn named(explicit: Option<&str>, fallback: ExtFallback<'_>) -> String {
+        display_name(explicit, b"", fallback).expect("fixed / file fallback")
     }
 
     #[test]
-    fn content_name_keeps_an_explicit_stem() {
-        assert_eq!(content_name(Some("shot"), "png"), "shot.png");
-        assert_eq!(content_name(Some("shot.png"), "png"), "shot.png");
+    fn clipboard_defaults_when_unnamed() {
+        assert_eq!(named(None, ExtFallback::Fixed("png")), "clipboard.png");
     }
 
     #[test]
-    fn content_name_rewrites_a_mismatched_extension() {
+    fn clipboard_keeps_an_explicit_stem() {
+        assert_eq!(named(Some("shot"), ExtFallback::Fixed("png")), "shot.png");
+        assert_eq!(
+            named(Some("shot.png"), ExtFallback::Fixed("png")),
+            "shot.png"
+        );
+    }
+
+    #[test]
+    fn clipboard_rewrites_a_mismatched_extension() {
         // Regression: the bytes are always PNG, so honouring ".jpg" published
         // PNG data at a .jpg path, which GitHub serves as image/jpeg.
-        assert_eq!(content_name(Some("shot.jpg"), "png"), "shot.png");
-        assert_eq!(content_name(Some("shot.webp"), "png"), "shot.png");
+        assert_eq!(
+            named(Some("shot.jpg"), ExtFallback::Fixed("png")),
+            "shot.png"
+        );
+        assert_eq!(
+            named(Some("shot.webp"), ExtFallback::Fixed("png")),
+            "shot.png"
+        );
     }
 
     #[test]
-    fn content_name_falls_back_on_an_unusable_name() {
-        assert_eq!(content_name(Some(""), "png"), "clipboard.png");
-        assert_eq!(content_name(Some(".png"), "png"), "clipboard.png");
+    fn clipboard_falls_back_on_an_unusable_name() {
+        assert_eq!(named(Some(""), ExtFallback::Fixed("png")), "clipboard.png");
+        assert_eq!(
+            named(Some(".png"), ExtFallback::Fixed("png")),
+            "clipboard.png"
+        );
     }
 
     fn file_input(name: &str) -> InputImage {
@@ -666,6 +714,18 @@ mod tests {
         reject_dead_cdn_link(LinkKind::Raw, "main").expect("nothing wrong here");
     }
 
+    #[test]
+    fn an_escaping_path_template_is_refused_before_any_credential() {
+        // Same shape as `reject_dead_cdn_link`: a usage error here means `run`
+        // never reaches `auth::token()`. `{name}` cannot inject `..` (slugify).
+        let err = reject_unsafe_path_template("../x/{name}.{ext}").expect_err("must be refused");
+        assert_eq!(err.code, crate::error::ErrorCode::Usage);
+        assert!(err.message.contains(".."), "{}", err.message);
+        reject_unsafe_path_template("images/{name}.{ext}").expect("ordinary template is fine");
+        reject_unsafe_path_template("images/{year}/{month}/{hash8}-{name}.{ext}")
+            .expect("the default is fine");
+    }
+
     /// Real magic bytes, so `image::guess_format` is exercised rather than mocked.
     fn png_bytes() -> Vec<u8> {
         let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
@@ -688,22 +748,34 @@ mod tests {
         // `cat photo.jpg | gitpic --stdin` published JPEG bytes at a `.png` path and
         // GitHub served them as image/png. This is the same defect 9ee5320 fixed for
         // `paste --name shot.jpg`, on the source it missed.
-        assert_eq!(stdin_name(None, &jpeg_bytes()).unwrap(), "clipboard.jpg");
-        assert_eq!(stdin_name(None, &png_bytes()).unwrap(), "clipboard.png");
-        assert_eq!(stdin_name(None, &gif_bytes()).unwrap(), "clipboard.gif");
+        assert_eq!(
+            display_name(None, &jpeg_bytes(), ExtFallback::Stdin).unwrap(),
+            "clipboard.jpg"
+        );
+        assert_eq!(
+            display_name(None, &png_bytes(), ExtFallback::Stdin).unwrap(),
+            "clipboard.png"
+        );
+        assert_eq!(
+            display_name(None, &gif_bytes(), ExtFallback::Stdin).unwrap(),
+            "clipboard.gif"
+        );
     }
 
     #[test]
     fn stdin_takes_the_stem_from_name_but_never_the_extension() {
         // The user names the file; the bytes decide the type.
         assert_eq!(
-            stdin_name(Some("photo.png"), &jpeg_bytes()).unwrap(),
+            display_name(Some("photo.png"), &jpeg_bytes(), ExtFallback::Stdin).unwrap(),
             "photo.jpg",
             "a wrong extension must be corrected, not honoured"
         );
-        assert_eq!(stdin_name(Some("shot"), &png_bytes()).unwrap(), "shot.png");
         assert_eq!(
-            stdin_name(Some("dir/shot.gif"), &png_bytes()).unwrap(),
+            display_name(Some("shot"), &png_bytes(), ExtFallback::Stdin).unwrap(),
+            "shot.png"
+        );
+        assert_eq!(
+            display_name(Some("dir/shot.gif"), &png_bytes(), ExtFallback::Stdin).unwrap(),
             "shot.png"
         );
     }
@@ -712,13 +784,35 @@ mod tests {
     fn unidentifiable_stdin_bytes_ask_for_a_name_instead_of_guessing() {
         // Calling it `.png` would be a lie about the content; the previous
         // behaviour did exactly that.
-        let err = stdin_name(None, b"this is not an image").expect_err("must be rejected");
+        let err = display_name(None, b"this is not an image", ExtFallback::Stdin)
+            .expect_err("must be rejected");
         assert_eq!(err.code, crate::error::ErrorCode::Usage);
         assert!(err.message.contains("--name"), "{}", err.message);
-        // With a name, the user has asserted the extension and it stands.
+        // With an extension, the user has asserted the type and it stands.
         assert_eq!(
-            stdin_name(Some("blob.bin"), b"this is not an image").unwrap(),
+            display_name(
+                Some("blob.bin"),
+                b"this is not an image",
+                ExtFallback::Stdin
+            )
+            .unwrap(),
             "blob.bin"
         );
+        assert_eq!(
+            display_name(
+                Some("shot.jpg"),
+                b"this is not an image",
+                ExtFallback::Stdin
+            )
+            .unwrap(),
+            "shot.jpg"
+        );
+        // Stem-only `--name shot` used to return `"shot"`, then `render_path`
+        // defaulted `{ext}` to `png` — the same class of bug as `paste --name
+        // shot.jpg` publishing JPEG as PNG.
+        let err = display_name(Some("shot"), b"this is not an image", ExtFallback::Stdin)
+            .expect_err("must be rejected");
+        assert_eq!(err.code, crate::error::ErrorCode::Usage);
+        assert!(err.message.contains("--name"), "{}", err.message);
     }
 }
