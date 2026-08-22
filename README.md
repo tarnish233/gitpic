@@ -22,7 +22,7 @@ brew install gh && gh auth login        # 前置，一次即可
 brew install tarnish233/tap/gitpic      # App + 终端命令
 ```
 
-拖一张图到菜单栏图标，或从菜单里选文件、上传剪贴板里的图 —— 链接直接进剪贴板，成功与失败都走
+从菜单里选文件上传，或上传剪贴板里的图 —— 链接直接进剪贴板，成功与失败都走
 系统通知。设置窗口有四页：图床（仓库、连通性测试）、上传（路径模板、链接形态、压缩）、历史
 （带缩略图，一键复制）、关于。
 
@@ -86,7 +86,7 @@ gitpic big.jpg --compress --quality 80       # JPEG 质量
 ```bash
 gitpic init                              # 交互式初始化
 gitpic config get                        # 查看全部
-gitpic config set github.repo owner/name # 改一项
+gitpic config set github.repo owner/name # 改一项，也可一次多项
 gitpic config path                       # 配置文件在哪
 gitpic config edit                       # 用 $EDITOR 打开
 ```

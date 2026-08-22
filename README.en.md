@@ -24,9 +24,9 @@ brew install gh && gh auth login        # prerequisite, once
 brew install tarnish233/tap/gitpic      # the app, plus the terminal command
 ```
 
-Drag an image onto the menu-bar icon, or use the menu to pick a file or upload whatever
-is on the clipboard — the link goes straight to the clipboard, and both success and
-failure are reported as system notifications. The settings window has four panes: 图床
+Use the menu to pick a file, or upload whatever is on the clipboard — the link goes
+straight to the clipboard, and both success and failure are reported as system
+notifications. The settings window has four panes: 图床
 (repository, connectivity test), 上传 (path template, link form, compression), 历史
 (history, with thumbnails and one-click copy), and 关于.
 
@@ -98,7 +98,7 @@ gitpic big.jpg --compress --quality 80       # JPEG quality
 ```bash
 gitpic init                              # interactive setup
 gitpic config get                        # show everything
-gitpic config set github.repo owner/name # change one key
+gitpic config set github.repo owner/name # one key, or several KEY VALUE pairs
 gitpic config path                       # where the file is
 gitpic config edit                       # open it in $EDITOR
 ```
