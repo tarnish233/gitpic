@@ -1,9 +1,17 @@
-# gitpic
+<p align="center">
+  <img src="./docs/assets/icon.png" alt="GitPic" width="128">
+</p>
 
-[简体中文](./README.md) | **English**
+<h1 align="center">gitpic</h1>
 
-Upload a local or clipboard image to a GitHub repository used as an image host, get a
-Markdown link, and have it copied to your clipboard.
+<p align="center">
+  Upload a local or clipboard image to a GitHub repository used as an image host, get a
+  Markdown link, and have it copied to your clipboard.
+</p>
+
+<p align="center">
+  <a href="./README.md">简体中文</a> · <strong>English</strong>
+</p>
 
 The menu-bar app and the command line are two faces of one thing: same version, same
 config, same upload history. Credentials come from the GitHub CLI (`gh`), and **no secret
