@@ -7,10 +7,15 @@ import Foundation
 ///
 /// - `.idle` existed to reset a transient icon on a timer. Reset is now driven by
 ///   the upload finishing, so there is nothing to schedule and nothing to cancel.
-/// - `.hovering` existed to open the notch on hover. The status-item drop target
-///   needs no hover state of its own: returning `.copy` from `draggingEntered`
-///   makes the system draw the copy badge on the cursor, which is the whole of the
-///   hover feedback.
+/// - `.hovering` existed to open the notch on hover. The status-item icon *does* now
+///   change for an accepted hover, but as ``StatusIcon.dropTargeted`` and not as a
+///   case here: hovering is not a stage of an upload — no upload exists yet, and the
+///   drag may still be refused or dropped somewhere else — so putting it in this enum
+///   would force every `switch` over an upload's progress to answer for a state in
+///   which nothing is being uploaded. The line this replaces claimed the cursor's copy
+///   badge was "the whole of the hover feedback"; it is still the clearest part of it,
+///   but it rides the cursor and looks the same over every copy destination on screen,
+///   so it never marked *this* icon as the one that would take the file.
 public enum UploadReport: Equatable, Sendable {
     /// An upload is in flight. Carries the file count because the file picker still
     /// allows a multiple selection even though a drag accepts only one.
