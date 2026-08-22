@@ -4,6 +4,30 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.13.1] - 2026-08-22
+
+### 边栏不再折叠：那个按钮对标错了窗口
+
+### 修复
+
+- **设置窗口的边栏不再能折叠，那个折叠按钮也删掉了。** 隐藏和展开它是会抽的:展开的瞬间详情内容
+  还按折叠状态的旧宽度布局,被挤出窗口右边缘裁掉;工具栏同时按变窄后的区域计算,放不下就长出一个
+  `»` 溢出指示符,一闪又没。两个现象一个根因,而这一版的做法是**删掉这个操作而不是修它的动画**。
+- **这推翻了 0.11.2 里 `192566c` 的决定,而理由不止是那个 bug。** 那个提交加回按钮的论据是"缺少边栏
+  折叠按钮不符合平台惯例",举的例子是 Passwords 和 Mail。但那两个是带可拖拽边栏的**内容浏览器**,
+  而这个窗口不是照它们做的——它照的是 **System Settings**,这句话在同一个源文件里已经写过两次,
+  而 **System Settings 根本没有边栏折叠按钮**。四个固定面板不需要它,当初类比错了对象。
+- **删的是三样东西,所以这个操作是"没有了"而不是"藏起来了"**:`columnVisibility` 状态、
+  `NavigationSplitView` 上的绑定,以及 `.toolbar(removing: .sidebarToggle)` 拿掉按钮本身。在构建好
+  的 bundle 上实测:工具栏从 6 个按钮变 5 个,里面没有 隐藏边栏／显示边栏;菜单栏没有「显示」菜单,
+  所以既没有菜单项也没有 ⌃⌘S。
+- **一个遗留物记在注释里而不是默默删掉**,因为它会咬到以后任何想再加折叠的人:`.frame(width: 200)`
+  同时压在边栏的内容和它的列上。写它的时候无害——那时边栏根本不能折叠——但一旦能折叠,每次折叠
+  都是在把一个列从 200pt 动画到 0,而它的内容被用绝对点数告知"只能是 200 宽"。没有任何宽度同时满
+  足这两条指令,所以过渡没有平滑的路可走。`navigationSplitViewColumnWidth` 本来就是全部所需,现在
+  留下的就是它。
+- 代价写在注释里:那 200pt 现在是**永久占用**的,小屏幕拿不回来。这和 System Settings 给的条件一样。
+
 ## [0.13.0] - 2026-08-22
 
 ### 反馈回到动作发生的地方
@@ -1176,7 +1200,8 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic/compare/v0.13.0...HEAD
+[未发布]: https://github.com/tarnish233/gitpic/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.1
 [0.13.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.0
 [0.12.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.12.0
 [0.11.5]: https://github.com/tarnish233/gitpic/releases/tag/v0.11.5
