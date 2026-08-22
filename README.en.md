@@ -2,142 +2,102 @@
 
 [简体中文](./README.md) | **English**
 
-Upload local or clipboard images to a GitHub repository (used as an image host)
-and get a Markdown link — instantly copied to your clipboard.
+Upload a local or clipboard image to a GitHub repository used as an image host, get a
+Markdown link, and have it copied to your clipboard.
 
-Human-friendly on the terminal, machine-friendly (`--json`) for scripts and AI
-agents. The program is a single binary; authentication is delegated to GitHub CLI (`gh`).
+The menu-bar app and the command line are two faces of one thing: same version, same
+config, same upload history. Credentials come from the GitHub CLI (`gh`), and **no secret
+is ever stored in the config file**.
 
-## Demo
+## GitPic.app (macOS menu bar)
 
-```console
-$ gitpic init
-gitpic init — configure your GitHub image host
-
-Credentials come from `gh auth token`.
-Run `gh auth login` once if you have not already.
-
-Target repo (owner/name): your-name/img
-Branch [main]:
-Link kind (cdn|raw) [cdn]:
-
-✓ saved config to /Users/you/.config/gitpic/config.toml
-
-$ gitpic ~/Desktop/shot.png
-✓ uploaded shot
-![shot](https://cdn.jsdelivr.net/gh/your-name/img@main/images/2026/07/a1b2c3d4-shot.png)
-
-$ gitpic list
-2026-07-23  shot
-  https://cdn.jsdelivr.net/gh/your-name/img@main/images/2026/07/a1b2c3d4-shot.png
+```bash
+brew install gh && gh auth login        # prerequisite, once
+brew install tarnish233/tap/gitpic      # the app, plus the terminal command
 ```
 
-## Install
+Drag an image onto the menu-bar icon, or use the menu to pick a file or upload whatever
+is on the clipboard — the link goes straight to the clipboard, and both success and
+failure are reported as system notifications. The settings window has four panes: 图床
+(repository, connectivity test), 上传 (path template, link form, compression), 历史
+(history, with thumbnails and one-click copy), and 关于.
 
-The CLI and the menu-bar app are two names in Homebrew but you only need **one** of
-them: the cask **`gitpic_app`** (app *and* the terminal command, below) or the formula
-**`gitpic_cli`** (command line only). Same version, same source, and the command is
-`gitpic` either way.
+To get started, open the settings window and fill in owner / repo / branch — or run
+`gitpic init` in a terminal.
 
-**Homebrew (macOS/Linux — adds it to `PATH` and installs shell completions)**
+> Apple Silicon only, macOS 14+. The app is locally signed and not notarised by Apple —
+> installing with brew clears the quarantine attribute for you. If you install by hand
+> from the [releases page](https://github.com/tarnish233/gitpic/releases), clear it
+> yourself or the app will not open:
+>
+> ```bash
+> unzip GitPic-<version>-macos-arm64.zip -d /Applications/
+> xattr -dr com.apple.quarantine /Applications/GitPic.app
+> ```
+
+## Command line
+
+**Installing the app already gives you the command line.** The cask links the `gitpic`
+embedded in the app to `$(brew --prefix)/bin/gitpic` and generates bash, zsh and fish
+completions — the terminal and the app run the same file, so upgrading the app *is*
+upgrading the command and the two cannot be at different versions. Config and history are
+shared too: change the repository in the app and the terminal sees it immediately, and
+the other way round.
+
+For the command line alone, or on Linux / Intel Mac / CI:
 
 ```bash
 brew install tarnish233/tap/gitpic_cli
 ```
 
-Use this if you want the command line only. If you install GitPic.app you already have
-`gitpic` in the terminal (see below) and do not need this — installing both makes them
-compete for the same `bin/gitpic`.
+**Do not install both.** They compete for the same `bin/gitpic` and the same three
+completions, and whichever goes second skips linking (a formula installed second ends
+with `brew link` failing). Uninstall one before switching.
 
-> The formula used to be called `gitpic`. The old name still installs (the tap
-> carries a rename map), and an existing install is migrated by `brew update` /
-> `brew upgrade`, or by `brew migrate gitpic` on demand. The migration only renames
-> the directory in the Cellar — the command, the completion scripts and the
-> `/opt/homebrew/bin/gitpic` symlink are unchanged.
+Other ways: download the archive for your platform from the
+[releases page](https://github.com/tarnish233/gitpic/releases) and unpack `gitpic`
+(macOS, Linux and Windows are all built by CI on `v*` tags; on macOS run
+`xattr -d com.apple.quarantine ./gitpic`), or build from source with
+`cargo install --path .` (needs Rust 1.88+).
 
-**Prebuilt binary**
+Homebrew installs all three completions for you (reopen the terminal for zsh). For a
+manual install, generate them yourself: `gitpic completion zsh > ~/.zfunc/_gitpic`, and
+likewise for bash and fish.
 
-Download the archive for your platform from the
-[releases page](https://github.com/tarnish233/gitpic/releases). On macOS,
-clear the quarantine flag on first run:
-
-```bash
-tar -xzf gitpic-aarch64-apple-darwin.tar.gz     # Apple Silicon
-xattr -d com.apple.quarantine ./gitpic 2>/dev/null
-chmod +x ./gitpic && mv ./gitpic ~/.local/bin/  # ensure ~/.local/bin is on PATH
-```
-
-> Intel Mac: `x86_64-apple-darwin`. Linux: `x86_64-unknown-linux-gnu`. Windows is
-> a `.zip` containing `gitpic.exe`.
-
-**From source** (needs Rust 1.88 or newer)
+### Usage
 
 ```bash
-cargo install --git https://github.com/tarnish233/gitpic
+gitpic screenshot.png            # upload → print Markdown → copy to clipboard
+gitpic a.png b.png               # several at once
+gitpic paste                     # upload the image on the clipboard
+cat img.png | gitpic --stdin     # extension decided from the bytes
+gitpic list                      # recent uploads (local history)
+gitpic doctor                    # check gh auth and repository permissions
+gitpic completion zsh            # print a completion script
+gitpic skill install             # install the agent skill (below)
+
+gitpic photo.jpg -q -f url       # print the URL only
+gitpic photo.jpg --json          # structured output (scripts / agents)
+gitpic photo.jpg --link raw      # raw.githubusercontent.com instead of jsDelivr
+
+gitpic big.png --compress                    # compress before uploading
+gitpic big.png --compress --max-width 1600   # resize to width <= 1600
+gitpic big.jpg --compress --quality 80       # JPEG quality
 ```
 
-### GitPic.app (optional macOS menu-bar app)
+### Config
 
 ```bash
-brew install --cask tarnish233/tap/gitpic_app   # then: brew upgrade --cask gitpic_app
+gitpic init                              # interactive setup
+gitpic config get                        # show everything
+gitpic config set github.repo owner/name # change one key
+gitpic config path                       # where the file is
+gitpic config edit                       # open it in $EDITOR
 ```
 
-It carries the same version as the CLI and embeds that same `gitpic` build, and the
-cask links that copy to `$(brew --prefix)/bin/gitpic` and generates the bash, zsh and
-fish completions — so **installing the app installs the command line too**: `gitpic` is
-in the terminal, the formula is not needed, and the command cannot be a different
-version from the app (upgrading one upgrades both).
-
-The config file and the upload history are shared: change the repository in the app and
-the terminal follows, and vice versa.
-
-Install the formula instead if you want the command line only, or you are on Linux or an
-Intel Mac. **Do not install both** — they compete for the same `bin/gitpic` and the same
-three completions, and whichever arrived first keeps them: the formula added second ends
-with a failed `brew link` (installed but unlinked), the cask added second prints
-`skipping link` and `Will not overwrite`. Uninstall one before switching, and after
-switching *from* the formula run `brew reinstall --cask gitpic_app` so the links it
-skipped get made.
-
-Upload the clipboard image or pick files from the menu-bar icon; the link lands on
-your clipboard. The settings window edits the image-host repository and the upload
-options, and browses history.
-
-Or take `GitPic-<version>-macos-arm64.zip` from a
-[release](https://github.com/tarnish233/gitpic/releases) and install it yourself.
-The app is ad-hoc signed and not notarised by Apple, so a manual install has to clear
-the quarantine flag before it will open (the cask does this step for you):
-
-```bash
-unzip GitPic-<version>-macos-arm64.zip -d /Applications/
-xattr -dr com.apple.quarantine /Applications/GitPic.app
-```
-
-> Apple Silicon only. Still needs GitHub CLI, logged in:
-> `brew install gh && gh auth login`.
-
-## Setup
-
-Credentials come only from the [GitHub CLI](https://cli.github.com), so
-**no secret is stored in the config file**:
-
-```bash
-gh auth login          # once; the token lives in your system keyring
-gitpic init            # asks for repo/branch/link kind only, never a token
-```
-
-Whenever GitHub access is needed, `gitpic` runs
-`gh auth token --hostname github.com`. `GITPIC_TOKEN` is no longer read and the
-`github.token` config key is no longer supported. When upgrading, remove any
-legacy `token` line and run `gh auth login`; otherwise strict config validation
-reports `CONFIG_INVALID`.
-
-> **Scope caveat**: `gh`'s OAuth token may be broader than what writing to one
-> image repo needs. Use `gh auth status` to inspect the active account and login.
-
-Config lives at `~/.config/gitpic/config.toml` (honors `$XDG_CONFIG_HOME`).
-You can hand-write it or generate it with `gitpic init`. Note there is no `token`
-key, so this file is safe to keep in a synced dotfiles repo:
+Config lives at `~/.config/gitpic/config.toml` (honours `$XDG_CONFIG_HOME`), history at
+`~/.local/share/gitpic/history.jsonl` (honours `$XDG_DATA_HOME`). There is no token key
+in the config, which is what makes the file safe to keep in a dotfiles repo:
 
 ```toml
 [github]
@@ -150,165 +110,92 @@ path_template = "images/{year}/{month}/{hash8}-{name}.{ext}"
 format        = "md"    # md | html | url — the default for `--format`
 link_kind     = "cdn"   # cdn (jsDelivr) | raw — the default for `--link`
 dedup         = true
-auto_copy     = true    # copy the link after an upload; the app honours it too
-                        # (never written in --json / --quiet)
+auto_copy     = true    # copy after upload; the app honours it too (`--json` / `--quiet` never copy)
 compress      = false
-max_width     = 0        # 0 = keep original
-quality       = 82       # JPEG quality when compressing (1-100)
-```
-
-The upload target and preferences can also be overridden with environment
-variables (credentials cannot; CLI flags still take priority):
-
-```bash
-export GITPIC_REPO="your-name/img"     # owner/name (or just name, keeping the owner)
-export GITPIC_OWNER="your-name"        # optional: override only the owner
-export GITPIC_BRANCH="main"            # optional (default: main)
-export GITPIC_LINK="cdn"               # optional: cdn (jsDelivr) | raw
-```
-
-Precedence is **CLI flags > environment variables > config file** — so
-`GITPIC_LINK=raw gitpic a.png --link cdn` produces a cdn link. A variable that is
-blank is ignored (falling through to the config file), and surrounding whitespace
-is trimmed.
-
-Upload history is stored at `~/.local/share/gitpic/history.jsonl`
-(honors `$XDG_DATA_HOME`).
-
-## Usage
-
-```bash
-gitpic screenshot.png            # upload, print markdown, copy to clipboard
-gitpic a.png b.png               # batch upload
-gitpic paste                     # upload the image on your clipboard
-cat img.png | gitpic --stdin          # extension comes from the bytes
-gitpic doctor                    # verify gh authentication + repo access
-gitpic list                      # show recent uploads (local history)
-gitpic completion zsh            # print shell completion script
-gitpic skill install             # install the agent skill (see below)
-
-# output control
-gitpic photo.jpg -q -f url       # only print the URL
-gitpic photo.jpg --json          # structured JSON (for scripts / agents)
-gitpic photo.jpg --link raw      # use raw.githubusercontent.com
-
-# compression / resizing
-gitpic big.png --compress                    # compress before upload
-gitpic big.png --compress --max-width 1600   # resize so width <= 1600
-gitpic big.jpg --compress --quality 80       # JPEG quality
-```
-
-## Config keys
-
-```bash
-gitpic config path
-gitpic config get                        # show all settings
-gitpic config set github.repo owner/name
-gitpic config set upload.link_kind raw
-gitpic config set upload.compress true
-gitpic config set upload.max_width 1600
-gitpic config set upload.quality 82
-gitpic config edit                       # open the file in $EDITOR
+max_width     = 0       # 0 = no resizing
+quality       = 82      # JPEG quality when compressing (1-100)
 ```
 
 `path_template` placeholders: `{year} {month} {day} {hash} {hash8} {name} {ext}`
 
-`--json` answers with an `ok`-bearing envelope on every subcommand, failures
-included, with three exceptions: the interactive `gitpic init` **rejects** it;
-`gitpic completion <shell>` ignores it and prints the raw shell script; and
-`gitpic config edit` ignores it and hands stdout to `$EDITOR`, whose output is not
-JSON. `--quiet` only changes the output of the upload path and `gitpic list` (one
-link per line); `gitpic doctor` and `gitpic skill install` still print human check
-marks and prose under it (`config get`, `config path` and `skill path` already emit
-machine-usable output).
+The upload target can also be overridden by environment variables (never credentials):
+`GITPIC_REPO`, `GITPIC_OWNER`, `GITPIC_BRANCH`, `GITPIC_LINK`. Precedence is
+**flags > environment > config file**.
 
-Key names in the config file are validated strictly: a misspelled key or section
-(`dedupe`, `[uplaod]`) is a `CONFIG_INVALID` error naming the file and the rejected
-key rather than a value that is silently ignored (no line number, so a source line
-that might hold a credential is never echoed). `gitpic config path` and
-`gitpic config edit` keep working in that state so you can fix the file.
+Key names are validated strictly: a misspelled key or table (`dedupe`, `[uplaod]`) is
+reported as `CONFIG_INVALID` naming the rejected key, rather than being ignored in
+silence. `gitpic config path` and `config edit` still work in that state, so you can fix
+the file.
 
-## Shell completion
+### Credentials
 
-Installed automatically when you use Homebrew (`bash`, `zsh`, `fish`). For manual
-installs, generate the script yourself:
+`gitpic` calls `gh auth token` every time it needs GitHub; the token lives in the system
+keyring. `GITPIC_TOKEN` and a `github.token` config key are both unsupported — upgrading
+from an older version, delete the `token` line and run `gh auth login` once, or you will
+get `CONFIG_INVALID`.
 
-```bash
-gitpic completion zsh  > ~/.zfunc/_gitpic     # then autoload
-gitpic completion bash > /etc/bash_completion.d/gitpic
-gitpic completion fish > ~/.config/fish/completions/gitpic.fish
-```
+> A `gh` OAuth token may be broader than "write files to one image-host repo" needs. Use
+> `gh auth status` to see which account is in play.
 
-## Downloads
+### Exit codes and `--json`
 
-Prebuilt binaries for macOS (Apple Silicon + Intel), Linux, and Windows are
-attached to each [GitHub Release](../../releases) (built by CI on `v*` tags).
+`0` ok · `1` other error · `2` usage · `3` config missing · `4` auth failed · `5` network
+· `6` local file not found · `7` permission denied · `8` remote resource not found ·
+`9` rate limited · `10` config file unusable.
 
-## Exit codes
+`3` means "nothing configured yet" (run `gitpic init`); `10` means "configured, but the
+file is broken" (run `gitpic config edit`). They need different fixes, so they get
+different codes.
 
-`0` ok · `1` other error · `2` usage · `3` config missing · `4` auth failed ·
-`5` network · `6` local file not found · `7` permission denied ·
-`8` remote resource not found · `9` rate limited · `10` config file unusable
+`--json` returns an envelope carrying `ok` on every subcommand, failures included, with
+three exceptions: interactive `gitpic init` **refuses** it; `gitpic completion <shell>`
+ignores it and prints the shell script; `gitpic config edit` hands stdout to `$EDITOR`.
+Argument-parsing errors also come back as `{ "ok": false, "error": … }` under `--json`.
 
-`3` means "nothing configured yet" (run `gitpic init`); `10` means "configured,
-but the file is broken" (run `gitpic config edit`). They need different fixes, so
-they get different codes.
+## Agent skill
 
-## Agent integration
-
-`gitpic` ships an [Agent Skill](./skills/gitpic/SKILL.md) that teaches Claude Code,
-Codex, and other agents how to call it. Install it one of these ways.
-
-**From the CLI (any agent)**
-
-The skill is embedded in the binary, so the installed copy always matches the
-`gitpic` version you are running — re-run this after `brew upgrade gitpic_cli` to
-resync:
+`gitpic` ships an [Agent Skill](./skills/gitpic/SKILL.md) telling Claude Code, Codex and
+others how to drive it. The skill document is compiled into the binary, so the version you
+install always matches the `gitpic` you are running.
 
 ```bash
-gitpic skill install                 # pick from the detected agents
+gitpic skill install                 # choose among the agents it detects
 gitpic skill install --agent codex   # or name one
-gitpic skill install --dir DIR       # or an explicit skills directory
-gitpic skill path                    # show where it would be written
-gitpic skill print                   # dump the document to stdout
+gitpic skill install --dir DIR       # or any skills directory
+gitpic skill print                   # write it to stdout
 ```
 
-It detects `~/.claude/skills` and `~/.codex/skills` (honouring
-`CLAUDE_CONFIG_DIR` / `CODEX_HOME`), and prompts before writing. Pass `--yes`,
-`--agent`, or `--dir` in scripts and CI — without a terminal it errors instead
-of guessing.
+It detects `~/.claude/skills` and `~/.codex/skills` (honouring `CLAUDE_CONFIG_DIR` /
+`CODEX_HOME`) and asks before writing. In scripts and CI pass `--yes`, `--agent` or
+`--dir` — with no terminal it errors rather than guessing for you.
 
-**As a Claude Code plugin**
+It can also be installed as a plugin:
 
 ```
-/plugin marketplace add tarnish233/gitpic
+/plugin marketplace add tarnish233/gitpic      # Claude Code
 /plugin install gitpic@gitpic
 ```
 
-**As a Codex plugin**
-
 ```bash
-codex plugin marketplace add tarnish233/gitpic
+codex plugin marketplace add tarnish233/gitpic  # Codex
 codex plugin add gitpic@gitpic
 ```
 
-Always call `gitpic` with `--json` from an agent, plus `--no-copy` on the upload
-commands. `--no-copy` is meaningful only on the upload path (`gitpic <files>`,
-`--stdin`, `paste`); every other subcommand rejects it as a `USAGE` error (exit 2),
-so `gitpic doctor --json --no-copy` fails.
+**Two rules for agents**: always pass `--json`, and add `--no-copy` to uploads.
+`--no-copy` only means something on the upload paths (`gitpic <file>`, `--stdin`,
+`paste`); every other subcommand rejects it as `USAGE` (exit 2) — `gitpic doctor --json
+--no-copy` does fail.
 
-`gitpic doctor` exits non-zero when any check fails; scripts should still parse
-`config_ok`, `token_valid`, and `repo_writable` from its JSON report. An unhealthy
-report also carries an `error` object in the same shape as every other subcommand
-(present exactly when `ok` is false), so "branch missing" (8) and "no write
-permission" (7) can be told apart from stdout alone — no need to depend on the exit
-status, which piping to a parser (`… | jq`) replaces with the parser's own. Argument
-parsing failures also use the standard `{ "ok": false, "error": ... }` envelope when
-`--json` is present.
+`gitpic doctor` exits non-zero when any check fails, but a script should still parse
+`config_ok`, `token_valid` and `repo_writable` out of the JSON: an unhealthy report
+carries the same shape of `error` object as every other subcommand, so "branch does not
+exist" (8) and "no write permission" (7) are distinguishable from stdout alone, without
+relying on the exit code — pipe into `jq` and the exit code becomes `jq`'s own.
 
 ## Changelog
 
-See [CHANGELOG.md](./CHANGELOG.md).
+See [CHANGELOG.md](./CHANGELOG.md); the Chinese version is
+[CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md).
 
 ## License
 

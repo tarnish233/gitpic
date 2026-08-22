@@ -13,21 +13,40 @@
 Docs: `README.md` (中文, default), `README.en.md`, `skills/gitpic/SKILL.md` (agent
 usage), `CHANGELOG.zh-CN.md` (中文, Release source), and `CHANGELOG.md` (English). Keep
 both changelogs aligned for every release. CI lives in `.github/workflows/`.
-The Homebrew formula lives in the separate `tarnish233/homebrew-tap` repo and is
-called **`gitpic_cli`**, not `gitpic`: the formula names the CLI so it cannot be
-read as the app. What it installs is unchanged — the binary, the completions and
-`/opt/homebrew/bin/gitpic` are all still `gitpic`, which is also how GitPic.app
-finds a system CLI. The tap's `formula_renames.json` maps the old name onto the
-new one, so `brew install tarnish233/tap/gitpic` still resolves and an installed keg
-migrates on `brew update` / `brew upgrade` (or `brew migrate gitpic`); don't remove it.
-The app is in the same tap, as the cask **`gitpic_app`** built from the Release's
-`GitPic-<version>-macos-arm64.zip`. That cask also provides the *command*: it links
-the CLI inside the bundle to `bin/gitpic` and generates the completions, so the app
-and the terminal share one binary and cannot be at different versions. The two entries
-therefore compete for `bin/gitpic` — install one, not both — and the formula exists for
-Linux, Intel, and anyone who wants no app. The tap's six-hourly updater bumps the
-formula and the cask together off `releases/latest`, and does not alarm on failure — so
-renaming a release asset here breaks both of them silently.
+Homebrew lives in the separate `tarnish233/homebrew-tap` repo, as **two entries with
+different names on purpose**. The cask is **`gitpic`** (`Casks/gitpic.rb`) and installs
+the app; the formula is **`gitpic_cli`** (`Formula/gitpic_cli.rb`) and installs only the
+binary. The bare name belongs to the cask because that is what most people want, and
+`cask_renames.json` maps the old `gitpic_app` onto it so an installed keg migrates on
+`brew upgrade`; don't remove it. There is no `formula_renames.json` any more — it was
+deleted in 0.11.5 because keeping it made `gitpic` ambiguous between a formula and a
+cask, which Homebrew resolves silently and in favour of the formula.
+
+The cask also provides the *command*: it links the CLI inside the bundle to
+`bin/gitpic` and generates the three completions, so the app and the terminal share one
+file and cannot be at different versions. The two entries therefore compete for
+`bin/gitpic` — install one, not both — and the formula exists for Linux, Intel, CI, and
+anyone who wants no app.
+
+**How the tap learns about a release.** Two paths, and the second one exists because the
+first cannot be trusted alone:
+
+1. `release.yml`'s `publish` job fires a `repository_dispatch` (`gitpic-released`) at
+   the tap the moment the release is up, carrying the version in `client_payload`. The
+   tap follows within seconds. It needs `secrets.TAP_DISPATCH_TOKEN` — a fine-grained
+   PAT limited to the tap with Contents: write, because `GITHUB_TOKEN` cannot reach
+   another repository. The step is guarded on the secret being non-empty and is
+   `continue-on-error`, so a missing or expired token cannot fail a release that has
+   already published.
+2. The tap's six-hourly cron (`17 */6 * * *`) still polls `releases/latest`. **Keep it.**
+   It is what catches whatever the dispatch missed, and it does not alarm on failure —
+   so renaming a release asset here breaks the tap silently, with up to six hours before
+   anyone notices.
+
+The tap asserts that `releases/latest` matches the version the dispatch named, and fails
+loudly when they disagree: publishing and `latest` moving are not one atomic act, and a
+run that started a moment early would pin the tap to the *previous* release and report
+success.
 
 `apps/GitPic/` is a macOS menu-bar app (SwiftUI) that drives the CLI over its
 `--json` contract; `scripts/build-app.sh` builds the bundle with the `gitpic`
