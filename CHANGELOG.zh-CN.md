@@ -4,6 +4,68 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.14.0] - 2026-08-23
+
+### 拖拽上传整体删除，包括菜单栏图标落区
+
+**从这一版起 GitPic.app 不接受任何拖拽。** 往菜单栏图标上拖图片不再上传 —— 这是 0.13.x 一直有的行为，
+现在没了。上传入口剩下三个，都还在：菜单里的**「选择文件上传」**、**「上传剪贴板」**，以及 CLI
+（`gitpic <文件>`，app 和终端共用同一个二进制）。
+
+删掉的原因不是它不工作，而是**这个交互本身别扭**。落区一共做过五种形态，每一种都真的做出来、装上、
+上手拖过：
+
+1. **菜单栏图标本身**（0.13.x 的行为）—— 实测落区只有 **36×29 pt**（图片 20×16，系统左右各补 8pt），
+   而且**把图标调大也没用**：`NSStatusBar.system.thickness` 就是 22 pt，字号提到 `pointSize 17` 也只到
+   42×30。天花板是菜单栏本身。
+2. **拖拽即弹的浮窗**（240×132 pt，出现在光标旁）—— 行程为零，但在 Finder 里挪一张 PNG 也会弹，噪音
+   无法接受。
+3. **屏幕右上角热区** —— 安静了，但要跑到角上。
+4. **图标下方热区** —— 更近，但**看不见的触发区，手停短了就悄无声息什么都不发生**：追踪到真实的瞄准
+   落点是 y = 1015~1032，而热区从 1038 才开始。热区加深到 64pt 之后能触发了，代价是又多一层要解释的
+   行为。
+5. **⌃ 召唤**（面板出现在光标下方 48pt）—— 撞不短、不用瞄、零噪音，技术上也全部验通。但到这一步已经很
+   清楚：为了让"拖一下"这件事成立，需要向用户解释一个键、一段延迟、一块会出现的面板。
+
+结论是不做。**「选择文件上传」和「上传剪贴板」两个入口本来就覆盖了同样的需求，而且没有任何需要解释的
+地方。** 与之一起删除的还有：`StatusIcon` 的悬停态（那个 glyph 只为落区存在）、`ImageDrop`（"落区接受
+什么"的规则）、`Motion.shelfArrival`（面板的淡入）。
+
+**实测数据保留在 `docs/macos-app-plan.md` §C6，标注为已废弃。** 那一节里的约束都还是真的，谁将来想再
+做拖拽都得先跨过它们：菜单栏图标落区的 36×29 pt 上限；`.accessory` app 的非激活面板确实能收到别的 app
+发起的拖拽；全局*鼠标*监听不需要辅助功能授权，但**任何普通键（包括空格）都需要**——两个进程同一时刻
+采样 `CGEventSource.keyState`，受信任的读到 `true`，不受信任的全程 `false`，而这份授权按代码签名记，
+ad-hoc 签名每次构建都变；`NSPasteboard(name: .drag)` 的 `changeCount` 变了**不等于**内容写好了
+（`clearContents()` 自己就递增计数器，而真正写入条目根本不再递增）；以及这块面板不能用 `.behindWindow`
+模糊 —— 120Hz + 4K@2x 上，拖拽图标从它上面经过时每帧都要重算。
+
+### 菜单栏图标跟着正在跑的上传走
+
+以前 `report()` 谁后写谁赢：第二次上传，或从「最近上传」里复制一条，都会把图标打回空闲，
+哪怕另一次上传还在排队。现在是计数；复制走自己的通知，不再打成「GitPic 上传失败」。
+`CONFIG_MISSING` 的 `gh` 探测改到 discovery 队列上，不再占协作线程，并且先把上传中的
+图标拿掉。
+
+之后再读到 `CONFIG_INVALID`，图床 / 上传页不再继续显示上一份能用的表单——「备份并重建」
+会再出现。没有 `gitpic` 时点连通性测试会说找不到，而不是一直停在「还没测过」。
+
+### CLI：坏的 `--path` 在取凭据之前就是 USAGE；409 可重试
+
+`--path ../x/{name}.{ext}` 以前会走到 `gh auth token` 再报 `CONFIG_MISSING`。现在先按
+`USAGE`（退出码 2）拒绝，时机和「分支带 `/` 的 CDN 链接」一样。`--stdin` 读到辨不出格式的
+字节、又只给了词干（`--name shot`）时也是 `USAGE`，不再发明一个假 `.png`；文件上传仍然回退到
+文件自带的扩展名。Contents API 409 是 `NETWORK`（退出码 5），agent 会重试；Windows 写配置
+不再先删掉再 rename。
+
+`gitpic config set` 接受多对 `KEY VALUE`，写一次文件，后面的键校验失败不会把前面的留在
+盘上。App 的保存就是这一次进程。
+
+上传专用 flag（`--compress`、`--no-copy` 等）不再是 global，换来两件事：`gitpic list
+--compress` 是 clap 报错而不是静默忽略，以及**它们现在必须写在子命令后面**。写法是
+`gitpic paste --no-copy`；`gitpic --no-copy paste` 会报 `USAGE`（退出码 2），而不是解析
+通过再被丢掉，`doctor` 前面的 `--repo` 同理。`--json`、`--quiet`、`--verbose` 不动 ——
+它们在哪儿都有意义，写在子命令哪一侧都行。
+
 ## [0.13.2] - 2026-08-22
 
 ### App 改发 dmg，设置界面少说几句话
@@ -1271,7 +1333,8 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic/compare/v0.13.2...HEAD
+[未发布]: https://github.com/tarnish233/gitpic/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.0
 [0.13.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.2
 [0.13.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.1
 [0.13.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.0

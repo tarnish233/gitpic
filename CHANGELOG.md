@@ -4,6 +4,85 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-08-23
+
+### Drag-and-drop upload is gone, menu-bar icon included
+
+**GitPic.app accepts no drags from this version on.** Dragging an image onto the menu-bar
+icon no longer uploads it — that behaviour was there throughout 0.13.x and is now removed.
+The three ways in that remain all still work: **选择文件上传** and **上传剪贴板** in the
+menu, and the CLI (`gitpic <files>` — the app and the terminal share one binary).
+
+It was removed not because it did not work but because **the interaction itself is
+awkward**. Five shapes were built, installed, and dragged onto by hand:
+
+1. **The menu-bar icon itself** (the 0.13.x behaviour) — measured, its hit rectangle is
+   **36 × 29 pt** (a 20 × 16 pt image, padded 8 pt a side), and **a bigger glyph cannot fix
+   it**: `NSStatusBar.system.thickness` is 22 pt, so even `pointSize: 17` only reaches
+   42 × 30. The ceiling is the bar.
+2. **A panel that opened on any image drag** (240 × 132 pt, beside the cursor) — no travel
+   at all, but a PNG moved between two Finder folders opened a panel nobody asked for.
+3. **A hot zone in the screen's top-right corner** — quiet, but it means going to the corner.
+4. **A hot zone under the icon** — closer, but **an invisible trigger region is one a careful
+   gesture stops short of, silently**: traced cursor positions for drags aimed at the icon
+   sat at y = 1015–1032 against a region that began at y = 1038. Deepening it to 64 pt fixed
+   the triggering and added one more behaviour to explain.
+5. **⌃ to summon it** (panel 48 pt below the cursor) — nothing to stop short of, nothing to
+   aim at, no noise, and every technical unknown verified. By then the shape of the cost was
+   clear: to make "just drag it" work, a user has to be told about a key, a delay, and a
+   panel that appears.
+
+So it is not being kept. **选择文件上传 and 上传剪贴板 already cover the same need with
+nothing to explain.** Removed with it: `StatusIcon`'s hover state (that glyph existed only
+for the drop target), `ImageDrop` (the rule for what a drop target accepts), and
+`Motion.shelfArrival` (the panel's fade).
+
+**The measurements survive in `docs/macos-app-plan.md` §C6, marked as a record.** Every
+constraint there is still true and anyone attempting drag upload again has to get past them:
+the 36 × 29 pt ceiling on a status-item drop target; a non-activating panel in an
+`.accessory` app *does* receive a drag another app started; a global **mouse** monitor needs
+no Accessibility grant but **any ordinary key does, the space bar included** — two processes
+sampling `CGEventSource.keyState` at the same instant, the trusted one read `true` and the
+untrusted one `false` throughout, and that grant is keyed to a code signature which ad-hoc
+signing changes on every build; a changed `changeCount` on `NSPasteboard(name: .drag)` does
+**not** mean the pasteboard is written (`clearContents()` bumps the counter by itself and the
+write that follows never bumps it again); and the panel could not use a `.behindWindow` blur —
+on a 120 Hz 4K-at-2x display it has to be re-derived every frame the drag image passes over
+it.
+
+### The menu-bar icon tracks how many uploads are actually running
+
+`report()` used to be last-writer-wins for the glyph: a second upload, or copying a row
+from 最近上传, put the icon back to idle while another upload was still on the queue.
+The icon is a refcount now; copies notify on their own and no longer banner as
+「GitPic 上传失败」. A `CONFIG_MISSING` diagnosis probes `gh` on the discovery queue
+instead of parking a cooperative thread, and clears the in-flight glyph first.
+
+A later `CONFIG_INVALID` no longer hides behind the last good form — 图床 / 上传 show
+「备份并重建」 again. 连通性测试 with no `gitpic` says so instead of sitting on 「还没测过」.
+
+### CLI: a bad `--path` is USAGE before any credential; a 409 is retryable
+
+`--path ../x/{name}.{ext}` used to walk on to `gh auth token` and come back
+`CONFIG_MISSING`. It is now refused as `USAGE` (exit 2) first, the same timing as a
+CDN link on a branch with `/`. On `--stdin`, a stem-only `--name shot` over bytes
+that are not a recognisable image is also `USAGE` instead of publishing a fake
+`.png`; a *file* upload still falls back on the extension the file arrived with. A Contents API 409 is `NETWORK`
+(exit 5) so agents retry it; Windows config save no longer unlinks `config.toml` before
+the rename.
+
+`gitpic config set` takes `KEY VALUE` pairs and writes the file once, so a later
+key that fails validation cannot leave the earlier ones on disk. The app's save is
+that one process.
+
+Upload-only flags (`--compress`, `--no-copy`, …) live on the upload commands instead
+of being global, which buys two things: `gitpic list --compress` is a clap error
+rather than a silent no-op, and **they now have to follow the subcommand.**
+`gitpic paste --no-copy` is the spelling; `gitpic --no-copy paste` is a `USAGE`
+error (2) instead of a flag that parses and is then dropped, and the same goes for
+`--repo` before `doctor`. `--json`, `--quiet` and `--verbose` are untouched — they
+mean something everywhere and still work on either side of the subcommand.
+
 ## [0.13.2] - 2026-08-22
 
 ### The app ships as a dmg, and the settings panes say less
@@ -1701,7 +1780,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.13.2...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.0
 [0.13.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.2
 [0.13.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.1
 [0.13.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.0
