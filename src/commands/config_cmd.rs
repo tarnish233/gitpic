@@ -155,9 +155,16 @@ fn pair_args(pairs: &[String]) -> Result<Vec<(&str, &str)>> {
             "config set expects KEY VALUE pairs; got an odd number of arguments",
         ));
     }
+    // `as_chunks::<2>()`, not `chunks_exact(2)`: clippy 1.98 flags the constant
+    // chunk size (`chunks_exact_to_as_chunks`), and the array pattern is total
+    // where indexing a slice was only safe because of the check above. Stable
+    // since 1.88.0 — exactly this crate's `rust-version`, so the floor cannot be
+    // lowered without this failing to compile.
     Ok(pairs
-        .chunks_exact(2)
-        .map(|c| (c[0].as_str(), c[1].as_str()))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[key, value]| (key.as_str(), value.as_str()))
         .collect())
 }
 
