@@ -4,7 +4,6 @@ use crate::config::Config;
 use crate::error::{AppError, ErrorCode, Result};
 use crate::github::GitHub;
 use crate::output::{ErrorBody, Mode};
-use owo_colors::{OwoColorize, Stream};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -256,21 +255,13 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
     if mode.is_json() {
         crate::output::print_json(&report);
     } else {
-        let mark = |b: bool| {
-            if b {
-                "✓"
-                    .if_supports_color(Stream::Stdout, |t| t.green().to_string())
-                    .to_string()
-            } else {
-                "✗"
-                    .if_supports_color(Stream::Stdout, |t| t.red().to_string())
-                    .to_string()
-            }
-        };
-        crate::output::line(&format!("{} config present", mark(report.config_ok)));
+        crate::output::line(&format!(
+            "{} config present",
+            crate::output::mark(report.config_ok)
+        ));
         crate::output::line(&format!(
             "{} token valid{}",
-            mark(report.token_valid),
+            crate::output::mark(report.token_valid),
             report
                 .login
                 .as_ref()
@@ -279,7 +270,7 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
         ));
         crate::output::line(&format!(
             "{} repo writable{}",
-            mark(report.repo_writable),
+            crate::output::mark(report.repo_writable),
             if report.branch_protected {
                 " (branch protected)"
             } else {
@@ -287,8 +278,10 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
             }
         ));
         if let Some(d) = &report.detail {
-            let note = "note:".if_supports_color(Stream::Stdout, |t| t.yellow().to_string());
-            crate::output::line(&format!("  {note} {d}"));
+            // `output::note`, not a local copy of it: this was the fourth spelling of
+            // `note:`, and the one `json_contract.rs`'s scan for `output::note(` — the
+            // check that keeps advisories out of `-q` — could not see.
+            crate::output::note(d);
         }
     }
     Ok(exit)

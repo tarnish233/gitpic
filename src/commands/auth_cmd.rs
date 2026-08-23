@@ -53,18 +53,6 @@ struct AuthReport {
     error: Option<ErrorBody>,
 }
 
-fn check(ok: bool) -> String {
-    if ok {
-        "✓"
-            .if_supports_color(Stream::Stdout, |t| t.green().to_string())
-            .to_string()
-    } else {
-        "✗"
-            .if_supports_color(Stream::Stdout, |t| t.red().to_string())
-            .to_string()
-    }
-}
-
 // ---------------------------------------------------------------- login
 
 async fn login(
@@ -118,7 +106,10 @@ async fn login(
         .as_deref()
         .map(|l| format!(" as {l}"))
         .unwrap_or_default();
-    crate::output::line(&format!("{} logged in to github.com{who}", check(true)));
+    crate::output::line(&format!(
+        "{} logged in to github.com{who}",
+        crate::output::tick()
+    ));
     crate::output::line(&format!("  stored in: {}", path.display()));
     if let Some(l) = previous.filter(|p| Some(p.as_str()) != stored.login.as_deref()) {
         note(&format!("replaced the credential that was stored for {l}"));
@@ -140,10 +131,13 @@ async fn login(
     // repository listing.
     crate::output::line("");
     if let Err(e) = crate::commands::repos::choose_target(&stored.token).await {
+        // `repos`' own constant, which exists for exactly this and which this had
+        // re-spelled — dropping the `GITPIC_REPO=owner/name` half both other copies
+        // offer.
         note(&format!(
-            "could not list your repositories: {}\n  set the image host with \
-             `gitpic config set github.repo owner/name`",
-            e.message
+            "could not list your repositories: {}\n  {}",
+            e.message,
+            crate::commands::repos::SET_IT_BY_HAND
         ));
     }
     Ok(0)
@@ -430,7 +424,10 @@ async fn status(mode: Mode) -> Result<u8> {
             .as_deref()
             .map(|l| format!(" as {l}"))
             .unwrap_or_default();
-        crate::output::line(&format!("{} github.com{who}", check(report.token_valid)));
+        crate::output::line(&format!(
+            "{} github.com{who}",
+            crate::output::mark(report.token_valid)
+        ));
         if let Some(id) = &report.client_id {
             crate::output::line(&format!("  app: {id}"));
         }
@@ -472,7 +469,11 @@ fn logout(mode: Mode) -> Result<u8> {
         return Ok(0);
     }
     if removed {
-        crate::output::line(&format!("{} removed {}", check(true), path.display()));
+        crate::output::line(&format!(
+            "{} removed {}",
+            crate::output::tick(),
+            path.display()
+        ));
         // There is no fallback source left, so a logout really is a logout — worth
         // saying, because the next upload will fail until someone logs in again.
         note("gitpic now has no credential: run `gitpic auth login` before uploading");

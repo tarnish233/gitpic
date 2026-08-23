@@ -116,7 +116,7 @@ pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
                 });
             } else {
                 let keys = changes.iter().map(|c| c.key).collect::<Vec<_>>().join(", ");
-                crate::output::line(&format!("\u{2713} set {keys} in {shown}"));
+                crate::output::line(&format!("{} set {keys} in {shown}", crate::output::tick()));
             }
         }
         ConfigAction::Edit => {

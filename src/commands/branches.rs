@@ -57,7 +57,7 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
     if branches.is_empty() {
         // Real and recoverable: a repository with no commits has no branches, and an
         // upload to it creates the ref. Not an error, so not reported as one.
-        if !matches!(mode, Mode::Quiet) {
+        if !mode.is_quiet() {
             crate::output::line(&format!(
                 "{spec} has no branches yet — it is empty, and the first upload will \
                  create `{}`.",
@@ -68,7 +68,7 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
     }
 
     for b in &branches {
-        if matches!(mode, Mode::Quiet) {
+        if mode.is_quiet() {
             crate::output::line(&b.name);
             continue;
         }
@@ -96,7 +96,7 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
     // Everything below is commentary, and `-q` exists so a script can read this output:
     // its contract is one branch name per line and nothing else. A `note:` line in that
     // stream is not a stylistic wart, it is a branch name the caller will try to use.
-    if !matches!(mode, Mode::Quiet) {
+    if !mode.is_quiet() {
         if !branches.iter().any(|b| b.name == cfg.github.branch) {
             // The failure this command exists to make visible: push permission on the
             // repository says nothing about whether the ref an upload targets exists,
@@ -112,7 +112,7 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
             crate::output::note("more branches exist than were listed");
         }
     }
-    if branches.iter().any(|b| b.protected) && !matches!(mode, Mode::Quiet) {
+    if branches.iter().any(|b| b.protected) && !mode.is_quiet() {
         // Kept as its own check rather than folded above: it is about the rows that were
         // printed, not about a problem with the configuration.
         let label = "protected".if_supports_color(Stream::Stdout, |t| t.yellow().to_string());

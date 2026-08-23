@@ -260,7 +260,8 @@ fn run_install(agent: Option<AgentKind>, dir: Option<&Path>, yes: bool, mode: Mo
             format!("  ({})", item.agents.join(", "))
         };
         crate::output::line(&format!(
-            "\u{2713} {} {SKILL_NAME} skill v{} \u{2192} {}{suffix}",
+            "{} {} {SKILL_NAME} skill v{} \u{2192} {}{suffix}",
+            crate::output::tick(),
             item.action,
             env!("CARGO_PKG_VERSION"),
             item.path,

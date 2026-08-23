@@ -69,10 +69,27 @@ pub fn is_safe_remote_path(path: &str) -> bool {
             .any(|seg| seg == ".." || seg.is_empty() || seg == ".")
 }
 
-/// Dummy-render a path template the same way `Config::validate` and upload
-/// judge one: `sample.png` plus a 64-char hash. `{name}` cannot inject `..`.
-pub fn template_renders_safe(template: &str) -> bool {
-    is_safe_remote_path(&render_path(template, "sample.png", &"0".repeat(64)))
+/// Judge a path template, returning the bare reason it is unusable.
+///
+/// The one owner of both halves of that judgement: the dummy sample it is made
+/// against (`sample.png` plus a 64-char hash — `{name}` cannot inject `..`, since
+/// slugify keeps only alphanumerics, `-` and `_`), and the sentence describing the
+/// failure. Both used to be written out at each of the two callers, so the sample was
+/// duplicated state that had to stay in sync by hand for the two messages to describe
+/// the same rule, and the sentences had already drifted apart.
+///
+/// The message is bare so the caller can name its own field and attach its own code —
+/// `upload.path_template` / `CONFIG_INVALID` from `Config::validate`, `path template` /
+/// `USAGE` from `--path` — which is the split `Config::validate` already uses for
+/// every other check.
+pub fn check_template(template: &str) -> std::result::Result<(), String> {
+    let sample = render_path(template, "sample.png", &"0".repeat(64));
+    if is_safe_remote_path(&sample) {
+        return Ok(());
+    }
+    Err(format!(
+        "must be repo-relative with no empty or `..` segments (renders to {sample:?})"
+    ))
 }
 
 /// Render the path template.
@@ -274,15 +291,21 @@ mod tests {
 
     #[test]
     fn a_template_is_judged_by_what_it_dummy_renders_to() {
-        assert!(!template_renders_safe("../x/{name}.{ext}"));
-        assert!(!template_renders_safe("../../etc/{name}.{ext}"));
-        assert!(!template_renders_safe("/abs/{name}.{ext}"));
-        assert!(!template_renders_safe("images/{name}//{ext}"));
-        assert!(template_renders_safe(
-            "images/{year}/{month}/{hash8}-{name}.{ext}"
-        ));
-        assert!(template_renders_safe("{name}.{ext}"));
+        for bad in [
+            "../x/{name}.{ext}",
+            "../../etc/{name}.{ext}",
+            "/abs/{name}.{ext}",
+            "images/{name}//{ext}",
+        ] {
+            let why = check_template(bad).expect_err(bad);
+            // The caller prefixes its own field name, so the message has to start
+            // with the verb for `upload.path_template <why>` to read as a sentence.
+            assert!(why.starts_with("must be repo-relative"), "{why}");
+            assert!(why.contains("renders to"), "{why}");
+        }
+        check_template("images/{year}/{month}/{hash8}-{name}.{ext}").expect("the default");
+        check_template("{name}.{ext}").expect("a bare name");
         // `{name}` slugifies `.` to `-`, so it cannot inject a `..` segment.
-        assert!(template_renders_safe("{name}/x.png"));
+        check_template("{name}/x.png").expect("a literal segment after {name}");
     }
 }
