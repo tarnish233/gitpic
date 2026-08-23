@@ -436,6 +436,40 @@ final class AppModel {
         toolState = .missing
     }
 
+    // MARK: - The Finder right-click switch
+
+    /// Whether the Finder right-click item is switched on.
+    ///
+    /// A mirror of system state, not a setting of our own: the truth is the `pbs` entry
+    /// ``FinderService`` reads, and this exists only because `@Observable` cannot watch
+    /// another process's preferences.
+    ///
+    /// Seeded with `true` rather than a real read, deliberately. `AppModel.shared` is
+    /// first touched from `setUpStatusItem()`, so a `FinderService.isEnabled` default
+    /// would put a cross-process preference read (measured 1.9 ms on a cold domain) on
+    /// the launch path — to produce a value nothing reads until 设置 ▸ 上传 opens, which
+    /// calls ``refreshFinderService()`` before showing it anyway. `true` is also the right
+    /// placeholder: it is what the system reports for a service nobody has toggled.
+    private(set) var finderServiceEnabled = true
+
+    /// Re-read the switch from the system. Called whenever the settings window is
+    /// about to show it — System Settings can change the same switch, so a value
+    /// cached since launch would show 开 for an item the user removed an hour ago.
+    func refreshFinderService() {
+        finderServiceEnabled = FinderService.isEnabled
+    }
+
+    /// Flip the switch.
+    ///
+    /// Assigns what was asked for, because ``FinderService/setEnabled`` cannot report
+    /// whether the write survived — see its comment for why the read-back it used to do
+    /// was a tautology. The switch's caption names 系统设置 as the place to check, which
+    /// is the honest substitute for a confirmation this code cannot produce.
+    func setFinderServiceEnabled(_ enabled: Bool) {
+        FinderService.setEnabled(enabled)
+        finderServiceEnabled = enabled
+    }
+
     // MARK: - Telling the user what happened
 
     /// Post an outcome to Notification Center, and log it.

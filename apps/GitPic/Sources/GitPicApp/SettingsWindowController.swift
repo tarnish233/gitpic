@@ -96,6 +96,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // the one answer AppKit does not resolve into "then the next text field".
         window?.makeFirstResponder(nil)
         Task { await AppModel.shared.reload() }
+        // The Finder switch mirrors system state, and System Settings can change it
+        // behind the app's back — so it has to be re-read every time this window is put
+        // on screen. `UploadPane`'s `.onAppear` is not enough and was measured not to be:
+        // `orderOut` emits no `onDisappear`, so neither `makeKeyAndOrderFront` nor a
+        // close-then-`showWindow` re-emits `onAppear`; the window survives closing
+        // (see `windowWillClose`) and `prewarm()` fires `onAppear` for a pane that was
+        // never shown. Without this the toggle could sit stale for the life of the
+        // process — and flipping a stale switch writes the wrong value back.
+        AppModel.shared.refreshFinderService()
     }
 
     /// Closing gives back the activation policy and spends the pane history — but

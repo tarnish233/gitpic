@@ -4,7 +4,7 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [未发布]
 
 ### 只剩 `gitpic auth login` 一条路 —— `gh` 删掉了
 
@@ -106,6 +106,141 @@ Owner / Repo / Branch 三个输入框已经没有了，分支跟着仓库来 —
 并且把 gh 的 stderr 丢掉了，所以 GUI 只能自己再跑一次 `gh auth status` 才能说出点有用的话。只剩一个
 来源就只有一种状态、一个处理办法，而且它已经在 `error.message` 里了 —— 所以 App 现在直接把 CLI 说的话
 显示出来，不再自己推导一遍、然后和 CLI 走偏。
+## [0.15.0] - 2026-08-23
+
+### 选中图片，右键就能上传
+
+**Finder 里选中图片按右键，菜单里多了一项「GitPic 上传至图床」。** 点它走的是和「选择文件
+上传」完全相同的那条路：`gitpic <文件> --json`，完事按当前「格式 / 地址」把链接写进剪贴板，
+再弹通知。多选可以，一次一批。App 没在运行也不要紧 —— 右键会把它拉起来。
+
+**用的是 `NSServices`，不是 Finder 扩展。** 另外两种能往右键菜单里加项的做法都算过账：
+Action 扩展（`com.apple.services`）和 `FIFinderSync` 能带上 App 图标，但前者要在
+`Contents/PlugIns` 里放一个签好名的扩展包 —— SwiftPM 不构建这种目标 —— 后者还得用户自己去
+「系统设置 ▸ 登录项与扩展」里打开，且只在它注册过的目录里生效。两者都需要一张真正的
+Developer ID 才能稳定注册，而这个项目只有 ad-hoc 签名（见 `docs/macos-app-plan.md` C4）。
+`NSServices` 写在 bundle 自己的 `Info.plist` 里，Launch Services 直接读，ad-hoc 签名不妨碍
+它，用户也不用打开任何开关。代价是菜单项没有图标。
+
+**少一个 `NSRequiredContext`，条目就根本不出现 —— 而且其他所有检查都会通过。** 这是这次
+最贵的一个坑。没有这个键，服务照样注册、照样进服务缓存、`NSPerformService` 照样能按名字调起
+它并完成整条上传链路 —— 唯独在 Finder 的右键菜单里不存在。也就是说除了"真的用手右键一次"，
+没有任何一项验证能发现它。
+
+定位方式是在一个 bundle 里同时声明五个变体，每个只和基线差一处，然后看菜单里少了谁：只有
+去掉 `NSRequiredContext` 的那个缺席。顺带排除了几个当时更像元凶的怀疑对象 ——
+`NSPortName` 无害（Safari 和 Xcode 都带它）；`LSUIElement` 无关（这台机器上恰好所有别的
+服务提供者都是有 Dock 图标的普通 app，很容易误判成它）；app 装在隐藏目录 `.claude` 下也无关。
+另外 `NSSendFileTypes = public.image` 本身完全可用，所以"只对图片显示"这个目标不用退让。
+
+**条目在「服务」子菜单里，不在顶层。** 早先这里写的是"应该落在顶层"，依据是 Ghostty 那两项
+当时确实内联显示 —— 那是误读：Finder 按当前服务的数量决定排布，本项加进去之后，Ghostty 自己
+那两项也一起被折进了「服务」子菜单（实测）。位置由 Finder 决定，声明里没有任何键能钉住它，
+所以设置里的说明文字改成告诉用户去哪儿找，而不是承诺一个位置。
+
+**右键上传通常是一次冷启动，为此改了一处上传逻辑。** 服务把 App 拉起来，文件在
+`resolveTools()` 还在找 `gh` 的时候就到了 —— 老代码这时会回一句「正在查找 gitpic，请稍候
+重试」，也就是让人把刚做过的那一步再做一遍。现在 discovery 被存成一个 `Task`，上传先亮起
+状态栏图标、报「开始上传」，**然后**才 `await` runner —— 这个顺序是重点：等待本身正是用户
+否则会体验成"什么都没发生"的那一段。实测冷启动派发时 `upload started` 确实早于 discovery
+的落地记录出现。
+
+「上传剪贴板」也跟着改了。它原先在 discovery 期间会拒绝，而同一秒里右键却会等待并成功 ——
+同样的意图、同样的文件 URL，结果相反，只取决于点了哪个入口。两条路现在都 `await`。
+
+**首次配置的读取也被拉进了这条等待里，否则右键拿到的是错的链接形态。** `finish()` 要读
+`AppModel.savedConfig` 才能解析两个地址、才能遵守 `upload.auto_copy`，而 `reload()` 要经过
+`GitpicRunner` 那道串行门两次（`configPath()` 然后 `loadConfig()`，冷启动时 `configPath` 为
+nil）。上传会挤在这两次之间，门序变成 `configPath` → `upload` → `loadConfig`，于是 `finish()`
+读到空配置：CDN 地址不可用、`form.target` 被强制成 `.raw` 而横幅仍报着用户配置的形态，并且
+**`auto_copy = false` 会被无视**（读不出配置时的兜底是 `true`）。现在 `resolveTools()` 直接
+`await` 首次 reload，所以 discovery 完成即意味着配置已就绪 —— 这是语言层面的顺序保证，不是
+靠时序碰运气。
+
+**非图片会被挡下来，而且这道检查是必需的。** 实测：`NSSendFileTypes` 里的 `public.image`
+只决定菜单里显不显示这一项；派发时 pbs 只检查剪贴板上有没有 `public.file-url` —— 它自己会
+这么说（"Pasteboard contained types (), but service expects types (public.file-url)"）——
+一个 `notes.txt` 就这样一路送到了 App 手里。而 CLI 也不验：`gitpic <文件>` 把拿到的字节原样
+传上去（`src/commands/upload.rs` 只在 `--stdin` 命名时嗅探格式，`imageproc::maybe_compress`
+认不出的格式直接放行）。所以这里是唯一能拒绝的地方，否则一个 PDF 会变成图床仓库里一个真实
+的 commit。
+
+### 设置里有开关
+
+**「上传」页新增「Finder 右键」一节，一个开关管这一项在不在右键菜单里。** 它写的是 macOS
+自己存这件事的地方 —— `pbs` 域里 `NSServicesStatus` 下的一条按服务的记录，也就是「系统设置
+▸ 键盘 ▸ 键盘快捷键 ▸ 服务」那个勾写的同一条。之所以要写到那里去：菜单项来自 bundle 的
+`Info.plist`，App 运行时做什么都拿不掉它，只有这条记录能。
+
+**没有第二份状态。** 开关直接读那条记录，而不是在旁边另存一个自己的标记 —— 否则用户在系统
+设置里关掉之后，GitPic 的开关还会显示"开"。菜单标题本身也不是第二份：`pbs` 用标题做键，所以
+标题从**运行中 bundle 的 `NSServices` 数组**里按 `NSMessage` 反查出来，开关的键在构造上不可能
+和菜单不一致。也因此它即时生效，不跟着右上角「保存」走；它和配置文件无关，所以那一节放在依赖
+配置的分支**外面**，配置读不出来时也还在。
+
+**关掉之后服务端会再确认一次。** pbs 实测仍会把消息派发给一个已关闭的服务，所以
+`ServiceProvider` 自己也查一遍：菜单项已经不在了是常态，但服务缓存没跟上的时候，这一道才是让
+开关的答案仍然为真的东西。（标题改名会孤立旧记录，那种情况这道检查也救不了 —— 只有别改名能。）
+
+**读这条记录踩过两个坑，第二个更要紧。**
+
+`enabled_context_menu` 不是现在的写法。AppKit 自己的诊断字符串把它叫做 *"the older
+'enabled_context_menu' key"* —— 这句连同 `presentation_modes`、`ContextMenu`、`ServicesMenu`、
+`TouchBar` 都能在 macOS 26.5 的 dyld 共享缓存里逐字找到。只认旧键的读法，会在系统设置只写了新键
+时把一个已关闭的服务报成"开"。现在以 `presentation_modes` 为主、旧键兜底、都读不懂才默认为开。
+**新键的值结构是推断的，不是观察到的**：这台机器从没有人切过任何服务（`NSServicesStatus` 回读
+是空字典），所以没有真实条目可看，模式名来自 AppKit 的符号而不是某个 plist。因此读的时候两种
+可能的编码都认，写的时候**只更新已经存在的** `presentation_modes`、绝不凭猜测新建一个。
+
+另一个坑：同一个标志在真实 `pbs.plist` 里可能是布尔、整数，也可能是字符串 ——
+`defaults write … '{enabled_context_menu = 0;}'` 存进去的那个 `0` 是 `NSTaggedPointerString`，
+因为老式 plist 文本里根本没有数字语法。只认 `NSNumber` 会把已关闭的服务读成开着。三种写法现在
+都认，而且字符串只认可识别的值：`NSString.boolValue` 从不返回 nil，会把 `""` 也算成 `false`，
+那样一个读不懂的条目就会**关掉功能**却什么都没从菜单里拿掉 —— 恰好是"读不懂就默认为开"要防的。
+
+**写入是尽力而为，而且它说明了这一点。** 早先这里会回读一次并给调用方一个"是否落地"的标志，
+那是同义反复：回读命中的是刚写过的同一个进程内 CFPreferences 缓存，所以无论底下发生了什么它都
+回显写入值。用 `chflags uchg` 锁住 `pbs.plist` 实测：`CFPreferencesAppSynchronize` 仍返回
+`true`，进程内读到新值，而 `NSDictionary(contentsOfFile:)` 读到旧值。改读文件也不行 —— 写入正常
+时 cfprefsd 通常还没落盘，那样会把好的写入报成失败。所以那条"改不了右键菜单"的假通知删掉了，
+开关的说明文字改为指向系统设置，那是这段代码唯一能诚实提供的东西。
+
+**改动那条记录时会保留同级键。** 原先是整条替换子字典，会连 `key_equivalent` 一起丢掉 ——
+那是用户自己设的服务快捷键（这台机器的 `pbs.plist` 里有 `ServicesShortcutsPresent`，说明确实
+存在）—— 于是把右键项关掉再打开，会静默拿走一个快捷键。
+
+### App
+
+- 状态栏菜单没有变化：右键是第四个入口，前三个（选择文件、剪贴板、CLI）都还在。
+- 失败措辞按情况分开：没有图片说「选中的不是图片：<名字>」（超过三个折成"等 N 个"，因为
+  通知正文会被系统按它自己挑的长度截断），一个文件都没收到说「右键上传没有收到文件」，开关
+  关着时说「右键上传已关闭」—— 走的是中性通知，不是上传失败那条路（那条的横幅标题硬编码为
+  「GitPic 上传失败」，而一个被遵守的设置不是上传失败）。混选里被丢掉的文件现在会单独点名，
+  而不是留下一个跟用户所选数量对不上的成功计数。
+- `~/Library/Logs/GitPic.log` 记下每次右键派发：收到几个、其中几张是图片、跳过了哪些。
+
+CLI 一行没改。
+
+## [0.14.1] - 2026-08-23
+
+### stdin 认不出格式时，报错在让人重做刚做过的事
+
+0.14.0 把「字节认不出 + `--name` 只有词干」判成 `USAGE` —— 这是对的，把它按猜出来的
+`.png` 发上去就等于对内容撒谎 —— 但沿用了「完全没给 `--name`」那一版的措辞：
+*「cannot tell what kind of image this is from the bytes; pass --name to set the
+filename」*。已经传了 `--name shot` 的人读到这句，唯一能想到的下一步正是刚刚失败的那步。
+
+agent 会稳定踩进这个循环，因为 `SKILL.md` 其他地方的规则是「`--name` 给词干，字节给扩展名」，
+还专门写了「不要靠 `--name` 设扩展名」。而认不出格式的字节恰好是这条规则反过来的唯一场景：
+没有别的地方能拿到扩展名，只能由 `--name` 带。
+
+两头都修了。报错现在说清缺的是什么（`--name "shot" carries no extension and these bytes
+are not an image gitpic can identify … e.g. --name shot.bin`），随二进制发布的 skill 则在
+§3 和那条会冲突的规则旁边都写明了这个例外，并给了 agent 真正需要的一句：重试时不要把扩展名
+去掉。skill 是 `include_str!` 编进二进制的，所以要靠这一版才送得出去。
+
+skill 里另外补上：`config set --json` 带 `changes`（每个键一条 `{key, value}`，值是落盘后的），
+只有单对时才保留顶层的 `key`/`value`。
 
 ## [0.14.0] - 2026-08-23
 
@@ -1539,8 +1674,9 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic/compare/v0.14.0...HEAD
-[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.14.0...HEAD
+[未发布]: https://github.com/tarnish233/gitpic/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.15.0
+[0.14.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.1
 [0.14.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.0
 [0.13.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.2
 [0.13.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.1

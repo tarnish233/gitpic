@@ -121,6 +121,48 @@ struct ConfigTrouble: View {
     private var name: String { model.configPath?.lastPathComponent ?? "config.toml" }
 }
 
+/// A switch with a line of explanation under its label.
+///
+/// Beside ``ConfigField`` because it answers the same question for toggles that
+/// `ConfigField` answers for text rows: the shape was being rebuilt by hand at every
+/// call site, and with it the two invariants that are easy to get wrong.
+///
+/// - `.toggleStyle(.switch)` is **explicit and required**. A `Toggle` in a `.grouped`
+///   Form already renders as a switch on macOS, but the style is inherited — one
+///   `.toggleStyle` anywhere up the tree silently turns every one of these into a
+///   checkbox.
+/// - The caption is `.caption` + `.secondary` at `spacing: 2`, which is what keeps rows
+///   in different sections looking like the same control.
+///
+/// `caption` is optional rather than absent for the caption-less rows: an empty caption
+/// would reserve the space, but a `nil` one renders no `Text` at all, so a plain switch
+/// row looks exactly as it did while still going through the one place that spells
+/// `.toggleStyle(.switch)`. Every switch in the app comes through here — a row that
+/// hand-built its own was one `.toggleStyle` up the tree away from becoming a checkbox
+/// while its captioned neighbours stayed switches.
+struct CaptionedToggle: View {
+    let label: String
+    var caption: String?
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            if let caption {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label)
+                    Text(caption)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                // Not a one-child `VStack`: this is the exact view tree the rows that
+                // used a plain `Toggle` had, so adopting this type cannot move them.
+                Text(label)
+            }
+        }
+        .toggleStyle(.switch)
+    }
+}
+
 /// One editable text row in a grouped form.
 ///
 /// Hand-built rather than letting the form label the `TextField`, and both halves

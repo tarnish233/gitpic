@@ -138,6 +138,183 @@ logged in" and "gh failed" into one `CONFIG_MISSING` message with gh's stderr di
 the GUI re-ran `gh auth status` itself to say something actionable. One source means one
 state and one remedy, already in `error.message`, so the app now echoes what the CLI said
 instead of re-deriving it and risking drift.
+## [0.15.0] - 2026-08-23
+
+### Select an image, right-click, upload
+
+**Right-clicking a selected image in Finder now offers 「GitPic 上传至图床」.** It runs
+exactly the path 选择文件上传 already runs — `gitpic <files> --json`, then the link on the
+clipboard in the current 格式 / 地址, then a notification. Multiple selections work as one
+batch. The app does not need to be running: the right-click launches it.
+
+**It is an `NSServices` entry, not a Finder extension.** The other two ways to put an item
+in that menu were both costed. An Action extension (`com.apple.services`) and a
+`FIFinderSync` plug-in can carry the app's icon, but the first needs a signed extension
+bundle in `Contents/PlugIns` — a target SwiftPM does not build — and the second has to be
+switched on by hand in 系统设置 ▸ 登录项与扩展 and only fires inside directories it
+registers. Both need a real Developer ID to register reliably, and this project has only
+ad-hoc signing (`docs/macos-app-plan.md` C4). `NSServices` rides in the bundle's own
+`Info.plist`, where Launch Services reads it, so an ad-hoc signature is no obstacle and
+there is nothing for the user to enable. The cost is that the menu item has no icon.
+
+**Without `NSRequiredContext` the item does not appear — and every other check still
+passes.** This was the expensive one. Omit that key and the service still registers, still
+lands in the services cache, and still answers `NSPerformService` by name all the way
+through a completed upload; it is simply absent from Finder's context menu. Nothing short
+of a human right-clicking can catch it.
+
+It was found by declaring five variants in one bundle, each differing from the baseline by
+exactly one thing, and seeing which one was missing from the menu: only the one with
+`NSRequiredContext` removed. That also cleared the suspects that looked more likely at the
+time — `NSPortName` is harmless (Safari and Xcode both set it); `LSUIElement` is irrelevant
+(easy to misread, since every other services provider installed on this machine happens to
+be a regular Dock app); and living in the hidden `.claude` directory is irrelevant too. And
+`NSSendFileTypes = public.image` works fine, so the images-only restriction cost nothing.
+
+**The item lands in the 服务 submenu, not at the top level.** An earlier version of this
+entry claimed top level, reasoning from Ghostty's two entries, which did render inline at
+the time. That was a misread: Finder lays services out according to how many there are, and
+once this app's entry existed Ghostty's own two moved into a 服务 submenu beside it
+(observed). Placement is Finder's to decide and no key in the declaration pins it, so the
+settings caption now tells the user where to look instead of promising a position.
+
+**A right-click upload is normally a cold launch, and that changed one thing about
+uploading.** The service launches the app, so the files arrive while `resolveTools()` is
+still looking for `gh` — where the old code answered 「正在查找 gitpic，请稍候重试」, which
+asks the user to redo the step they just took. Discovery is now held as a `Task`: an upload
+lights the status icon and reports 「开始上传」 *first*, and only then awaits the runner.
+That order is the point — the wait is exactly the stretch the user would otherwise
+experience as nothing happening. Measured on a cold dispatch, `upload started` really does
+appear ahead of discovery's own launch record.
+
+上传剪贴板 changed with it. It used to refuse during discovery while a right-click in the
+same second waited and succeeded — same intent, same file URLs, opposite outcome, decided
+only by which entry point was used. Both paths await now.
+
+**The first config read was pulled into that same wait, or a right-click gets the wrong link
+form.** `finish()` needs `AppModel.savedConfig` to resolve both addresses and to honour
+`upload.auto_copy`, and `reload()` makes two separate trips through `GitpicRunner`'s serial
+gate (`configPath()` then `loadConfig()`, and `configPath` is nil on a cold launch). The
+upload slots between them, making the gate order `configPath` → `upload` → `loadConfig`, so
+`finish()` saw a nil config: the CDN address unavailable, `form.target` forced to `.raw`
+while the banner still named the configured form, and **`auto_copy = false` ignored**
+(the fallback for an unreadable config is `true`). `resolveTools()` now awaits the first
+reload directly, so discovery completing *means* the config is ready — an ordering
+guaranteed by the language rather than won on timing.
+
+**Non-images are refused, and that check is load-bearing.** Measured: the `public.image` in
+`NSSendFileTypes` only decides whether the item appears in the menu. At dispatch, pbs checks
+only that the pasteboard carries `public.file-url` — it says so itself ("Pasteboard
+contained types (), but service expects types (public.file-url)") — and it handed a
+`notes.txt` all the way through to the app. The CLI does not check either: `gitpic <file>`
+uploads whatever bytes it is given (`src/commands/upload.rs` sniffs formats only for
+`--stdin` naming, and `imageproc::maybe_compress` passes anything it cannot decode
+through). This is the only place that can say no, and without it a PDF becomes a real commit
+in the image-host repository.
+
+### There is a switch for it in 设置
+
+**上传 gains a 「Finder 右键」 section with one switch for whether the item is in the
+context menu.** It writes the one place macOS keeps that state: a per-service entry under
+`NSServicesStatus` in the `pbs` domain — the same entry the checkbox in 系统设置 ▸ 键盘 ▸
+键盘快捷键 ▸ 服务 writes. It has to be written there because the menu item comes from the
+bundle's `Info.plist`, which nothing the running app does can take back.
+
+**There is no second copy of the state.** The switch reads that entry rather than keeping a
+private flag beside it — otherwise turning the service off in System Settings would leave
+GitPic's switch reading 开. The menu title is not a second copy either: `pbs` keys the entry
+by title, so the title is read back out of the **running bundle's `NSServices` array** by
+`NSMessage`, and the switch's key cannot disagree with the menu it belongs to. That also
+makes it apply immediately instead of waiting for 保存, and since it has nothing to do with
+the config file, the section sits **outside** the config-dependent branch and stays usable
+when the config cannot be read.
+
+**With the switch off, the provider checks again.** Measured: pbs still dispatches to a
+disabled service, so `ServiceProvider` re-checks. The item being gone is the ordinary case,
+but when the services cache has not caught up, this is what keeps the switch's answer true.
+(A renamed title orphans the old entry, and this guard cannot help with that either — only
+not renaming can.)
+
+**Reading that entry had two traps in it, and the second matters more.**
+
+`enabled_context_menu` is not the current spelling. AppKit's own diagnostic strings call it
+*"the older 'enabled_context_menu' key"* — found verbatim in the macOS 26.5 dyld shared
+cache, alongside `presentation_modes`, `ContextMenu`, `ServicesMenu` and `TouchBar`. A reader
+that consults only the legacy key reports 开 for a service switched off in System Settings,
+whenever System Settings wrote the modern key alone. `presentation_modes` is now read first,
+the legacy key second, and only an unreadable pair defaults to on. **The modern key's value
+shape is inferred, not observed:** nothing on this machine has ever been toggled
+(`NSServicesStatus` reads back empty), so there was no real entry to inspect and the mode
+names come from AppKit's symbols rather than from a plist. Hence both plausible encodings are
+accepted on read, and a write only ever *updates an existing* `presentation_modes` — it never
+invents one.
+
+The other trap: the same flag can be a boolean, an integer, *or a string* — the `0` that
+`defaults write … '{enabled_context_menu = 0;}'` stores is an `NSTaggedPointerString`,
+because old-style plist text has no number syntax. An `as? NSNumber`-only reader saw nil and
+fell through to "absent means on". All three are read now, and strings are matched against
+known values only: `NSString.boolValue` never returns nil and maps `""` to `false`, which
+would have *disabled* the feature on an unreadable entry while hiding nothing from Finder's
+menu — the exact outcome the fail-open default exists to prevent.
+
+**The write is best-effort, and says so.** It used to read the value back and hand the caller
+a landed/failed flag. That was a tautology: the read-back hits the same in-process
+CFPreferences cache the write just populated, so it echoes the written value whatever
+happened underneath. Measured with `chflags uchg` on `pbs.plist` —
+`CFPreferencesAppSynchronize` still returned `true`, the in-process read showed the new value,
+and `NSDictionary(contentsOfFile:)` showed the old one. Reading the file instead does not work
+either: on a healthy write cfprefsd has usually not flushed yet, so it would report failure
+for writes that were fine. So the reassuring 「改不了右键菜单」 dialog is gone and the switch's
+caption points at System Settings, which is the only honest thing this code can offer.
+
+**A write keeps the entry's sibling keys.** It used to replace the whole sub-dictionary,
+discarding `key_equivalent` — the Services keyboard shortcut the user assigned (this
+machine's `pbs.plist` carries `ServicesShortcutsPresent`, so those exist in practice). Turning
+the right-click item off and on again would quietly take a shortcut away.
+
+### App
+
+- The status-item menu is unchanged: right-click is a fourth entry point, and the first
+  three (file picker, clipboard, CLI) all remain.
+- Failure wording is split by cause: no images says 「选中的不是图片：<names>」 (more than
+  three collapse to 等 N 个, because the system truncates a notification body at a length it
+  picks), no files at all says 「右键上传没有收到文件」, and a switched-off item says
+  「右键上传已关闭」 — through a neutral notice, not through the upload-failure path, whose
+  banner title is hard-coded 「GitPic 上传失败」. A mixed selection that drops some files now
+  names them in their own notice rather than leaving the success count to be reconciled
+  against what was selected.
+- `~/Library/Logs/GitPic.log` records every dispatch: how many items arrived, how many were
+  images, and which were skipped.
+
+Not one line of the CLI changed.
+
+## [0.14.1] - 2026-08-23
+
+### The stdin failure told you to do the thing you had just done
+
+0.14.0 made a stem-only `--name` over unidentifiable stdin bytes a `USAGE` error —
+correctly, since publishing them at a guessed `.png` is a lie about the content —
+but it reused the message written for the case where no `--name` was given at all:
+*"cannot tell what kind of image this is from the bytes; pass --name to set the
+filename"*. Read that after passing `--name shot` and the only move it suggests is
+the one that just failed.
+
+Which is exactly the loop an agent walks into, because the rule everywhere else in
+`SKILL.md` is that `--name` supplies the stem and the bytes supply the extension —
+"never rely on `--name` to set the extension". Unidentifiable bytes are the one
+place that rule inverts: there is nothing else to take an extension from, so
+`--name` has to carry one.
+
+So both halves are fixed. The message now names what is missing (`--name "shot"
+carries no extension and these bytes are not an image gitpic can identify …
+e.g. --name shot.bin`), and the shipped skill states the exception in §3 and beside
+the rule it contradicts, with the advice an agent needs: do not strip the extension
+when retrying. The skill travels inside the binary (`include_str!`), so this is the
+release that delivers it.
+
+Also in the skill, since it is the contract agents call under: `config set --json`
+carries `changes` (one `{key, value}` per key, as stored) and keeps the top-level
+`key`/`value` only for a single pair.
 
 ## [0.14.0] - 2026-08-23
 
@@ -2039,7 +2216,9 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.15.0
+[0.14.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.1
 [0.14.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.0
 [0.13.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.2
 [0.13.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.1
