@@ -75,9 +75,17 @@ pub fn append(rec: &Record) -> Result<()> {
 /// `max_bytes` is a parameter rather than a direct read of `MAX_BYTES` so the
 /// rename-and-replace can be tested against a small file.
 fn trim_file(path: &std::path::Path, max_bytes: usize) {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    // Lossy rather than `read_to_string`, which fails whole-file on invalid UTF-8.
+    // A torn append — SIGKILL or a full disk partway through the write — can leave a
+    // prefix ending mid-sequence, and `serde_json` emits non-ASCII string content
+    // raw, so any Chinese filename puts multi-byte sequences on the line. With a
+    // strict read that one bad byte returned early here on *every* subsequent
+    // append, which silently switched the `MAX_BYTES` ceiling off and let the file
+    // grow without bound — the one thing the ceiling exists to prevent.
+    let Ok(bytes) = std::fs::read(path) else {
         return;
     };
+    let text = String::from_utf8_lossy(&bytes);
     let Some(kept) = trimmed(&text, max_bytes) else {
         return;
     };
@@ -129,9 +137,14 @@ pub fn read_recent(limit: usize) -> Result<Vec<Record>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| AppError::general(format!("read history: {e}")))?;
-    Ok(parse_recent(&text, limit))
+    // Lossy for the same reason `trim_file` is: line-level corruption is tolerated
+    // by design (`parse_recent` discards what it cannot parse), and reading the file
+    // strictly made a single bad byte turn `gitpic list` into a permanent `GENERAL`
+    // failure — "stream did not contain valid UTF-8", no remedy, nothing to act on,
+    // and nothing anywhere that rewrites the file. Now one bad byte costs one record.
+    let bytes =
+        std::fs::read(&path).map_err(|e| AppError::general(format!("read history: {e}")))?;
+    Ok(parse_recent(&String::from_utf8_lossy(&bytes), limit))
 }
 
 /// Newest-first, capped at `limit`.

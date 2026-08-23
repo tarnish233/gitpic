@@ -98,7 +98,14 @@ fn env_var(key: &str) -> Option<String> {
 /// (on Windows, fall back to `%USERPROFILE%`). Used for the XDG config/data dirs
 /// and for agent home dirs such as `CLAUDE_CONFIG_DIR` / `CODEX_HOME`.
 pub(crate) fn base_dir(key: &str, fallback: &str) -> Result<PathBuf> {
-    if let Some(v) = env_var(key) {
+    // Absolute only, which is what the XDG spec says to do with a relative value:
+    // ignore it. `XDG_CONFIG_HOME=.config` in a shell profile — an easy typo — made
+    // every gitpic path *cwd-relative*, so `gitpic config set github.repo o/pics` in
+    // one directory wrote a config that the same command one directory up reported
+    // `CONFIG_MISSING` about. Since 0.16.0 that takes the credential with it, so a
+    // login also stops being found depending on where you are standing. Falling back
+    // is the same treatment `env_var` already gives a blank value.
+    if let Some(v) = env_var(key).filter(|v| Path::new(v).is_absolute()) {
         return Ok(PathBuf::from(v));
     }
     let home = env_var("HOME")
