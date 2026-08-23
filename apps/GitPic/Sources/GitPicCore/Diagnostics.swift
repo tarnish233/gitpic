@@ -18,18 +18,40 @@ public enum Diagnostics {
         let line = "[\(stamp)] \(message)\n"
         guard let data = line.data(using: .utf8) else { return }
         let url = logURL
-        let fm = FileManager.default
-        try? fm.createDirectory(at: url.deletingLastPathComponent(),
-                                withIntermediateDirectories: true)
-        if !fm.fileExists(atPath: url.path) {
-            fm.createFile(atPath: url.path, contents: nil)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        // A real `O_APPEND`, which is what this comment claimed while the code did
+        // `FileHandle(forWritingTo:)` + `seekToEnd()` + `write`. There is no O_APPEND
+        // on `FileHandle`: that opens `O_WRONLY` and then performs exactly the
+        // seek-then-write race `O_APPEND` exists to replace — the `seekToEnd()` was
+        // itself the proof the descriptor was not in append mode. It matters because
+        // this log is deliberately machine-global (AGENTS.md), so a `swift run` build
+        // and the installed `/Applications/GitPic.app` write the same file: both
+        // resolved `seekToEnd()` to the same offset and the second `write` landed on
+        // top of the first, losing the launch record the file exists to keep. The CLI's
+        // history writer, which this cites, really does use `O_APPEND` plus one write.
+        //
+        // `O_CREAT` also replaces the `fileExists`/`createFile` pair, which was its own
+        // small race.
+        let fd = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return open(path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
         }
-        // O_APPEND so two launches cannot interleave a partial line — the same
-        // reasoning the CLI's history writer uses (`src/history.rs:41-52`).
-        if let fh = try? FileHandle(forWritingTo: url) {
-            defer { try? fh.close() }
-            try? fh.seekToEnd()
-            try? fh.write(contentsOf: data)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        data.withUnsafeBytes { buf in
+            guard let base = buf.baseAddress else { return }
+            var written = 0
+            while written < buf.count {
+                let n = write(fd, base + written, buf.count - written)
+                if n > 0 {
+                    written += n
+                } else if n < 0 && errno == EINTR {
+                    continue
+                } else {
+                    break
+                }
+            }
         }
     }
 
