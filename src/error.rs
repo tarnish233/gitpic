@@ -64,6 +64,18 @@ pub struct AppError {
 }
 
 impl AppError {
+    /// Append "; retry after Ns" when this is a rate limit and the server said when.
+    ///
+    /// Only for [`ErrorCode::RateLimited`]: it is the one code whose documented remedy
+    /// is "wait and retry", so it is the only one for which a number is guidance rather
+    /// than noise. A caller that has no hint passes `None` and the message is untouched.
+    pub fn with_retry_hint(mut self, after: Option<u64>) -> Self {
+        if let (ErrorCode::RateLimited, Some(secs)) = (self.code, after) {
+            self.message = format!("{}; retry after {secs}s", self.message);
+        }
+        self
+    }
+
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,

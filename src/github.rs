@@ -223,6 +223,25 @@ impl GitHub {
         )
     }
 
+    /// How long GitHub asked us to wait, in seconds, if it said at all.
+    ///
+    /// Two headers, two shapes: `retry-after` is a delay and is what a *secondary* rate
+    /// limit sends; `x-ratelimit-reset` is an absolute unix timestamp and is what the
+    /// primary one sends. Both become a delay so the message carries one shape, and a
+    /// reset already in the past clamps to zero rather than wrapping.
+    fn retry_hint(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+        let get = |k| {
+            headers
+                .get(k)
+                .and_then(|v: &reqwest::header::HeaderValue| v.to_str().ok())
+        };
+        if let Some(secs) = get("retry-after").and_then(|v| v.trim().parse::<u64>().ok()) {
+            return Some(secs);
+        }
+        let reset = get("x-ratelimit-reset").and_then(|v| v.trim().parse::<i64>().ok())?;
+        Some((reset - chrono::Utc::now().timestamp()).max(0) as u64)
+    }
+
     fn map_status(status: reqwest::StatusCode, body: &str) -> AppError {
         match status.as_u16() {
             401 => AppError::auth(format!("GitHub authentication failed ({status}): {body}")),
@@ -236,6 +255,26 @@ impl GitHub {
                 "GitHub repository, branch, or remote path not found ({status}): {body}"
             )),
             409 => AppError::network(format!(
+                "GitHub ref conflict ({status}): {body}; retry the upload"
+            )),
+            // The same race as the 409 below, seen from the other side: `put_file` does
+            // GET-then-PUT, so when the path is *created* between the two our PUT
+            // carries no `sha` and GitHub answers 422 "sha wasn't supplied". A 409 is
+            // when the sha we did send went stale, and that one has been `NETWORK` —
+            // "so agents retry it" — since 0.13.2. Two processes uploading the same
+            // bytes (`gitpic *.png` under `xargs -P4`, or a right-click batch
+            // overlapping a terminal run) hit whichever of the two comes up, so the
+            // loser was told exit 1, which `SKILL.md` defines as "do not retry", for a
+            // re-run that would have deduped and succeeded instantly.
+            //
+            // Guarded on the body, not on the status: 422 is also branch protection,
+            // which no retry can fix and which would loop an agent forever.
+            //
+            // Matched on `wasn't supplied` rather than on the quoted `"sha"`: `body` is
+            // the raw JSON text, so the quotes GitHub puts round `sha` arrive
+            // backslash-escaped and a pattern including them never fires. The
+            // apostrophe is not escaped, and no other 422 from this API says it.
+            422 if body.contains("wasn't supplied") => AppError::network(format!(
                 "GitHub ref conflict ({status}): {body}; retry the upload"
             )),
             422 => AppError::general(format!("GitHub rejected the request ({status}): {body}")),
@@ -261,8 +300,15 @@ impl GitHub {
             .map_err(|e| AppError::network(format!("network: {e}")))?;
         if !resp.status().is_success() {
             let st = resp.status();
+            // Read before the body is consumed. `RATE_LIMITED` is the one code in the
+            // set whose whole purpose is to be retried, and it was the one carrying the
+            // least information: GitHub's body says "retry later" without a number, and
+            // the header holding the number was dropped one line further down. An agent
+            // then had to guess between a minute and three quarters of an hour, and
+            // guessing short is what deepens a secondary rate limit.
+            let retry_after = Self::retry_hint(resp.headers());
             let body = resp.text().await.unwrap_or_default();
-            return Err(Self::map_status(st, &body));
+            return Err(Self::map_status(st, &body).with_retry_hint(retry_after));
         }
         resp.json()
             .await
@@ -514,7 +560,7 @@ fn content_matches(existing_blob_sha: &str, bytes: &[u8]) -> bool {
     existing_blob_sha.eq_ignore_ascii_case(&git_blob_sha(bytes))
 }
 
-fn reject_oversize(path: &str, len: usize) -> Result<()> {
+pub(crate) fn reject_oversize(path: &str, len: usize) -> Result<()> {
     if len > CONTENTS_PUT_MAX {
         return Err(AppError::usage(format!(
             "{path} is {len} bytes; the GitHub Contents API rejects uploads over 100 MB"
@@ -572,6 +618,38 @@ mod tests {
             GitHub::map_status(reqwest::StatusCode::UNPROCESSABLE_ENTITY, "protected").code,
             ErrorCode::General
         );
+        // The GET/PUT race, which is the same fault as the 409 above and is now told
+        // apart from the other 422s by its body. Branch protection must stay `General`:
+        // no retry can fix it, and `Network` would loop an agent on it forever.
+        assert_eq!(
+            GitHub::map_status(
+                reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+                r#"{"message":"Invalid request.\n\n\"sha\" wasn't supplied."}"#
+            )
+            .code,
+            ErrorCode::Network
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_carries_when_to_retry_when_github_said() {
+        use crate::error::AppError;
+        let limited = || AppError::rate_limited("GitHub rate limit reached (403): body");
+        // A secondary limit sends `retry-after`, a delay in seconds.
+        assert!(limited()
+            .with_retry_hint(Some(90))
+            .message
+            .ends_with("; retry after 90s"));
+        // Nothing is appended when GitHub said nothing, and never to another code —
+        // "retry after" is guidance only where the remedy is to wait.
+        assert!(!limited()
+            .with_retry_hint(None)
+            .message
+            .contains("retry after"));
+        assert!(!AppError::general("boom")
+            .with_retry_hint(Some(90))
+            .message
+            .contains("retry after"));
     }
 
     // The API base is a compile-time constant, so there is no env var or
