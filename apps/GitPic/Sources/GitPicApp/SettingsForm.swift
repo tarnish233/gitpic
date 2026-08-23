@@ -38,7 +38,6 @@ extension View {
 /// caller has to look at it. It was hand-rolled at three sites, one of which ignored the
 /// result entirely.
 enum Clipboard {
-    @discardableResult
     static func write(_ s: String) -> Bool {
         guard !s.isEmpty else { return false }
         let pb = NSPasteboard.general

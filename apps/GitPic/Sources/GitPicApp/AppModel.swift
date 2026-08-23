@@ -135,6 +135,13 @@ final class AppModel {
     /// terminates the `gitpic` child — otherwise a login the user walked away from
     /// keeps polling GitHub until the code expires, fifteen minutes later.
     private var loginTask: Task<Void, Never>?
+    /// Identifies the login allowed to clear ``loginTask`` when it finishes.
+    ///
+    /// Cancellation releases the handle immediately so a new login can start. The old
+    /// task still gets one turn to unwind its `AsyncStream`; without a generation check,
+    /// its `defer` could then clear the *new* task's handle, making that login appear idle
+    /// and leaving no task for 取消 or window close to stop.
+    private var loginGeneration = 0
 
     var loginInFlight: Bool { loginTask != nil }
 
@@ -174,10 +181,16 @@ final class AppModel {
     /// closing the window able to stop it.
     func beginLogin(scope: String? = nil) {
         guard let runner, loginTask == nil else { return }
+        loginGeneration += 1
+        let generation = loginGeneration
         auth = .checking
         reposFailure = nil
         loginTask = Task { @MainActor [weak self] in
-            defer { self?.loginTask = nil }
+            defer {
+                if self?.loginGeneration == generation {
+                    self?.loginTask = nil
+                }
+            }
             for await event in runner.loginEvents(scope: scope) {
                 guard let self else { return }
                 switch event {
@@ -209,6 +222,9 @@ final class AppModel {
         // without it an ordinary close would overwrite a perfectly good logged-in
         // state with 「登录已取消」.
         guard let task = loginTask else { return }
+        // Invalidate the cancelled task's `defer` before releasing the handle. A new
+        // login may start while the old stream is still unwinding.
+        loginGeneration += 1
         task.cancel()
         loginTask = nil
         auth = .loggedOut(detail: "登录已取消")
@@ -217,6 +233,9 @@ final class AppModel {
 
     func logout() async {
         guard let runner else { return }
+        // Same invalidation as `cancelLogin`: logout releases the handle before the
+        // cancelled stream is guaranteed to have finished unwinding.
+        loginGeneration += 1
         loginTask?.cancel()
         loginTask = nil
         do {

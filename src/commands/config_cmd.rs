@@ -160,19 +160,7 @@ pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
             // being broken and names no fix. The path goes in as an argument rather than
             // interpolated, so a directory with a space or a quote in it cannot become
             // part of the command.
-            let mut command = if cfg!(windows) {
-                let mut c = std::process::Command::new("cmd");
-                c.arg("/C").arg(format!("{editor} \"%1\"")).arg(&path);
-                c
-            } else {
-                let mut c = std::process::Command::new("sh");
-                c.arg("-c")
-                    .arg(format!("{editor} \"$1\""))
-                    .arg("sh")
-                    .arg(&path);
-                c
-            };
-            let status = command
+            let status = editor_command(&editor, &path)
                 .status()
                 .map_err(|e| AppError::general(format!("launch editor: {e}")))?;
             if !status.success() {
@@ -186,6 +174,35 @@ pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Build the platform-shell command that opens `path` in `editor`.
+///
+/// The editor is intentionally a shell command (`code --wait`, `subl -w`, ...), while
+/// the path is data and must never be interpolated into that command. Unix shells have
+/// positional parameters for `sh -c`; `cmd.exe /C` does not offer the same `$1` shape,
+/// so Windows passes the path through a one-use environment variable instead. Windows
+/// file names cannot contain `"`, and quoting the expansion keeps spaces and command
+/// metacharacters inside the argument.
+fn editor_command(editor: &str, path: &std::path::Path) -> std::process::Command {
+    if cfg!(windows) {
+        let mut command = std::process::Command::new("cmd");
+        command
+            .arg("/D")
+            .arg("/S")
+            .arg("/C")
+            .arg(format!("{editor} \"%GITPIC_EDIT_PATH%\""))
+            .env("GITPIC_EDIT_PATH", path);
+        command
+    } else {
+        let mut command = std::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!("{editor} \"$1\""))
+            .arg("sh")
+            .arg(path);
+        command
+    }
 }
 
 /// `config set KEY VALUE [KEY VALUE ...]`. Clap's `num_args = 2..` still
@@ -321,6 +338,41 @@ mod tests {
             pair_args(&["github.owner".into(), "me".into(), "leftover".into()]).expect_err("odd");
         assert_eq!(err.code, crate::error::ErrorCode::Usage);
         assert!(pair_args(&["github.owner".into(), "me".into()]).is_ok());
+    }
+
+    #[test]
+    fn an_editor_with_arguments_keeps_the_config_path_out_of_shell_code() {
+        use std::ffi::OsStr;
+
+        let path = std::path::Path::new("a directory/config.toml");
+        let command = editor_command("code --wait", path);
+        let args: Vec<_> = command.get_args().collect();
+        if cfg!(windows) {
+            assert_eq!(command.get_program(), OsStr::new("cmd"));
+            assert_eq!(args[0], OsStr::new("/D"));
+            assert_eq!(args[1], OsStr::new("/S"));
+            assert_eq!(args[2], OsStr::new("/C"));
+            assert_eq!(args[3], OsStr::new("code --wait \"%GITPIC_EDIT_PATH%\""));
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(key, _)| *key == OsStr::new("GITPIC_EDIT_PATH"))
+                    .and_then(|(_, value)| value),
+                Some(path.as_os_str())
+            );
+        } else {
+            assert_eq!(command.get_program(), OsStr::new("sh"));
+            assert_eq!(args[0], OsStr::new("-c"));
+            assert_eq!(args[1], OsStr::new("code --wait \"$1\""));
+            assert_eq!(args[2], OsStr::new("sh"));
+            assert_eq!(args[3], path.as_os_str());
+        }
+        assert!(
+            args.iter()
+                .take(if cfg!(windows) { 4 } else { 3 })
+                .all(|arg| arg != path),
+            "the path must be passed as data, not interpolated into shell code"
+        );
     }
 
     #[test]

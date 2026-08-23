@@ -125,7 +125,12 @@ struct HostPane: View {
                     Button("打开浏览器") { NSWorkspace.shared.open(url) }
                     // Through the shared writer, which is the one that does not throw
                     // the result away.
-                    Button("复制代码") { Clipboard.write(userCode) }
+                    Button("复制代码") {
+                        if !Clipboard.write(userCode) {
+                            model.notify(title: "写剪贴板失败",
+                                         body: "一次性代码没有复制，请手动输入")
+                        }
+                    }
                     // Not cosmetic: cancelling terminates the CLI, which would
                     // otherwise keep polling GitHub until the code expires.
                     Button("取消") { model.cancelLogin() }
