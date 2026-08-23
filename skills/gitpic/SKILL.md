@@ -110,9 +110,13 @@ cat image.png | gitpic --stdin --json --no-copy
 
 Use this when you only have image bytes (e.g. a screenshot buffer). The extension
 is derived from the bytes themselves, so JPEG data is never published at a `.png`
-path — `--name` only supplies the filename stem, and its extension is ignored.
-Pass `--name` when the bytes are a format gitpic cannot recognise; without it that
-is a `USAGE` error rather than a guess.
+path — `--name` supplies the filename stem, and its extension is ignored.
+
+**Bytes gitpic cannot identify are the one exception**, because then there is
+nothing to derive an extension from: `--name` must carry one and is honoured.
+`--name shot.bin` works; `--name shot` and no `--name` at all are both a `USAGE`
+error (2) rather than a guessed `.png`. So do not strip the extension when
+retrying a stdin upload that asked for `--name`.
 
 ## 4. Upload an image explicitly requested from the clipboard
 
@@ -197,8 +201,12 @@ instead — `results` is never present and empty.
   `USAGE` error. It supplies only the filename *stem* in all three cases — the
   extension always follows the image bytes, so `--name shot` or `--name shot.png`
   on JPEG bytes both publish `shot.jpg`. Never rely on `--name` to set the
-  extension. `gitpic config set` accepts `KEY VALUE` pairs in one invocation
-  (`gitpic config set github.owner me github.repo pics --json`) and writes once.
+  extension — with one exception, `--stdin` over bytes gitpic cannot identify,
+  where it is the only source there is and must include one (see §3).
+  `gitpic config set` accepts `KEY VALUE` pairs in one invocation
+  (`gitpic config set github.owner me github.repo pics --json`) and writes once;
+  its `--json` envelope carries `changes` (one `{key, value}` per key, as stored),
+  and the top-level `key`/`value` only when a single pair was given.
 - `--json` produces an `ok`-bearing envelope on stdout for every subcommand,
   failures included, with three exceptions — none of which an agent should call:
   `gitpic init` **rejects** `--json` (it is interactive; use `GITPIC_REPO` or
