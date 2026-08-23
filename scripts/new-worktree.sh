@@ -28,6 +28,10 @@ usage: scripts/new-worktree.sh <branch> [dir] [--base <ref>] [--seed-config]
                   scratch config. Off by default: without it `gitpic doctor`
                   reports CONFIG_MISSING and owner/repo come back empty, so an
                   experiment cannot accidentally commit to the real image host.
+                  Note this seeds the *target*, not the credential: since 0.16.0
+                  the token lives in auth.toml beside config.toml, so it is
+                  per-worktree too and is deliberately not copied. Uploads from
+                  here still need one `gitpic auth login`.
 EOF
 }
 
@@ -102,7 +106,8 @@ if (( SEED_CONFIG )); then
   if [[ -f "$src" ]]; then
     mkdir -p "$DIR/.local/config/gitpic"
     cp "$src" "$DIR/.local/config/gitpic/config.toml"
-    echo "==> seeded config from $src — uploads from here reach the real image host"
+    echo "==> seeded config from $src — the real image host is now the target"
+    echo "    (no credential: auth.toml is per-worktree too; run \`gitpic auth login\`)"
   else
     echo "warning: --seed-config given, but $src does not exist" >&2
   fi
@@ -129,13 +134,16 @@ export CARGO_TARGET_DIR="\${CARGO_TARGET_DIR:-\$HOME/.cache/cargo-target/gitpic}
 #
 # Measured: with no config.toml under here, owner/repo come back empty and
 # \`gitpic doctor\` reports CONFIG_MISSING — so an experiment cannot accidentally
-# commit to the real image host. Re-run with --seed-config if you need real uploads.
+# commit to the real image host. --seed-config copies the target in; the credential
+# is a separate file (auth.toml) under this same directory, so a real upload from
+# here needs one \`gitpic auth login\` as well.
 export XDG_CONFIG_HOME="$DIR/.local/config"
 export XDG_DATA_HOME="$DIR/.local/share"
 
-# gh keeps the real login. Measured: gh finds its token in the system keyring and
-# is unaffected by the XDG_CONFIG_HOME above — pinned anyway, so a future gh that
-# does honour it cannot silently point this worktree at an empty config.
+# For the agent's own \`gh\` use — gitpic itself has not touched gh since 0.16.0,
+# which moved the credential into its own auth.toml. Measured: gh finds its token in
+# the system keyring and is unaffected by the XDG_CONFIG_HOME above — pinned anyway,
+# so a future gh that does honour it cannot silently point at an empty config.
 export GH_CONFIG_DIR="\${GH_CONFIG_DIR:-\$HOME/.config/gh}"
 EOF
 

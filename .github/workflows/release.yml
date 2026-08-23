@@ -344,8 +344,8 @@ jobs:
           xattr -dr com.apple.quarantine /Applications/GitPic.app
           ```
 
-          Apple Silicon only. Requires GitHub CLI (`brew install gh`) and
-          `gh auth login`.
+          Apple Silicon only. Authorise with `gitpic auth login` — or in the app,
+          设置 ▸ 图床 ▸ 使用 GitHub 登录.
           NOTES
 
       - name: Download the CLI artifacts

@@ -49,7 +49,9 @@ gitpic auth login
 
 You cannot run it for them. It prints a one-time code they have to type at
 <https://github.com/login/device> and then waits for a browser, so running it yourself
-would block on a code only they can enter, and it refuses `--json` outright.
+would block on a code only they can enter. Its `--json` is not an envelope but a
+line-per-event stream (see Constraints), so it is not the shape the rest of this
+document's `--json` advice assumes either.
 
 Once they say they are done, confirm with `gitpic auth status --json` — `ok` and
 `token_valid` say whether the credential works, and the report also carries `login`,
