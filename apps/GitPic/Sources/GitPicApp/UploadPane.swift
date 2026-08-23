@@ -108,17 +108,11 @@ struct UploadPane: View {
     /// writes system state the moment it moves, and it has nothing to do with the
     /// config — so it stays reachable when the config is unreadable, which is exactly
     /// when someone might want to switch the right-click entry off. Its own section
-    /// with its own caption is what keeps the two kinds of row from being mistaken
-    /// for each other.
+    /// keeps the two kinds of row from being mistaken for each other.
     @ViewBuilder private var finderSection: some View {
         Section("Finder 右键") {
             CaptionedToggle(
                 label: "在右键菜单里显示「\(FinderService.menuItemTitle)」",
-                caption: "选中图片后，右键菜单的「服务」子菜单里会出现这一项"
-                         + "（Finder 按服务数量决定折不折叠，数量少时也可能直接列在外层）。"
-                         + "改完立即生效，不用按「保存」；菜单由 Finder 自己缓存，"
-                         + "已经打开的要关掉再开，偶尔还要等一会儿。"
-                         + "这个开关和「系统设置 ▸ 键盘 ▸ 键盘快捷键 ▸ 服务」里的那一项是同一个。",
                 isOn: Binding(get: { model.finderServiceEnabled },
                               set: { model.setFinderServiceEnabled($0) }))
         }

@@ -4,6 +4,14 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.18.1] - 2026-08-23
+
+### 设置页更简洁
+
+### App
+
+- 精简 Agent、关于、历史与上传设置页的文案，只保留操作所需的标签和说明。
+
 ## [0.18.0] - 2026-08-23
 
 ### Agent 集成各自管理，覆盖不再靠猜
@@ -1854,6 +1862,7 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
+[0.18.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.18.1
 [0.18.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.18.0
 [0.17.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.17.0
 [0.16.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.16.0

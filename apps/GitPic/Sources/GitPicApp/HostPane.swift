@@ -351,7 +351,7 @@ struct HostPane: View {
                 // Says what the button will do before it is pressed. The three
                 // probes behind it are all GET (`/user`, the repo, the branch),
                 // so this is safe to run against a real image host at any time.
-                Text("还没测过。测试只读取 GitHub 上的账号、仓库权限和分支，不会写入任何东西。")
+                Text("测试只读取 GitHub 上的账号、仓库权限和分支，不会写入任何东西。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

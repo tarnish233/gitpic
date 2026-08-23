@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] - 2026-08-23
+
+### A quieter settings window
+
+### App
+
+- Tightened the settings copy across Agent, About, History, and Upload, keeping only
+  the labels and explanations needed to act on each pane.
+
 ## [0.18.0] - 2026-08-23
 
 ### Agent integrations, managed separately and never overwritten silently
@@ -2443,6 +2452,7 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
+[0.18.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.18.1
 [0.18.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.18.0
 [0.17.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.17.0
 [0.16.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.16.0

@@ -19,14 +19,6 @@ struct AgentIntegrationSection: View {
         }
     }
 
-    private var detail: String {
-        switch agent {
-        case .claude: "单独安装到 Claude Code 的 skills 目录。"
-        case .codex: "单独安装到 Codex 的 skills 目录。"
-        case .generic: "单独安装到 ~/.agent/skills 目录。"
-        }
-    }
-
     private var status: (title: String, icon: String, color: Color) {
         switch target?.action {
         case nil:        ("未检测到", "questionmark.circle", .secondary)
@@ -38,10 +30,6 @@ struct AgentIntegrationSection: View {
 
     var body: some View {
         Section(title) {
-            Text(detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
             LabeledContent("状态") {
                 Label(status.title, systemImage: status.icon)
                     .foregroundStyle(status.color)

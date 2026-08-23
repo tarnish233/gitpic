@@ -81,15 +81,8 @@ struct HistoryPane: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             Form {
-                // A header view rather than a title string, because it carries two
-                // things: how many records, and what the copy buttons will produce.
-                //
-                // In the header and not the footer, and that is the whole point of the
-                // second line. The switcher itself lives in 上传 now, so this pane has a
-                // mode set elsewhere — and a footer sits below every row, which with 37
-                // of them means below the fold, read by nobody. The copy button's
-                // tooltip says the same thing, but only to whoever hovers the right
-                // pixel.
+                // A header view rather than a title string, because the record count
+                // can be followed by live thumbnail progress.
                 Section {
                     ForEach(model.history) { r in row(r) }
                 } header: {
@@ -99,12 +92,6 @@ struct HistoryPane: View {
                         // grey boxes for about four seconds (``ThumbnailLimits``), and
                         // with nothing said about it a slow link is indistinguishable
                         // from a broken one.
-                        //
-                        // Next to the count rather than in place of it, and on the left
-                        // rather than the right: the copy hint over there is a standing
-                        // fact about this pane, and a line that comes and goes must
-                        // neither replace it nor shove it sideways. Growing leftward
-                        // into the `Spacer()` moves nothing.
                         //
                         // `.caption`, so the header cannot change height when it
                         // appears — the count beside it is the taller of the two either
@@ -122,10 +109,6 @@ struct HistoryPane: View {
                                 .monospacedDigit()
                                 .foregroundStyle(.secondary)
                         }
-                        Spacer()
-                        Text("复制 \(model.linkForm.label) · 在「上传」页的「链接」改")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                 }
             }
