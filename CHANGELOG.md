@@ -125,7 +125,9 @@ now; the status and content-type carry the diagnostic and neither can carry a se
   runs its editor, and `$VISUAL` is consulted first. The release audit also caught the
   first Windows implementation treating `cmd /C`'s `%1` like `sh -c`'s `$1`; the path now
   travels in a dedicated environment variable, outside the shell code, and cannot become
-  a literal `%1` on Windows.
+  a literal `%1` on Windows. The same cross-platform check restored the clean
+  warnings-as-errors Windows build after the new private-write policy flag was otherwise
+  Unix-only.
 - **`skill install --dir` at the path `skill path` prints no longer installs one level
   too deep**, writing `gitpic/gitpic/SKILL.md` and reporting success. The write is atomic,
   so a crash cannot leave a skill with intact frontmatter and the instructions cut off. A
