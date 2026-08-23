@@ -126,6 +126,8 @@ final class AppModel {
     /// in-flight requests that both match the draft, and whichever finishes first would
     /// otherwise report "done loading" while the other is still running.
     private var branchesGeneration = 0
+    /// The same, for the repository listing — see ``loadRepos()``.
+    private var reposGeneration = 0
 
     /// The in-flight login, held so it can be cancelled.
     ///
@@ -232,11 +234,22 @@ final class AppModel {
 
     func loadRepos() async {
         guard let runner else { return }
+        // The same generation guard `loadBranches` carries, and for the same reason.
+        // Two of these can be in flight at once — `refreshAuth` calls it on every login
+        // and 重新检查 calls it again — and without the guard an older answer landing last
+        // would replace the newer list, while `reposLoading = false` from the older
+        // request would report "done" with the newer one still running. It happened not
+        // to bite only because `GitpicRunner.gate` serialises the invocations so the
+        // newest finishes last: an invariant enforced two files away from the code
+        // relying on it, which is not a guarantee this should be spending.
+        reposGeneration += 1
+        let generation = reposGeneration
         reposLoading = true
         reposFailure = nil
-        defer { reposLoading = false }
+        defer { if generation == reposGeneration { reposLoading = false } }
         do {
             let report = try await runner.repos()
+            guard generation == reposGeneration else { return }
             if let list = report.repos {
                 // Only what can actually be uploaded to: the picker is now the only way
                 // to set a target, so offering one that cannot work would be the
@@ -249,9 +262,11 @@ final class AppModel {
                 reposFailure = report.error.map { "\($0.code)：\($0.message)" }
             }
         } catch let RunFailure.cli(_, error) {
+            guard generation == reposGeneration else { return }
             repos = []
             reposFailure = "\(error.code)：\(error.message)"
         } catch {
+            guard generation == reposGeneration else { return }
             repos = []
             reposFailure = "\(error)"
         }

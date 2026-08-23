@@ -452,20 +452,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let id = sender.representedObject as? String,
               let r = recent.first(where: { $0.id == id }) else { return }
         let form = AppModel.shared.linkForm
-        // A missing snippet is a missing *address*, not a missing upload: only the
-        // CDN form can be absent. Say which address is missing and why — the two
-        // causes have different fixes, and one of them is a config value only the
-        // user can change — instead of copying the other under the label they picked.
-        guard let text = r.snippet(form) else {
-            AppModel.shared.notify(title: "复制失败",
-                                   body: r.unavailable(form.target)?.message
-                                         ?? "没有 \(form.target.label) 链接")
-            return
-        }
-        if copy(text) {
-            AppModel.shared.notify(title: "GitPic", body: "已复制 \(form.label)")
-        } else {
-            AppModel.shared.notify(title: "写剪贴板失败", body: r.name)
+        // Which address is missing and why, decided in Core so this and the history
+        // pane cannot disagree about it.
+        switch r.snippetOrReason(form, name: r.name) {
+        case let .unavailable(reason):
+            AppModel.shared.notify(title: "复制失败", body: reason)
+        case let .text(text):
+            if Clipboard.write(text) {
+                AppModel.shared.notify(title: "GitPic", body: "已复制 \(form.label)")
+            } else {
+                AppModel.shared.notify(title: "写剪贴板失败", body: r.name)
+            }
         }
     }
 
@@ -721,7 +718,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // own default for a file that is missing.
             if config?.upload.autoCopy ?? true {
                 let text = links.compactMap { $0.snippet(form) }.joined(separator: "\n")
-                clipboard = copy(text) ? .written : .failed
+                clipboard = Clipboard.write(text) ? .written : .failed
             }
             recent = Array((links.reversed() + recent).prefix(8))
             rebuildMenu()
@@ -768,13 +765,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The result is not decoration: `setString` can fail, and reporting "已复制"
     /// anyway is worse than not copying — the user pastes stale content and never
     /// learns why.
-    @discardableResult
-    private func copy(_ s: String) -> Bool {
-        guard !s.isEmpty else { return false }
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        return pb.setString(s, forType: .string)
-    }
 
     // MARK: - Settings
 

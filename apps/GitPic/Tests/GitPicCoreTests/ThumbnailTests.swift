@@ -38,6 +38,34 @@ struct ThumbnailTests {
         return data
     }
 
+    /// The same image with a real alpha ramp down one edge.
+    ///
+    /// Every other PNG builder in this target sets `plane[i + 3] = 0xFF`
+    /// unconditionally, so no fixture anywhere could notice a cache format that drops
+    /// transparency — which is the one property `ThumbnailDecoder.pngData`'s doc says
+    /// the PNG choice exists for.
+    static func pngWithAlpha(w: Int, h: Int) throws -> Data {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: w * 4, bitsPerPixel: 32),
+              let plane = rep.bitmapData else { throw Trouble.cannotMakeImage }
+        for y in 0..<h {
+            for x in 0..<w {
+                let i = (y * w + x) * 4
+                plane[i + 0] = 0xFF
+                plane[i + 1] = 0x20
+                plane[i + 2] = 0x20
+                // Fully transparent on the left edge, opaque on the right.
+                plane[i + 3] = UInt8(255 * x / max(1, w - 1))
+            }
+        }
+        guard let data = rep.representation(using: .png, properties: [:]) else {
+            throw Trouble.cannotMakeImage
+        }
+        return data
+    }
+
     enum Trouble: Error { case cannotMakeImage }
 
     static let config = GitpicConfig(
@@ -96,8 +124,10 @@ struct ThumbnailTests {
     /// Both addresses of one image are one cache entry, because the key is the content.
     @Test("the cache key is the content, not the address")
     func cacheKeyIsContent() {
+        // The normalised sha alone: this is the in-memory key, not a path, so it
+        // carries neither the `.png` suffix nor the thumbnail size.
         #expect(Self.record().thumbnailSource(config: Self.config).cacheKey
-                == "abc123def456.png")
+                == "abc123def456")
         // A history line whose sha is not a sha still has to resolve to something.
         let broken = ThumbnailSource(sha: "../etc", urls: ["https://x/y.png"], byteSize: 1)
         #expect(broken.cacheKey == "https://x/y.png")
@@ -107,10 +137,26 @@ struct ThumbnailTests {
 
     @Test("a blob sha becomes a filename, or nothing")
     func cacheFileNames() {
-        #expect(ThumbnailCache.fileName(sha: "abc123") == "abc123.png")
-        #expect(ThumbnailCache.fileName(sha: "ABC123") == "abc123.png")
-        #expect(ThumbnailCache.fileName(sha: String(repeating: "a", count: 64))
-                == String(repeating: "a", count: 64) + ".png")
+        #expect(ThumbnailCache.fileName(sha: "abc123", maxPixel: 160) == "abc123@160.png")
+        #expect(ThumbnailCache.fileName(sha: "ABC123", maxPixel: 160) == "abc123@160.png")
+        #expect(ThumbnailCache.fileName(sha: String(repeating: "a", count: 64), maxPixel: 160)
+                == String(repeating: "a", count: 64) + "@160.png")
+    }
+
+    /// The size is part of what the cached bytes *are*, so it has to be part of the key.
+    ///
+    /// Without it, raising `ThumbnailLimits.maxPixel` — which its own doc says may
+    /// happen when the box grows — left every already-cached row a hit, and `decode`
+    /// does not upscale, so the pane drew the old small image in the new larger box for
+    /// good: nothing but the size pruner ever deletes one of these files.
+    @Test("the same blob at two thumbnail sizes is two cache files")
+    func cacheFileNamesAreSizeSpecific() {
+        let small = ThumbnailCache.fileName(sha: "abc123", maxPixel: 160)
+        let large = ThumbnailCache.fileName(sha: "abc123", maxPixel: 320)
+        #expect(small != large)
+        // Still a plain filename, which is what the traversal guard is about, and still
+        // `.png`, which is what the pruner filters on.
+        #expect(large == "abc123@320.png")
     }
 
     /// `sha` is read out of `history.jsonl` and joined onto a directory path, so this
@@ -118,16 +164,16 @@ struct ThumbnailTests {
     /// the cache. `appendingPathComponent` will not refuse any of these.
     @Test("a sha that is not hex is refused, separators and dots included")
     func cacheFileNamesRefuseTraversal() {
-        #expect(ThumbnailCache.fileName(sha: "../../../../etc/passwd") == nil)
-        #expect(ThumbnailCache.fileName(sha: "..") == nil)
-        #expect(ThumbnailCache.fileName(sha: "a/b") == nil)
-        #expect(ThumbnailCache.fileName(sha: "a.b") == nil)
-        #expect(ThumbnailCache.fileName(sha: "abc123\u{0}") == nil)
-        #expect(ThumbnailCache.fileName(sha: "~") == nil)
-        #expect(ThumbnailCache.fileName(sha: "") == nil)
-        #expect(ThumbnailCache.fileName(sha: String(repeating: "a", count: 65)) == nil)
+        #expect(ThumbnailCache.fileName(sha: "../../../../etc/passwd", maxPixel: 160) == nil)
+        #expect(ThumbnailCache.fileName(sha: "..", maxPixel: 160) == nil)
+        #expect(ThumbnailCache.fileName(sha: "a/b", maxPixel: 160) == nil)
+        #expect(ThumbnailCache.fileName(sha: "a.b", maxPixel: 160) == nil)
+        #expect(ThumbnailCache.fileName(sha: "abc123\u{0}", maxPixel: 160) == nil)
+        #expect(ThumbnailCache.fileName(sha: "~", maxPixel: 160) == nil)
+        #expect(ThumbnailCache.fileName(sha: "", maxPixel: 160) == nil)
+        #expect(ThumbnailCache.fileName(sha: String(repeating: "a", count: 65), maxPixel: 160) == nil)
         // Hex-adjacent but not hex: `g` is out of range.
-        #expect(ThumbnailCache.fileName(sha: "abcdefg") == nil)
+        #expect(ThumbnailCache.fileName(sha: "abcdefg", maxPixel: 160) == nil)
     }
 
     // MARK: - Pruning
@@ -206,14 +252,38 @@ struct ThumbnailTests {
         #expect(ThumbnailDecoder.decode(truncated, maxPixel: 160) == nil)
     }
 
-    @Test("the disk cache round-trips through PNG")
+    /// Dimensions *and* alpha.
+    ///
+    /// `pngData`'s doc justifies the format by what it preserves — "a JPEG round-trip
+    /// would put a black box behind every transparent screenshot" — and this test
+    /// asserted only the width and height, both of which survive a JPEG. Swapping
+    /// `UTType.png` for `UTType.jpeg` left it green, and left `diskCacheSurvivesTheStore`
+    /// green too, since the `.png` filename comes from `fileName` rather than from the
+    /// encoder. Every transparent screenshot in the history pane would have gained a
+    /// black box with the whole suite passing.
+    @Test("the disk cache round-trips through PNG, transparency included")
     func pngRoundTrip() throws {
-        let image = try #require(ThumbnailDecoder.decode(try Self.png(w: 300, h: 300),
+        let image = try #require(ThumbnailDecoder.decode(try Self.pngWithAlpha(w: 300, h: 300),
                                                          maxPixel: 64))
         let encoded = try #require(ThumbnailDecoder.pngData(image))
         let back = try #require(ThumbnailDecoder.decode(encoded, maxPixel: 64))
         #expect(back.width == image.width)
         #expect(back.height == image.height)
+        // The alpha channel is still declared...
+        #expect(back.alphaInfo != .none, "the cache format dropped the alpha channel")
+        // ...and the transparent edge is still transparent. A JPEG round-trip composites
+        // it onto black, which keeps the dimensions and loses this.
+        let ctx = try #require(CGContext(
+            data: nil, width: back.width, height: back.height, bitsPerComponent: 8,
+            bytesPerRow: back.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        ctx.draw(back, in: CGRect(x: 0, y: 0, width: back.width, height: back.height))
+        let pixels = try #require(ctx.data).assumingMemoryBound(to: UInt8.self)
+        // Left column, vertically central: alpha 0 in the source.
+        let left = Int(pixels[(back.height / 2) * back.width * 4 + 3])
+        let right = Int(pixels[(back.height / 2) * back.width * 4 + (back.width - 1) * 4 + 3])
+        #expect(left < 32, "the transparent edge came back opaque (alpha \(left))")
+        #expect(right > 223, "the opaque edge came back transparent (alpha \(right))")
     }
 
     // MARK: - The gate
@@ -286,8 +356,13 @@ struct ThumbnailTests {
         let first = ThumbnailStore(directory: dir, session: stub.session)
         _ = await first.thumbnail(for: source)
         #expect(stub.requests == 1)
-        // The cache file is named by the blob sha, nothing else.
-        let cached = dir.appendingPathComponent("abc123def456.png")
+        // Named by the blob sha *and* the size it was decoded at — asked of the same
+        // function the store uses, so a change to the naming cannot make this test
+        // silently look somewhere the store never writes.
+        let named = try #require(ThumbnailCache.fileName(sha: "abc123def456",
+                                                         maxPixel: ThumbnailLimits().maxPixel))
+        #expect(named == "abc123def456@160.png", "the shape is still a plain filename")
+        let cached = dir.appendingPathComponent(named)
         #expect(FileManager.default.fileExists(atPath: cached.path))
 
         // A fresh store is what a relaunch looks like: empty memory, same directory.

@@ -379,3 +379,27 @@ extension UploadedLink {
             deduped: r.deduped)
     }
 }
+
+extension UploadedLink {
+    /// The snippet to copy, or the sentence explaining which address is missing.
+    ///
+    /// Both copy paths in the app had this shape written out — `snippet(form)`, then
+    /// `unavailable(form.target)?.message`, then a bare fallback — and the fallback had
+    /// already drifted between them, one naming the record and one not. A missing snippet
+    /// is a missing *address*, never a missing upload: only the CDN form can be absent,
+    /// and its two causes have different fixes, one of them a config value only the user
+    /// can change. So the reason is carried rather than the gap.
+    public func snippetOrReason(_ form: LinkForm, name: String) -> SnippetOutcome {
+        if let text = snippet(form) {
+            return .text(text)
+        }
+        return .unavailable(reason: unavailable(form.target)?.message
+                            ?? "没有 \(form.target.label) 链接：\(name)")
+    }
+}
+
+/// What ``UploadedLink/snippetOrReason(_:name:)`` decided.
+public enum SnippetOutcome: Equatable, Sendable {
+    case text(String)
+    case unavailable(reason: String)
+}

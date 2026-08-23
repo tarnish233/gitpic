@@ -6,13 +6,7 @@ struct UploadPane: View {
 
     var body: some View {
         Form {
-            // One condition, because the two ways to have no form here — a read that
-            // failed, and a read that has not happened — both end in `ConfigTrouble`.
-            // `configFailure` is the half that has to be asked *first*: `draft`
-            // outlives a failed reload on purpose (unsaved edits), so letting it win
-            // would leave a later CONFIG_INVALID showing the last good form, with
-            // 「备份并重建」 never appearing.
-            if model.configFailure == nil, let draft = Binding($model.draft) {
+            ConfigGate(model: model, repairs: false) { draft in
                 Section("路径") {
                     ConfigField(label: "模板", prompt: "images/{year}/{month}/{hash8}-{name}.{ext}",
                                 text: draft.upload.pathTemplate)
@@ -98,8 +92,6 @@ struct UploadPane: View {
                     }
                     .disabled(!draft.upload.compress.wrappedValue)
                 }
-            } else {
-                ConfigTrouble(model: model, repairs: false)
             }
 
             finderSection

@@ -11,13 +11,7 @@ struct HostPane: View {
         Form {
             account
 
-            // One condition, because the two ways to have no form here — a read that
-            // failed, and a read that has not happened — both end in `ConfigTrouble`.
-            // `configFailure` is the half that has to be asked *first*: `draft`
-            // outlives a failed reload on purpose (unsaved edits), so letting it win
-            // would leave a later CONFIG_INVALID showing the last good form, with
-            // 「备份并重建」 never appearing.
-            if model.configFailure == nil, let draft = Binding($model.draft) {
+            ConfigGate(model: model, repairs: true) { draft in
                 Section("图床仓库") {
                     // Chosen, never typed. Typing `owner/name` only invited three
                     // failures the list rules out: a misspelling that surfaces as a bare
@@ -79,8 +73,6 @@ struct HostPane: View {
                         .controlSize(.small)
                     }
                 }
-            } else {
-                ConfigTrouble(model: model, repairs: true)
             }
 
             connectivity
@@ -131,10 +123,9 @@ struct HostPane: View {
                     .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 HStack {
                     Button("打开浏览器") { NSWorkspace.shared.open(url) }
-                    Button("复制代码") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(userCode, forType: .string)
-                    }
+                    // Through the shared writer, which is the one that does not throw
+                    // the result away.
+                    Button("复制代码") { Clipboard.write(userCode) }
                     // Not cosmetic: cancelling terminates the CLI, which would
                     // otherwise keep polling GitHub until the code expires.
                     Button("取消") { model.cancelLogin() }
