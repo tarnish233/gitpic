@@ -248,23 +248,20 @@ struct HistoryPane: View {
             return
         }
         let form = model.linkForm
-        let link = UploadedLink(r, config: cfg)
-        guard let text = link.snippet(form) else {
-            // Names the cause, not just the gap: with a slashed branch every row in
-            // the pane is CDN-less, and the remedy is a config change.
-            model.notify(title: "复制失败",
-                         body: link.unavailable(form.target)?.message
-                               ?? "没有 \(form.target.label) 链接：\(r.name)")
-            return
-        }
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        if pb.setString(text, forType: .string) {
-            flashCount += 1
-            flash = CopyFlash(record: r.id, seq: flashCount)
-            Diagnostics.log("copied \(form.label) from history: \(r.name)")
-        } else {
-            model.notify(title: "写剪贴板失败", body: r.name)
+        // Names the cause, not just the gap: with a slashed branch every row in the pane
+        // is CDN-less, and the remedy is a config change. Decided in Core, so the
+        // menu-bar copy cannot word it differently — which it already did.
+        switch UploadedLink(r, config: cfg).snippetOrReason(form, name: r.name) {
+        case let .unavailable(reason):
+            model.notify(title: "复制失败", body: reason)
+        case let .text(text):
+            if Clipboard.write(text) {
+                flashCount += 1
+                flash = CopyFlash(record: r.id, seq: flashCount)
+                Diagnostics.log("copied \(form.label) from history: \(r.name)")
+            } else {
+                model.notify(title: "写剪贴板失败", body: r.name)
+            }
         }
     }
 

@@ -48,7 +48,7 @@ public struct ThumbnailSource: Sendable, Hashable {
     /// Falls back to the first address only for a history line whose sha is not a sha,
     /// which is a corrupt record rather than a case to optimise.
     public var cacheKey: String {
-        ThumbnailCache.fileName(sha: sha) ?? urls.first ?? sha
+        ThumbnailCache.normalizedSha(sha) ?? urls.first ?? sha
     }
 }
 
@@ -215,10 +215,30 @@ public enum ThumbnailCache {
     ///
     /// Hex only, lowercased, at most 64 characters: that admits git's SHA-1 (40) and
     /// a future SHA-256 (64), and admits no separator, no `.`, and no `..`.
-    public static func fileName(sha: String) -> String? {
+    ///
+    /// `maxPixel` is part of the name because it is part of what the bytes *are*. The
+    /// cached file is a thumbnail decoded at that size, and the class comment below
+    /// presents non-invalidation as the design virtue — "the same bytes are the same
+    /// key" — which holds for the blob and not for the size it was rendered at. Raise
+    /// ``ThumbnailLimits/maxPixel``, which its own doc says may happen when the box
+    /// grows, and every already-cached row stayed a hit: `decode` will not upscale (a
+    /// test pins that), so the pane drew a 160 px image in a 320 px box, permanently,
+    /// because nothing but the size pruner ever removes one of these files.
+    public static func fileName(sha: String, maxPixel: Int) -> String? {
+        normalizedSha(sha).map { "\($0)@\(maxPixel).png" }
+    }
+
+    /// The sha, lowercased, or `nil` if it cannot be one.
+    ///
+    /// Split from ``fileName(sha:maxPixel:)`` because two callers want different things
+    /// from it: that one is building a *path* and needs the size baked in, while
+    /// ``ThumbnailSource/cacheKey`` wants an *identity* for the in-memory cache and has
+    /// no use for a `.png` suffix it never resolves. The injection guard is the part
+    /// they share.
+    public static func normalizedSha(_ sha: String) -> String? {
         guard (1...64).contains(sha.count) else { return nil }
         var out = ""
-        out.reserveCapacity(sha.count + 4)
+        out.reserveCapacity(sha.count)
         for c in sha.unicodeScalars {
             switch c {
             case "0"..."9", "a"..."f": out.unicodeScalars.append(c)
@@ -226,7 +246,7 @@ public enum ThumbnailCache {
             default:                   return nil
             }
         }
-        return out + ".png"
+        return out
     }
 
     /// One cached file, as the pruner sees it.
@@ -737,7 +757,7 @@ public actor ThumbnailStore {
                              session: URLSession,
                              announceFetch: @escaping @Sendable () async -> Void)
                              async -> Result<Loaded, ThumbnailFailure> {
-        let cacheFile = ThumbnailCache.fileName(sha: source.sha)
+        let cacheFile = ThumbnailCache.fileName(sha: source.sha, maxPixel: limits.maxPixel)
             .map { directory.appendingPathComponent($0) }
 
         if let cacheFile, let data = try? Data(contentsOf: cacheFile),

@@ -31,6 +31,50 @@ extension View {
 /// pressed. The CLI names the file and the offending key; showing that, and offering
 /// the one action that changes the answer, is the difference between a diagnosis and
 /// a shrug.
+/// The one pasteboard write in the app.
+///
+/// `setString` can fail, and reporting 「已复制」 anyway is worse than not copying — the
+/// user pastes stale content and never learns why — so the result is returned and every
+/// caller has to look at it. It was hand-rolled at three sites, one of which ignored the
+/// result entirely.
+enum Clipboard {
+    @discardableResult
+    static func write(_ s: String) -> Bool {
+        guard !s.isEmpty else { return false }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        return pb.setString(s, forType: .string)
+    }
+}
+
+/// The config-or-trouble gate both editing panes open with.
+///
+/// One owner for the condition, its reasoning, and the `ConfigTrouble` fallback. The two
+/// panes carried this byte-identically, comment included — so the invariant it encodes
+/// ("a failed read must beat a surviving draft, or 备份并重建 never appears") was being
+/// held by hand in two places, and the next pane to edit config would have re-derived it
+/// or got it wrong.
+struct ConfigGate<Content: View>: View {
+    @Bindable var model: AppModel
+    /// Whether the trouble view offers the repair actions — only the pane that owns the
+    /// image host does.
+    let repairs: Bool
+    @ViewBuilder let content: (Binding<GitpicConfig>) -> Content
+
+    var body: some View {
+        // One condition, because the two ways to have no form here — a read that failed,
+        // and a read that has not happened — both end in `ConfigTrouble`. `configFailure`
+        // is the half that has to be asked *first*: `draft` outlives a failed reload on
+        // purpose (unsaved edits), so letting it win would leave a later CONFIG_INVALID
+        // showing the last good form, with 「备份并重建」 never appearing.
+        if model.configFailure == nil, let draft = Binding($model.draft) {
+            content(draft)
+        } else {
+            ConfigTrouble(model: model, repairs: repairs)
+        }
+    }
+}
+
 struct ConfigTrouble: View {
     var model: AppModel
     /// Whether this pane owns the repair. The host pane does — it is where the config
