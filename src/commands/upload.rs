@@ -347,8 +347,28 @@ fn read_files(files: &[std::path::PathBuf]) -> Result<Vec<InputImage>> {
                 f.display()
             )));
         }
+        // Judged from the metadata, before the bytes are in memory. `reject_oversize`
+        // lives inside `put_file`, which is three steps and a whole file-read too late:
+        // `gitpic bigvideo.mov` — a plausible mis-drag out of Finder — allocated three
+        // gigabytes and *then* said the Contents API tops out at 100 MB, and on a
+        // machine with less headroom it was an OOM kill instead, exit 137, outside the
+        // documented 1-10 range that `main`'s "no catch-all arm" comment exists to
+        // protect. Same function and same message as the late check, so the two cannot
+        // disagree about the limit.
+        let len = f
+            .metadata()
+            .map_err(|e| AppError::not_found(format!("read {}: {e}", f.display())))?
+            .len();
+        crate::github::reject_oversize(&f.display().to_string(), len as usize)?;
         let bytes = std::fs::read(f)
             .map_err(|e| AppError::not_found(format!("read {}: {e}", f.display())))?;
+        // The same refusal `read_stdin` has always had. Without it `touch shot.png &&
+        // gitpic shot.png` made a real commit in the image-host repo, printed
+        // `✓ uploaded`, and put a markdown link on the clipboard that renders as a
+        // broken image — exit 0, nothing to suggest anything was wrong.
+        if bytes.is_empty() {
+            return Err(AppError::usage(format!("{} is empty", f.display())));
+        }
         let name = f
             .file_name()
             .and_then(|s| s.to_str())
