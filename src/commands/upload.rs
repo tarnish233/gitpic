@@ -467,9 +467,24 @@ fn display_name(explicit: Option<&str>, bytes: &[u8], fallback: ExtFallback<'_>)
     };
 
     match (fallback, ext) {
-        (ExtFallback::Stdin, None) => Err(AppError::usage(
-            "cannot tell what kind of image this is from the bytes; pass --name to set the filename",
-        )),
+        // Two different mistakes, and they used to get one message. "pass --name to
+        // set the filename" is no answer to someone who *did* pass one: an agent
+        // following the skill sends `--name shot`, because the rule everywhere else
+        // is that `--name` gives the stem and the bytes give the extension — and
+        // then reads a message telling it to do what it just did. Unidentifiable
+        // bytes are the one place the extension has nowhere else to come from, so
+        // that is what the message has to ask for.
+        (ExtFallback::Stdin, None) => Err(AppError::usage(match explicit {
+            Some(name) => format!(
+                "--name {name:?} carries no extension and these bytes are not an image \
+                 gitpic can identify, so there is nothing to take one from; include it \
+                 (e.g. --name {}.bin)",
+                explicit_stem(explicit).unwrap_or("shot")
+            ),
+            None => "cannot tell what kind of image this is from the bytes; pass --name \
+                     with an extension (e.g. --name shot.bin) to say what they are"
+                .to_string(),
+        })),
         (_, Some(ext)) => Ok(format!("{stem}.{ext}")),
         (ExtFallback::File { .. }, None) => Ok(stem.to_string()),
         (ExtFallback::Fixed(_), None) => unreachable!("fixed extension is Some"),
@@ -814,6 +829,9 @@ mod tests {
         let err = display_name(Some("shot"), b"this is not an image", ExtFallback::Stdin)
             .expect_err("must be rejected");
         assert_eq!(err.code, crate::error::ErrorCode::Usage);
-        assert!(err.message.contains("--name"), "{}", err.message);
+        // Not "pass --name": it was passed. The message has to name what is
+        // actually missing, or the caller repeats itself — see `display_name`.
+        assert!(err.message.contains("extension"), "{}", err.message);
+        assert!(err.message.contains("shot"), "{}", err.message);
     }
 }
