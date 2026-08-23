@@ -74,31 +74,35 @@ enum FinderService {
                                kCFPreferencesAnyHost) as? [String: Any]
     }
 
-    /// Turn the right-click item on or off, and return **the state the system reports
-    /// afterwards** — which is not necessarily the one asked for.
+    /// Turn the right-click item on or off.
     ///
-    /// Returning the observed state rather than a `landed` flag is what lets the caller
-    /// assign and compare from one read. Writing another domain can fail, and a switch
-    /// that slides over and changes nothing is worse than one that refuses: the user
-    /// would go to Finder, still find the item, and have no reason to suspect the switch.
-    @discardableResult
-    static func setEnabled(_ enabled: Bool) -> Bool {
+    /// **Returns nothing, because nothing here can be verified.** This used to read the
+    /// value back and hand the caller a `landed` flag, which was a tautology: the
+    /// read-back hits the same in-process CFPreferences cache the write just populated, so
+    /// it echoed the written value whatever happened underneath. Measured with `chflags
+    /// uchg` on `pbs.plist`: `CFPreferencesAppSynchronize` still returned `true`, the
+    /// in-process read showed the new value, and `NSDictionary(contentsOfFile:)` showed the
+    /// old one — so neither the flush result nor the read-back was evidence of anything.
+    /// Reading the file instead does not work either: on a healthy write cfprefsd has
+    /// usually not flushed yet, so it would report failure for writes that were fine.
+    ///
+    /// So the write is best-effort and says so. What covers the rare real failure — a
+    /// locked, MDM-managed or root-owned `pbs.plist` — is the switch's caption pointing at
+    /// 系统设置, rather than a reassuring dialog this code cannot honestly produce.
+    static func setEnabled(_ enabled: Bool) {
         CFPreferencesAppSynchronize(domain)
         let next = FinderServiceStatus.applying(enabled: enabled, to: read(),
                                                 key: statusKey)
         CFPreferencesSetValue(statusKeyName, next as CFDictionary, domain,
                               kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
         let flushed = CFPreferencesAppSynchronize(domain)
-        // Tell the services machinery to re-read the state it just changed. Without
-        // this the menu keeps its old shape until something else invalidates the
-        // cache; with it, the next context menu is already right.
+        // Tell the services machinery to re-read the definitions it caches. This does
+        // *not* rewrite the menu: the menu is assembled in the requesting process
+        // (Finder), from that process's own preferences snapshot — which is why
+        // `isEnabled` above has to synchronise for itself. So a menu already on screen,
+        // or a Finder that has not refreshed its snapshot, can still show the item.
         NSUpdateDynamicServices()
-        // Read back rather than trust the write: this is a different domain, and the
-        // only claim worth making to the user is one that has been confirmed. The flush
-        // above is this process's own write, so no second synchronise is needed.
-        let observed = FinderServiceStatus.isEnabled(read(), key: statusKey)
-        Diagnostics.log("finder service: set enabled=\(enabled)"
-                        + " flushed=\(flushed) observed=\(observed)")
-        return observed
+        Diagnostics.log("finder service: set enabled=\(enabled) flushed=\(flushed)"
+                        + " (not verifiable in-process — see setEnabled)")
     }
 }

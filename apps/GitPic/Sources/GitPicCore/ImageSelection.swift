@@ -31,6 +31,12 @@ public struct ImageSelection: Equatable, Sendable {
         return "选中的不是图片：\(Self.nameList(skipped))"
     }
 
+    /// The skipped names, for a caller that uploaded the rest and has to say so.
+    ///
+    /// Shares ``nameList``'s three-and-a-count truncation with ``refusal`` so the two
+    /// messages cannot describe the same selection two different ways.
+    public var skippedSummary: String { Self.nameList(skipped) }
+
     /// Names, three at a time.
     ///
     /// A right-click can carry a hundred files, and a notification body that long is

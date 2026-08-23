@@ -122,15 +122,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let r = GitpicRunner(tools: paths)
         runner = r
         AppModel.shared.attach(runner: r, tools: paths)
-        // The window can be open before discovery finishes, and the reload it fired
-        // on open no-ops while `runner` is nil. Without this the form sits on its
-        // placeholder until the user happens to find the retry button.
-        Task { await AppModel.shared.reload() }
         // Probing gh here costs one spawn at launch and makes the single most
         // confusing failure (no gh under a Finder launch) legible in the log.
         Diagnostics.recordLaunch(appVersion: version, tools: paths,
                                  ghStatus: discovered.1)
         Diagnostics.log("  dryRun=\(dryRun)")
+        // Awaited, not fired into a detached `Task` — and this ordering is the whole
+        // reason a right-click upload gets the link the user configured.
+        //
+        // `finish()` reads `AppModel.savedConfig` to resolve both addresses and to
+        // honour `upload.auto_copy`. A cold-launch upload resumes the moment this task
+        // completes, so with the reload merely *started* here it would race it — and
+        // lose, because `reload()` makes two separate trips through `GitpicRunner`'s
+        // serial gate (`configPath()` then `loadConfig()`, and `configPath == nil` on a
+        // cold launch). The upload slots between them, so the gate order comes out
+        // `configPath` → `upload` → `loadConfig` and `finish()` sees a nil config: the
+        // CDN address unavailable, `form.target` forced to `.raw` while the banner still
+        // named the configured form, and `auto_copy = false` ignored because the
+        // fallback for an unreadable config is `true`. `Link.swift`'s `UploadedLink`
+        // documents the invariant this restores — config is read before any upload.
+        //
+        // Nothing is blocked by waiting: the status item is already on screen, and every
+        // step here is a suspension rather than main-thread work.
+        await AppModel.shared.reload()
     }
 
     /// The one thread discovery is allowed to block.
@@ -525,13 +539,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             + " \(selector) — NSMessage in Info.plist and"
                             + " ServiceProvider's method name have drifted apart")
         }
-        // Nudge the pasteboard server to re-read this bundle's `NSServices` now.
+        // Nudge the services machinery to re-read this bundle's `NSServices`.
         //
-        // Not a fix for first-install latency — that is Launch Services' business and
-        // this call cannot reach it. What it does buy is the *upgrade* case: a build
-        // that changes the item's title or its send types is picked up when the new
-        // app first runs, instead of leaving the old wording in Finder's menu until
-        // something else happens to flush the cache.
+        // What it does *not* do is rewrite a menu: the context menu is assembled inside
+        // the requesting process from that process's own preferences snapshot, which is
+        // why `FinderService.isEnabled` synchronises for itself. So this is about
+        // definitions — a build that changed the item's title or its send types is picked
+        // up when the new app first runs, instead of leaving the old wording in Finder's
+        // menu until something else happens to flush the cache. First-install latency is
+        // Launch Services' business and this call cannot reach it.
         NSUpdateDynamicServices()
     }
 

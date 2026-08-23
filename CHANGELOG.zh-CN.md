@@ -34,6 +34,15 @@ Developer ID 才能稳定注册，而这个项目只有 ad-hoc 签名（见 `doc
 「上传剪贴板」也跟着改了。它原先在 discovery 期间会拒绝，而同一秒里右键却会等待并成功 ——
 同样的意图、同样的文件 URL，结果相反，只取决于点了哪个入口。两条路现在都 `await`。
 
+**首次配置的读取也被拉进了这条等待里，否则右键拿到的是错的链接形态。** `finish()` 要读
+`AppModel.savedConfig` 才能解析两个地址、才能遵守 `upload.auto_copy`，而 `reload()` 要经过
+`GitpicRunner` 那道串行门两次（`configPath()` 然后 `loadConfig()`，冷启动时 `configPath` 为
+nil）。上传会挤在这两次之间，门序变成 `configPath` → `upload` → `loadConfig`，于是 `finish()`
+读到空配置：CDN 地址不可用、`form.target` 被强制成 `.raw` 而横幅仍报着用户配置的形态，并且
+**`auto_copy = false` 会被无视**（读不出配置时的兜底是 `true`）。现在 `resolveTools()` 直接
+`await` 首次 reload，所以 discovery 完成即意味着配置已就绪 —— 这是语言层面的顺序保证，不是
+靠时序碰运气。
+
 **非图片会被挡下来，而且这道检查是必需的。** 实测：`NSSendFileTypes` 里的 `public.image`
 只决定菜单里显不显示这一项；派发时 pbs 只检查剪贴板上有没有 `public.file-url` —— 它自己会
 这么说（"Pasteboard contained types (), but service expects types (public.file-url)"）——
@@ -56,22 +65,44 @@ Developer ID 才能稳定注册，而这个项目只有 ad-hoc 签名（见 `doc
 配置的分支**外面**，配置读不出来时也还在。
 
 **关掉之后服务端会再确认一次。** pbs 实测仍会把消息派发给一个已关闭的服务，所以
-`ServiceProvider` 自己也查一遍：菜单项已经不在了是常态，但服务缓存没跟上、或记录还挂在旧
-标题下的时候，这一道才是让开关的答案仍然为真的东西。
+`ServiceProvider` 自己也查一遍：菜单项已经不在了是常态，但服务缓存没跟上的时候，这一道才是让
+开关的答案仍然为真的东西。（标题改名会孤立旧记录，那种情况这道检查也救不了 —— 只有别改名能。）
 
-**读这条记录踩过一个坑。** 同一个标志在真实的 `pbs.plist` 里可能是布尔、整数，也可能是
-字符串 —— `defaults write … '{enabled_context_menu = 0;}'` 存进去的那个 `0` 是
-`NSTaggedPointerString`，因为老式 plist 文本里根本没有数字语法。只认 `NSNumber` 的读法在它
-上面返回 nil，接着落到"没有记录就是开"，于是开关对着一个已关闭的服务显示"开"。三种写法现在
-都认，也都有回归测试。
+**读这条记录踩过两个坑，第二个更要紧。**
+
+`enabled_context_menu` 不是现在的写法。AppKit 自己的诊断字符串把它叫做 *"the older
+'enabled_context_menu' key"* —— 这句连同 `presentation_modes`、`ContextMenu`、`ServicesMenu`、
+`TouchBar` 都能在 macOS 26.5 的 dyld 共享缓存里逐字找到。只认旧键的读法，会在系统设置只写了新键
+时把一个已关闭的服务报成"开"。现在以 `presentation_modes` 为主、旧键兜底、都读不懂才默认为开。
+**新键的值结构是推断的，不是观察到的**：这台机器从没有人切过任何服务（`NSServicesStatus` 回读
+是空字典），所以没有真实条目可看，模式名来自 AppKit 的符号而不是某个 plist。因此读的时候两种
+可能的编码都认，写的时候**只更新已经存在的** `presentation_modes`、绝不凭猜测新建一个。
+
+另一个坑：同一个标志在真实 `pbs.plist` 里可能是布尔、整数，也可能是字符串 ——
+`defaults write … '{enabled_context_menu = 0;}'` 存进去的那个 `0` 是 `NSTaggedPointerString`，
+因为老式 plist 文本里根本没有数字语法。只认 `NSNumber` 会把已关闭的服务读成开着。三种写法现在
+都认，而且字符串只认可识别的值：`NSString.boolValue` 从不返回 nil，会把 `""` 也算成 `false`，
+那样一个读不懂的条目就会**关掉功能**却什么都没从菜单里拿掉 —— 恰好是"读不懂就默认为开"要防的。
+
+**写入是尽力而为，而且它说明了这一点。** 早先这里会回读一次并给调用方一个"是否落地"的标志，
+那是同义反复：回读命中的是刚写过的同一个进程内 CFPreferences 缓存，所以无论底下发生了什么它都
+回显写入值。用 `chflags uchg` 锁住 `pbs.plist` 实测：`CFPreferencesAppSynchronize` 仍返回
+`true`，进程内读到新值，而 `NSDictionary(contentsOfFile:)` 读到旧值。改读文件也不行 —— 写入正常
+时 cfprefsd 通常还没落盘，那样会把好的写入报成失败。所以那条"改不了右键菜单"的假通知删掉了，
+开关的说明文字改为指向系统设置，那是这段代码唯一能诚实提供的东西。
+
+**改动那条记录时会保留同级键。** 原先是整条替换子字典，会连 `key_equivalent` 一起丢掉 ——
+那是用户自己设的服务快捷键（这台机器的 `pbs.plist` 里有 `ServicesShortcutsPresent`，说明确实
+存在）—— 于是把右键项关掉再打开，会静默拿走一个快捷键。
 
 ### App
 
 - 状态栏菜单没有变化：右键是第四个入口，前三个（选择文件、剪贴板、CLI）都还在。
 - 失败措辞按情况分开：没有图片说「选中的不是图片：<名字>」（超过三个折成"等 N 个"，因为
   通知正文会被系统按它自己挑的长度截断），一个文件都没收到说「右键上传没有收到文件」，开关
-  关着时说「右键上传已在 GitPic 设置里关闭」。写不进 `pbs` 时开关会弹回原位并指路系统设置，
-  不会滑过去装作改了。
+  关着时说「右键上传已关闭」—— 走的是中性通知，不是上传失败那条路（那条的横幅标题硬编码为
+  「GitPic 上传失败」，而一个被遵守的设置不是上传失败）。混选里被丢掉的文件现在会单独点名，
+  而不是留下一个跟用户所选数量对不上的成功计数。
 - `~/Library/Logs/GitPic.log` 记下每次右键派发：收到几个、其中几张是图片、跳过了哪些。
 
 CLI 一行没改。
