@@ -41,6 +41,17 @@ appear ahead of discovery's own launch record.
 same second waited and succeeded — same intent, same file URLs, opposite outcome, decided
 only by which entry point was used. Both paths await now.
 
+**The first config read was pulled into that same wait, or a right-click gets the wrong link
+form.** `finish()` needs `AppModel.savedConfig` to resolve both addresses and to honour
+`upload.auto_copy`, and `reload()` makes two separate trips through `GitpicRunner`'s serial
+gate (`configPath()` then `loadConfig()`, and `configPath` is nil on a cold launch). The
+upload slots between them, making the gate order `configPath` → `upload` → `loadConfig`, so
+`finish()` saw a nil config: the CDN address unavailable, `form.target` forced to `.raw`
+while the banner still named the configured form, and **`auto_copy = false` ignored**
+(the fallback for an unreadable config is `true`). `resolveTools()` now awaits the first
+reload directly, so discovery completing *means* the config is ready — an ordering
+guaranteed by the language rather than won on timing.
+
 **Non-images are refused, and that check is load-bearing.** Measured: the `public.image` in
 `NSSendFileTypes` only decides whether the item appears in the menu. At dispatch, pbs checks
 only that the pasteboard carries `public.file-url` — it says so itself ("Pasteboard
@@ -70,14 +81,46 @@ when the config cannot be read.
 
 **With the switch off, the provider checks again.** Measured: pbs still dispatches to a
 disabled service, so `ServiceProvider` re-checks. The item being gone is the ordinary case,
-but when the services cache has not caught up — or the entry is still filed under an old
-menu title — this is what keeps the switch's answer true.
+but when the services cache has not caught up, this is what keeps the switch's answer true.
+(A renamed title orphans the old entry, and this guard cannot help with that either — only
+not renaming can.)
 
-**Reading that entry had a trap in it.** The same flag can be a boolean, an integer, *or a
-string* in a real `pbs.plist`: the `0` that `defaults write … '{enabled_context_menu = 0;}'`
-stores is an `NSTaggedPointerString`, because old-style plist text has no number syntax. An
-`as? NSNumber`-only reader returned nil for it, fell through to "no entry means on", and
-showed 开 for a service that was off. All three spellings are now read, and regression-tested.
+**Reading that entry had two traps in it, and the second matters more.**
+
+`enabled_context_menu` is not the current spelling. AppKit's own diagnostic strings call it
+*"the older 'enabled_context_menu' key"* — found verbatim in the macOS 26.5 dyld shared
+cache, alongside `presentation_modes`, `ContextMenu`, `ServicesMenu` and `TouchBar`. A reader
+that consults only the legacy key reports 开 for a service switched off in System Settings,
+whenever System Settings wrote the modern key alone. `presentation_modes` is now read first,
+the legacy key second, and only an unreadable pair defaults to on. **The modern key's value
+shape is inferred, not observed:** nothing on this machine has ever been toggled
+(`NSServicesStatus` reads back empty), so there was no real entry to inspect and the mode
+names come from AppKit's symbols rather than from a plist. Hence both plausible encodings are
+accepted on read, and a write only ever *updates an existing* `presentation_modes` — it never
+invents one.
+
+The other trap: the same flag can be a boolean, an integer, *or a string* — the `0` that
+`defaults write … '{enabled_context_menu = 0;}'` stores is an `NSTaggedPointerString`,
+because old-style plist text has no number syntax. An `as? NSNumber`-only reader saw nil and
+fell through to "absent means on". All three are read now, and strings are matched against
+known values only: `NSString.boolValue` never returns nil and maps `""` to `false`, which
+would have *disabled* the feature on an unreadable entry while hiding nothing from Finder's
+menu — the exact outcome the fail-open default exists to prevent.
+
+**The write is best-effort, and says so.** It used to read the value back and hand the caller
+a landed/failed flag. That was a tautology: the read-back hits the same in-process
+CFPreferences cache the write just populated, so it echoes the written value whatever
+happened underneath. Measured with `chflags uchg` on `pbs.plist` —
+`CFPreferencesAppSynchronize` still returned `true`, the in-process read showed the new value,
+and `NSDictionary(contentsOfFile:)` showed the old one. Reading the file instead does not work
+either: on a healthy write cfprefsd has usually not flushed yet, so it would report failure
+for writes that were fine. So the reassuring 「改不了右键菜单」 dialog is gone and the switch's
+caption points at System Settings, which is the only honest thing this code can offer.
+
+**A write keeps the entry's sibling keys.** It used to replace the whole sub-dictionary,
+discarding `key_equivalent` — the Services keyboard shortcut the user assigned (this
+machine's `pbs.plist` carries `ServicesShortcutsPresent`, so those exist in practice). Turning
+the right-click item off and on again would quietly take a shortcut away.
 
 ### App
 
@@ -85,9 +128,11 @@ showed 开 for a service that was off. All three spellings are now read, and reg
   three (file picker, clipboard, CLI) all remain.
 - Failure wording is split by cause: no images says 「选中的不是图片：<names>」 (more than
   three collapse to 等 N 个, because the system truncates a notification body at a length it
-  picks), no files at all says 「右键上传没有收到文件」, and a disabled switch says
-  「右键上传已在 GitPic 设置里关闭」. A `pbs` write that fails springs the switch back and
-  points at System Settings rather than sliding over and pretending.
+  picks), no files at all says 「右键上传没有收到文件」, and a switched-off item says
+  「右键上传已关闭」 — through a neutral notice, not through the upload-failure path, whose
+  banner title is hard-coded 「GitPic 上传失败」. A mixed selection that drops some files now
+  names them in their own notice rather than leaving the success count to be reconciled
+  against what was selected.
 - `~/Library/Logs/GitPic.log` records every dispatch: how many items arrived, how many were
   images, and which were skipped.
 

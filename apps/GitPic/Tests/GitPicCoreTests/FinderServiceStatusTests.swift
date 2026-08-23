@@ -58,12 +58,64 @@ struct FinderServiceStatusTests {
         }
     }
 
-    /// A value of a type that is not a boolean in any spelling is not evidence the
-    /// service is off, so it falls back to on — the same answer as no entry at all.
+    /// A value of a type or spelling that is not a boolean is not evidence the service is
+    /// off, so it falls back to on — the same answer as no entry at all.
+    ///
+    /// `""` is the one that mattered: `NSString.boolValue` maps it (and "maybe", and
+    /// "off") to `false`, so the previous reader *disabled* the feature on an
+    /// unreadable value — hiding nothing from Finder's menu while refusing every
+    /// right-click, which is what fail-open exists to prevent.
     @Test("an uninterpretable value falls back to on")
     func ignoresNonsense() {
-        let status: [String: Any] = [key: [FinderServiceStatus.contextMenuKey: ["what"]]]
-        #expect(FinderServiceStatus.isEnabled(status, key: key))
+        for junk in [["what"], "", "maybe", "off"] as [Any] {
+            let status: [String: Any] = [key: [FinderServiceStatus.contextMenuKey: junk]]
+            #expect(FinderServiceStatus.isEnabled(status, key: key),
+                    "\(junk) should not be read as a decision")
+        }
+    }
+
+    // MARK: - The modern key
+
+    /// `enabled_context_menu` is what AppKit's own diagnostics call "the older" key.
+    /// A reader that consults only it reports 开 for a service System Settings switched
+    /// off using `presentation_modes` alone.
+    @Test("presentation_modes decides, in either encoding")
+    func readsPresentationModes() {
+        let asDict: [String: Any] = [key: [
+            FinderServiceStatus.presentationModesKey: ["ContextMenu": false,
+                                                       "ServicesMenu": true],
+        ]]
+        #expect(FinderServiceStatus.isEnabled(asDict, key: key) == false)
+
+        let asList: [String: Any] = [key: [
+            FinderServiceStatus.presentationModesKey: ["ServicesMenu", "TouchBar"],
+        ]]
+        #expect(FinderServiceStatus.isEnabled(asList, key: key) == false)
+
+        let listWithIt: [String: Any] = [key: [
+            FinderServiceStatus.presentationModesKey: ["ContextMenu", "ServicesMenu"],
+        ]]
+        #expect(FinderServiceStatus.isEnabled(listWithIt, key: key))
+    }
+
+    @Test("the modern key wins over a stale legacy one")
+    func modernKeyWins() {
+        let status: [String: Any] = [key: [
+            FinderServiceStatus.presentationModesKey: ["ContextMenu": false],
+            FinderServiceStatus.contextMenuKey: true,
+        ]]
+        #expect(FinderServiceStatus.isEnabled(status, key: key) == false)
+    }
+
+    /// An unreadable `presentation_modes` must not swallow the answer the legacy key
+    /// still carries.
+    @Test("an unreadable modern key falls through to the legacy one")
+    func fallsThroughToLegacy() {
+        let status: [String: Any] = [key: [
+            FinderServiceStatus.presentationModesKey: 42,
+            FinderServiceStatus.contextMenuKey: false,
+        ]]
+        #expect(FinderServiceStatus.isEnabled(status, key: key) == false)
     }
 
     /// The dictionary is shared with every other app on the machine that ships a
@@ -82,6 +134,44 @@ struct FinderServiceStatusTests {
         #expect(FinderServiceStatus.isEnabled(next,
                                               key: "com.example.other - Do Thing - doThing")
                 == false)
+    }
+
+    /// The inner merge. Replacing the sub-dictionary threw away `key_equivalent` — the
+    /// Services keyboard shortcut the user assigned — so turning the item off and on
+    /// again quietly took their shortcut away.
+    @Test("writing keeps the sibling keys inside our own entry")
+    func preservesSiblingKeys() {
+        let existing: [String: Any] = [key: [
+            "key_equivalent": "$@g",
+            FinderServiceStatus.contextMenuKey: true,
+        ]]
+        let next = FinderServiceStatus.applying(enabled: false, to: existing, key: key)
+        let entry = next[key] as? [String: Any]
+        #expect(entry?["key_equivalent"] as? String == "$@g")
+        #expect(FinderServiceStatus.isEnabled(next, key: key) == false)
+    }
+
+    /// `presentation_modes` is updated in place, keeping its shape and its other modes —
+    /// and is never created from scratch, because its real encoding has not been observed.
+    @Test("an existing presentation_modes is updated, not replaced or invented")
+    func updatesPresentationModesInPlace() {
+        let dictShape: [String: Any] = [key: [
+            FinderServiceStatus.presentationModesKey: ["ContextMenu": true,
+                                                       "ServicesMenu": true],
+        ]]
+        let offDict = FinderServiceStatus.applying(enabled: false, to: dictShape, key: key)
+        let modes = (offDict[key] as? [String: Any])?[
+            FinderServiceStatus.presentationModesKey] as? [String: Any]
+        #expect(modes?["ContextMenu"] as? Bool == false)
+        // The placement this switch is not about survives.
+        #expect(modes?["ServicesMenu"] as? Bool == true)
+        #expect(FinderServiceStatus.isEnabled(offDict, key: key) == false)
+
+        // Nothing to update: the key must not appear.
+        let fresh = FinderServiceStatus.applying(enabled: false, to: nil, key: key)
+        let entry = fresh[key] as? [String: Any]
+        #expect(entry?[FinderServiceStatus.presentationModesKey] == nil)
+        #expect(FinderServiceStatus.isEnabled(fresh, key: key) == false)
     }
 
     @Test("a written state reads back as itself, both ways")

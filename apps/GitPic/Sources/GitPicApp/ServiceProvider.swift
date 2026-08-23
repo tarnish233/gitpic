@@ -77,7 +77,12 @@ final class ServiceProvider: NSObject {
         // can catch that — only not renaming the title can.
         guard FinderService.isEnabled else {
             Diagnostics.log("service upload ignored: right-click upload is switched off")
-            refuse("右键上传已在 GitPic 设置里关闭")
+            // Not through `refuse`: that ends in `UploadReport.failed`, whose notice title
+            // is hard-coded 「GitPic 上传失败」, and a setting being honoured is not an
+            // upload failure. Nothing was attempted — say why nothing happened instead.
+            AppModel.shared.notify(
+                title: "右键上传已关闭",
+                body: "可在 GitPic 设置 ▸ 上传 ▸「Finder 右键」里重新打开。")
             return
         }
         // No `.urlReadingContentsConformToTypes` filter, on purpose: reading the
@@ -89,22 +94,35 @@ final class ServiceProvider: NSObject {
         ) as? [URL] ?? []
 
         let selection = ImageFilter.partition(urls)
-        // One line, and no `urls.count`: every URL lands in exactly one bucket, so the
-        // total is `images + skipped` and printing it as well invites the reader to
-        // check the arithmetic. `userData` arrives as "" rather than nil when the plist
-        // carries no `NSUserData` — measured — so an `if let` alone logs a bare
-        // `userData=` on every single click.
+        // `urls.count` is kept even though it equals `images + skipped`, because the two
+        // are not redundant when the *bridge* fails: `readObjects(...) as? [URL] ?? []`
+        // collapses to empty if any element fails to bridge, and "arrived 0" is the only
+        // thing that distinguishes that from Finder sending nothing at all.
         //
-        // The skipped names go in whole, untruncated: a log is not a notification, which
-        // is why this does not reuse `ImageSelection`'s three-and-a-count wording.
+        // `userData` arrives as "" rather than nil when the plist carries no
+        // `NSUserData` — measured — so an `if let` alone logs a bare `userData=` on every
+        // single click. The skipped names go in whole, untruncated: a log is not a
+        // notification, which is why this does not reuse `ImageSelection`'s
+        // three-and-a-count wording.
         let tag = userData.flatMap { $0.isEmpty ? nil : " userData=\($0)" } ?? ""
         let skipped = selection.skipped.isEmpty ? "" : ", skipped "
             + selection.skipped.map(\.lastPathComponent).joined(separator: ", ")
-        Diagnostics.log("service upload requested: \(selection.images.count) image(s)"
-                        + "\(skipped)\(tag)")
+        Diagnostics.log("service upload requested: \(urls.count) item(s), "
+                        + "\(selection.images.count) image(s)\(skipped)\(tag)")
         if let refusal = selection.refusal {
             refuse(refusal)
             return
+        }
+        // Said out loud, not just logged. The success banner comes from the upload and
+        // counts only what it uploaded — 「3 张已复制」 for a selection of ten is exactly
+        // the ambiguity `ImageSelection`'s two lists exist to remove. `NSSendFileTypes`
+        // matches per pasteboard rather than requiring every file to conform, so a mixed
+        // selection is reachable; an extra banner in that rare case beats a count the
+        // user cannot reconcile with what they selected.
+        if !selection.skipped.isEmpty {
+            AppModel.shared.notify(
+                title: "跳过 \(selection.skipped.count) 个非图片文件",
+                body: selection.skippedSummary)
         }
         upload(selection.images)
     }

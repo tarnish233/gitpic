@@ -158,19 +158,15 @@ final class AppModel {
         finderServiceEnabled = FinderService.isEnabled
     }
 
-    /// Flip the switch, and show what the system actually did.
+    /// Flip the switch.
     ///
-    /// `setEnabled` returns the state it observed after writing, so this assigns that —
-    /// one read, one comparison. A switch that slid over while the menu item stayed put
-    /// would be a lie the user cannot see through, so a refusal springs the switch back
-    /// and says where the same setting can be changed by hand.
+    /// Assigns what was asked for, because ``FinderService/setEnabled`` cannot report
+    /// whether the write survived — see its comment for why the read-back it used to do
+    /// was a tautology. The switch's caption names 系统设置 as the place to check, which
+    /// is the honest substitute for a confirmation this code cannot produce.
     func setFinderServiceEnabled(_ enabled: Bool) {
-        let observed = FinderService.setEnabled(enabled)
-        finderServiceEnabled = observed
-        guard observed != enabled else { return }
-        notify(title: "改不了右键菜单",
-               body: "系统没有接受这次修改。可在「系统设置 ▸ 键盘 ▸ 键盘快捷键 ▸ 服务」"
-                     + "里手动开关 GitPic。")
+        FinderService.setEnabled(enabled)
+        finderServiceEnabled = enabled
     }
 
     /// Post an outcome to Notification Center, and log it.

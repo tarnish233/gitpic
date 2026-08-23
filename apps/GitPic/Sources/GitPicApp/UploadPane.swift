@@ -124,8 +124,10 @@ struct UploadPane: View {
         Section("Finder 右键") {
             CaptionedToggle(
                 label: "在右键菜单里显示「\(FinderService.menuItemTitle)」",
-                caption: "选中图片后右键即可上传。改完立即生效，不用按「保存」；"
-                         + "已经打开的右键菜单要关掉再开。",
+                caption: "选中图片后右键即可上传。改完立即生效，不用按「保存」。"
+                         + "菜单是由 Finder 自己缓存的，所以已经打开的右键菜单要关掉再开，"
+                         + "偶尔还要等一会儿；这个开关和「系统设置 ▸ 键盘 ▸ 键盘快捷键 ▸ "
+                         + "服务」里的那一项是同一个。",
                 isOn: Binding(get: { model.finderServiceEnabled },
                               set: { model.setFinderServiceEnabled($0) }))
         }
