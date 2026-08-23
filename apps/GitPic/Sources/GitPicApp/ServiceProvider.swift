@@ -20,14 +20,26 @@ import GitPicCore
 /// bundle is ad-hoc signed). `NSServices` is carried by the app bundle itself, so
 /// an ad-hoc signature is no obstacle: Launch Services reads the plist.
 ///
-/// Top-level placement is not a guess. `/Applications/Ghostty.app` declares its two
-/// `NSServices` entries the same way and they render at the top level of Finder's
-/// context menu on this machine.
+/// **Where it actually lands: the 服务 submenu, not the top level.** An earlier version
+/// of this comment claimed top level, reasoning from `/Applications/Ghostty.app` whose
+/// two entries did render inline. That was a misread — Finder lays services out by how
+/// many there are, and once this app's entry existed Ghostty's own two moved into a
+/// 服务 submenu alongside it (observed). Placement is Finder's to decide and nothing here
+/// can pin it, so the settings caption tells the user where to look instead of promising
+/// a position.
+///
+/// **`NSRequiredContext` is load-bearing for appearing at all** — see the plist comment
+/// in `scripts/build-app.sh`. Without it the service still registers, still caches, and
+/// still answers `NSPerformService` by name, and is still nowhere in Finder's menu. That
+/// combination is why the omission survived a full round of verification: every check
+/// that did not involve a human right-clicking passed.
 ///
 /// **What it does not do.** It never brings the app forward. The app is
 /// `LSUIElement`, a right-click upload is normally a *cold launch*, and stealing
 /// focus to say "done" would be worse than the notification that says it — see
-/// ``Notifier``, which is this app's only result surface.
+/// ``Notifier``, which is this app's only result surface. (`LSUIElement` is no
+/// obstacle to providing a service: verified directly, since every other services
+/// provider installed on the build machine happens to be a regular app.)
 @MainActor
 final class ServiceProvider: NSObject {
 

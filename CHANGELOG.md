@@ -23,10 +23,26 @@ ad-hoc signing (`docs/macos-app-plan.md` C4). `NSServices` rides in the bundle's
 `Info.plist`, where Launch Services reads it, so an ad-hoc signature is no obstacle and
 there is nothing for the user to enable. The cost is that the menu item has no icon.
 
-It should land at the **top level** of the context menu rather than inside a 服务 submenu —
-on the evidence of `/Applications/Ghostty.app`, whose two `NSServices` entries render there
-on this machine. GitPic's own item has not been confirmed by eye yet; that needs a real
-right-click in Finder.
+**Without `NSRequiredContext` the item does not appear — and every other check still
+passes.** This was the expensive one. Omit that key and the service still registers, still
+lands in the services cache, and still answers `NSPerformService` by name all the way
+through a completed upload; it is simply absent from Finder's context menu. Nothing short
+of a human right-clicking can catch it.
+
+It was found by declaring five variants in one bundle, each differing from the baseline by
+exactly one thing, and seeing which one was missing from the menu: only the one with
+`NSRequiredContext` removed. That also cleared the suspects that looked more likely at the
+time — `NSPortName` is harmless (Safari and Xcode both set it); `LSUIElement` is irrelevant
+(easy to misread, since every other services provider installed on this machine happens to
+be a regular Dock app); and living in the hidden `.claude` directory is irrelevant too. And
+`NSSendFileTypes = public.image` works fine, so the images-only restriction cost nothing.
+
+**The item lands in the 服务 submenu, not at the top level.** An earlier version of this
+entry claimed top level, reasoning from Ghostty's two entries, which did render inline at
+the time. That was a misread: Finder lays services out according to how many there are, and
+once this app's entry existed Ghostty's own two moved into a 服务 submenu beside it
+(observed). Placement is Finder's to decide and no key in the declaration pins it, so the
+settings caption now tells the user where to look instead of promising a position.
 
 **A right-click upload is normally a cold launch, and that changed one thing about
 uploading.** The service launches the app, so the files arrive while `resolveTools()` is

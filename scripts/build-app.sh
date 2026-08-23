@@ -122,22 +122,29 @@ cat > "$APP/Contents/Info.plist" <<PLIST
        routed to \`NSApp.servicesProvider\` — see ServiceProvider.swift for why a
        Service rather than an app extension or a FinderSync plug-in.
 
+       **NSRequiredContext is what makes the item appear at all.** Without it the service
+       registers, caches, and can even be invoked by name through NSPerformService — and
+       is still absent from Finder's context menu. Established by declaring five variants
+       in one bundle and looking at the menu: the only one missing was the one with this
+       key removed. It is not optional and it is not a restriction you can skip.
+
+       NSSendFileTypes rather than NSSendTypes: it limits the item to files whose type
+       conforms to public.image, which is the whole ask — an entry that also showed up on
+       folders and .txt files would be worse than none. That combination was verified in
+       the same sweep, so the image filter costs nothing here. It is still not a guarantee
+       about what reaches the pasteboard, so ImageFilter checks again.
+
        NSMessage is the selector name minus its \`:userData:error:\` tail, so it must
        stay equal to \`FinderServiceStatus.message\`; the app logs a warning at launch if
-       the two have drifted. NSPortName matches CFBundleName above; the two disagreeing
-       is a way for the item to appear and do nothing.
+       the two have drifted. NSPortName matches CFBundleName above (the sweep showed it is
+       harmless either way; Safari and Xcode both set it).
 
        **The title below is the authority for the 设置 switch, not just a label.** \`pbs\`
        files a service's on/off state under a key built from the bundle id, this title,
        and NSMessage, and \`FinderService.menuItemTitle\` reads this very entry back to
        build it — so the switch cannot disagree with the menu. What renaming it *does*
        break is existing state: the old key is orphaned, and everyone who had turned the
-       item off gets it back on. Rename only when that is acceptable.
-
-       NSSendFileTypes rather than NSSendTypes: it is what limits the item to files
-       whose type conforms to public.image, which is the whole ask — an entry that
-       also showed up on folders and .txt files would be worse than none. It is not
-       a guarantee about what reaches the pasteboard, so ImageFilter checks again. -->
+       item off gets it back on. Rename only when that is acceptable. -->
   <key>NSServices</key>
   <array>
     <dict>
@@ -145,6 +152,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
       <dict><key>default</key><string>GitPic 上传至图床</string></dict>
       <key>NSMessage</key><string>uploadImagesToGitPic</string>
       <key>NSPortName</key><string>GitPic</string>
+      <key>NSRequiredContext</key>
+      <dict><key>NSTextContent</key><string>FilePath</string></dict>
       <key>NSSendFileTypes</key>
       <array><string>public.image</string></array>
       <key>NSServiceDescription</key>
