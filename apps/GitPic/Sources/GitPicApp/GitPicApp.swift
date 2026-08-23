@@ -760,12 +760,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Write to the clipboard, and say whether it landed.
-    ///
-    /// The result is not decoration: `setString` can fail, and reporting "已复制"
-    /// anyway is worse than not copying — the user pastes stale content and never
-    /// learns why.
-
     // MARK: - Settings
 
     /// Internal, not private: `MainMenu` names these selectors from another file.
