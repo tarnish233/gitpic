@@ -336,8 +336,9 @@ instead — `results` is never present and empty.
   `error`. Parsing its stdout as a single object fails on the first line, and only a
   human can type the one-time code anyway — hand the bare `gitpic auth login` to the user
   and then read `gitpic auth status --json`. `gitpic completion <shell>` ignores `--json`
-  and prints the raw shell script, and `gitpic config edit` ignores it and hands stdout to
-  `$EDITOR` (defaulting to `vi`), whose terminal output is not JSON.
+  and prints the raw shell script. `gitpic config edit` **refuses** `--json` as `USAGE`:
+  it hands stdout to an editor, so it can never be one JSON document. Never call it —
+  use `gitpic config get --json` to read and `gitpic config set` to write.
 - Only access the clipboard when the user explicitly requests it.
 - Use absolute file paths.
 - Never print the GitHub token in the conversation.

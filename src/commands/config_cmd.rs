@@ -120,28 +120,69 @@ pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
             }
         }
         ConfigAction::Edit => {
+            // Refused under `--json` rather than half-honoured. `Command::status()`
+            // inherits stdout, so the editor writes to the stream the caller is parsing:
+            // `EDITOR=cat gitpic config edit --json` printed the whole TOML file and
+            // *then* an envelope — two documents, the first not JSON at all — and with a
+            // real screen editor it is terminal escape sequences instead. This is the
+            // one command in the crate whose `--json` could not honour "one invocation,
+            // one envelope"; `skill install` closes the same hole the same way.
+            // `gitpic config get --json` reads the file without an editor, and
+            // `config path` names it.
+            if mode.is_json() {
+                return Err(AppError::usage(
+                    "`config edit` is interactive and cannot produce JSON: it hands \
+                     stdout to $EDITOR. Use `gitpic config get --json` to read the \
+                     configuration, `gitpic config set` to change it, or \
+                     `gitpic config path --json` for the file's location",
+                ));
+            }
             let path = Config::path()?;
             if !path.exists() {
                 Config::default().save()?;
             }
-            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-            let status = std::process::Command::new(editor)
-                .arg(&path)
+            // `VISUAL` before `EDITOR`, which is the convention and is what most people
+            // with a GUI editor actually set.
+            let editor = std::env::var("VISUAL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("EDITOR")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                })
+                .unwrap_or_else(|| "vi".to_string());
+            // Through the platform shell, the way git runs its editor, because the
+            // value is a *command* and not a program name. `Command::new(editor)` looked
+            // for an executable literally called `code --wait`, so every common wrapper
+            // form — `EDITOR="code --wait"`, `"subl -w"`, `"emacsclient -nw"` — failed
+            // with `launch editor: No such file or directory`, which reads as gitpic
+            // being broken and names no fix. The path goes in as an argument rather than
+            // interpolated, so a directory with a space or a quote in it cannot become
+            // part of the command.
+            let mut command = if cfg!(windows) {
+                let mut c = std::process::Command::new("cmd");
+                c.arg("/C").arg(format!("{editor} \"%1\"")).arg(&path);
+                c
+            } else {
+                let mut c = std::process::Command::new("sh");
+                c.arg("-c")
+                    .arg(format!("{editor} \"$1\""))
+                    .arg("sh")
+                    .arg(&path);
+                c
+            };
+            let status = command
                 .status()
                 .map_err(|e| AppError::general(format!("launch editor: {e}")))?;
             if !status.success() {
-                return Err(AppError::general("editor exited with error"));
+                return Err(AppError::general(format!(
+                    "editor exited with error: {editor}"
+                )));
             }
-            // Re-parse so a typo written in $EDITOR is CONFIG_INVALID, not a
+            // Re-parse so a typo written in the editor is CONFIG_INVALID, not a
             // silent ok that every later command then refuses.
             Config::load()?;
-            if mode.is_json() {
-                let shown = path.display().to_string();
-                crate::output::print_json(&PathEnvelope {
-                    ok: true,
-                    path: &shown,
-                });
-            }
         }
     }
     Ok(())

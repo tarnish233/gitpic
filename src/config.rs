@@ -401,18 +401,35 @@ impl Config {
 /// Write `text` to `path` privately and atomically: a 0700 parent, a 0600
 /// same-directory temp file, then a rename over the destination.
 ///
+/// See [`write_atomic`] for the same guarantees without the permissions.
+///
 /// Shared by `config.toml` and by the credential file [`crate::auth`] writes, which
 /// is why it is one function rather than two copies of it. The config file is merely
 /// private; `auth.toml` holds a GitHub token, so "0600 from before the first byte is
 /// in it" and "never observable half-written" are properties that must not be
 /// re-derived per call site.
 pub(crate) fn write_private_atomic(path: &Path, text: &str, what: &str) -> Result<()> {
+    write_atomic_inner(path, text, what, true)
+}
+
+/// [`write_private_atomic`] without the permissions: atomic, but not tightened.
+///
+/// For files gitpic writes *outside* its own config directory — `skill install` puts
+/// `SKILL.md` under `~/.claude/skills`, which belongs to the user's agent. The
+/// atomicity is what is wanted there (a truncate-then-write left a half-written skill
+/// that an agent loads as a valid-but-lobotomised document), while chmod-ing that
+/// directory to 0700 would be gitpic reaching outside its own house.
+pub(crate) fn write_atomic(path: &Path, text: &str, what: &str) -> Result<()> {
+    write_atomic_inner(path, text, what, false)
+}
+
+fn write_atomic_inner(path: &Path, text: &str, what: &str, private: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| AppError::general(format!("mkdir: {e}")))?;
         // The directory is created 0755 by `create_dir_all`; tighten it so the
         // file cannot be found by listing, not just by reading.
         #[cfg(unix)]
-        {
+        if private {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
         }
@@ -422,7 +439,7 @@ pub(crate) fn write_private_atomic(path: &Path, text: &str, what: &str) -> Resul
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
-    {
+    if private {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
@@ -434,7 +451,7 @@ pub(crate) fn write_private_atomic(path: &Path, text: &str, what: &str) -> Resul
         file.sync_all()?;
 
         #[cfg(unix)]
-        {
+        if private {
             use std::os::unix::fs::PermissionsExt;
             file.set_permissions(fs::Permissions::from_mode(0o600))?;
         }

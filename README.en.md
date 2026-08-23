@@ -245,8 +245,11 @@ line, each tagged with `event` (`code` carries the one-time code; the last line 
 outcome exists, and one envelope can only be written once. That is what lets the app run
 the login inside its settings window, it is the only place "one invocation, one envelope"
 does not hold, and it is why neither a script nor an agent should call it. The other two:
-`gitpic completion <shell>` ignores `--json` and prints the shell script, and
-`gitpic config edit` hands stdout to `$EDITOR`.
+`gitpic completion <shell>` ignores `--json` and prints the shell script;
+`gitpic config edit` is **refused** under `--json` (`USAGE`), because it hands stdout to
+the editor and cannot also be one JSON document — read the configuration with `gitpic
+config get --json` and change it with `gitpic config set`. The editor is `$VISUAL`, then
+`$EDITOR`, then `vi`, and a value with arguments (`EDITOR="code --wait"`) works.
 Argument-parsing errors also come back as `{ "ok": false, "error": … }` under `--json`.
 
 ## Agent skill
