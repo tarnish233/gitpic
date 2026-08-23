@@ -101,7 +101,8 @@ content-type 承担诊断，这两个都带不出秘密。
 - **`config edit` 能启动带参数的编辑器。** `EDITOR="code --wait"` 以前会去找一个就叫这个名字的
   可执行文件。现在走平台 shell，跟 git 启动编辑器的做法一样，并且先看 `$VISUAL`。发布审计还抓到
   Windows 初版错把 `cmd /C` 的 `%1` 当成 `sh -c` 的 `$1`；现在路径通过单独的环境变量传入，既不
-  落进 shell 代码，也不会在 Windows 上变成字面量 `%1`。
+  落进 shell 代码，也不会在 Windows 上变成字面量 `%1`。同一轮跨平台检查还修复了私有写入策略
+  标志只在 Unix 使用、导致 Windows 的 warnings-as-errors 构建失败的问题。
 - **`skill install --dir` 指到 `skill path` 打出来的那个路径，不再多装一层**（写成
   `gitpic/gitpic/SKILL.md` 还报成功）。写入改成原子的，崩溃不会留下一个 frontmatter 完好、
   正文被截断的 skill。`--agent all` 部分失败时会报告已经装好的那些，而不是丢掉。列表里的字样从

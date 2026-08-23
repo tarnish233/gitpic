@@ -424,6 +424,11 @@ pub(crate) fn write_atomic(path: &Path, text: &str, what: &str) -> Result<()> {
 }
 
 fn write_atomic_inner(path: &Path, text: &str, what: &str, private: bool) -> Result<()> {
+    // Permissions are a Unix-only guarantee; still consume the policy flag on other
+    // targets so their warnings-as-errors builds verify this shared implementation.
+    #[cfg(not(unix))]
+    let _ = private;
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| AppError::general(format!("mkdir: {e}")))?;
         // The directory is created 0755 by `create_dir_all`; tighten it so the
