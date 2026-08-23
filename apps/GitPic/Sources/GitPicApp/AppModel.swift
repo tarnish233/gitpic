@@ -202,7 +202,12 @@ final class AppModel {
     /// Stop a login in progress. The code on screen becomes useless immediately, which
     /// is why the state goes back rather than staying on a code nobody is polling for.
     func cancelLogin() {
-        loginTask?.cancel()
+        // Nothing in flight is not a cancellation. The guard is here rather than at
+        // the callers because `windowWillClose` now calls this on *every* close, and
+        // without it an ordinary close would overwrite a perfectly good logged-in
+        // state with 「登录已取消」.
+        guard let task = loginTask else { return }
+        task.cancel()
         loginTask = nil
         auth = .loggedOut(detail: "登录已取消")
         Task { await refreshAuth() }
@@ -424,7 +429,14 @@ final class AppModel {
         self.runner = runner
         self.tools = tools
         toolState = .ready
-        Task { await self.reload() }
+        // No `reload()` here. `resolveTools` *awaits* one ten lines after calling this,
+        // and that is the one carrying the config-before-upload guarantee its comment
+        // describes — so firing a second, un-awaited one here just ran the whole
+        // sequence twice. Both observed `configPath == nil` before either set it, so a
+        // cold-launch right-click upload waited behind a duplicate `config path`
+        // (~90 ms of the ~120 ms reload), a duplicate `config get` and a duplicate
+        // `list --limit 100`, all on the serial gate, all in front of an upload the
+        // user is watching.
         Task { await self.refreshAuth() }
     }
 
@@ -434,6 +446,15 @@ final class AppModel {
         runner = nil
         tools = nil
         toolState = .missing
+        // `attach` calls back into `refreshAuth`, and this branch has to as well.
+        // `refreshAuth`'s guard is written to turn a standing `.unknown` into
+        // `.broken` — but only when it runs, and on this path nothing was going to
+        // run it: `HostPane`'s `.task` fires once, during discovery, and returns
+        // early while `toolState == .resolving`; re-opening the window does not
+        // re-fire it, because the window is no longer rebuilt on open. So 账号 sat
+        // on the 「检查登录状态…」 spinner for the life of the process, for a machine
+        // where the answer was simply "there is no gitpic".
+        Task { await self.refreshAuth() }
     }
 
     // MARK: - The Finder right-click switch
@@ -553,7 +574,6 @@ final class AppModel {
             } else {
                 draft = cfg
             }
-            history = try await runner.history(limit: 100)
             // A read that succeeded supersedes the last failure, including one this
             // read just disproved.
             configFailure = nil
@@ -570,6 +590,20 @@ final class AppModel {
             // Logged as well as shown: this is the failure users report as "App 没
             //反应", and the log is what can be read back afterwards.
             Diagnostics.log("config read failed: \(String(describing: error))")
+        }
+        // Its own step, outside the block above, because it is its own failure:
+        // `gitpic list` reads `history.jsonl` and never opens `config.toml`. Inside
+        // that `do` it took the config read down with it — an unreadable history file
+        // (root-owned after a `sudo` run is the usual way) set `configFailure`, and
+        // both panes render that by replacing the entire editable form with 「读取配置
+        // 失败」, so a bad history file made every setting uneditable and named the
+        // wrong file while doing it. It also skipped `onConfigChange?()`, leaving the
+        // status-item menu on stale checkmarks. A history that will not load costs
+        // the history list and nothing else.
+        do {
+            history = try await runner.history(limit: 100)
+        } catch {
+            Diagnostics.log("history read failed: \(String(describing: error))")
         }
     }
 

@@ -24,7 +24,6 @@ enum Main {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var runner: GitpicRunner?
-    private var tools: ToolPaths?
 
     /// What the menu-bar icon is saying: idle, uploading, or unavailable.
     ///
@@ -118,7 +117,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Diagnostics.recordLaunch(appVersion: version, tools: nil)
             return
         }
-        tools = paths
         let r = GitpicRunner(tools: paths)
         runner = r
         // `attach` starts the reads that need a runner — see it for why the window's
@@ -750,6 +748,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if case RunFailure.undecodable(let status, let raw) = error {
             report(.failed(
                 summary: "gitpic 退出 \(status)，输出无法解析：\(raw.prefix(60))"))
+        } else if case RunFailure.cli(_, let body) = error {
+            // Through the shared summary rather than `String(describing:)`. This arm
+            // did not exist, so a `.cli` failure fell to the `else` and reached the
+            // user as a Swift debug dump in a notification banner — `cli(status: 3,
+            // error: GitPicCore.ErrorBody(code: "CONFIG_MISSING", message: …))`. That
+            // is precisely what `failureSummary`'s doc says must not happen, because
+            // for `CONFIG_MISSING` the message *is* the remedy. It was hard to reach
+            // only because `UploadEnvelope` decodes an error envelope as data instead
+            // of throwing — guarded by decoding order, not by this branch.
+            report(.failed(summary: UploadPresentation.failureSummary(body)))
         } else {
             report(.failed(summary: String(describing: error)))
         }

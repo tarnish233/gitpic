@@ -121,6 +121,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             AppActivationPolicy.leave()
             holdingActivation = false
         }
+        // A login in flight is the one thing the surviving window cannot carry. Since
+        // this stopped releasing the controller there is no `onDisappear` and no
+        // `.task` to cancel, and `loginTask` hangs off the process-lifetime
+        // `AppModel.shared` — so closing the window left `gitpic auth login` polling
+        // GitHub every few seconds until the code expired a quarter of an hour later.
+        // 取消 was the only thing that stopped it, while the changelog says closing the
+        // window does too. A no-op when no login is running.
+        AppModel.shared.cancelLogin()
         SettingsNavigation.shared.endSession()
     }
 }
