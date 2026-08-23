@@ -4,6 +4,153 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.17.0] - 2026-08-23
+
+### 一次全项目 review：三份会骗人的体检报告，两处会悄悄丢东西的写入
+
+这一版没有新功能。对 CLI、App、脚本和 workflow 各跑了一遍 review，下面是查出来的东西 ——
+凡是有得选，都选了「测试能失败」的那个版本。
+
+**三处 breaking，范围都很窄。**
+
+- `doctor --json` 的 `token_valid` 和 `repo_writable` 现在是 `true | false | **null**`，
+  `null` 表示这项根本没查。下面说为什么原来的 `false` 是在撒谎。
+- `gitpic config edit --json` 直接按 `USAGE` 拒掉，不再先把 stdout 交给编辑器、然后在后面补一个信封。
+- 文件上传按**内容**命名，所以 `.jpeg` 渲染成 `.jpg`，扩展名和内容不符的文件会拿到真实扩展名。
+  这类文件的新上传会落到新的远端路径，跟已经在仓库里的那份不再 dedup —— 每个文件多一个 blob，
+  一次性的。已经传上去的东西不会移动、也不会坏。
+
+#### `--compress` 在把人的照片转向
+
+手机相机存的是横向像素加一个 `Orientation = 6`，自己并不转。`load_from_memory_with_format`
+从不调 `orientation()`，两个重编码器也都不写回 EXIF —— `JpegEncoder` 只有调过 `set_exif`
+才写，而这里没调。于是像素按原样重编码，那个「请把我转过来」的标签被丢掉了：所有看图的软件都
+把照片显示成跟用户本地看到的差 90°，报告 `ok: true`，没有任何一处提示文件被改过。同一张照片上
+`--max-width` 也是错的，原因一样 —— 它比的是存储宽度，于是缩错了那条边。
+
+把旋转烤进像素是唯一能在元数据被丢掉之后还成立的做法。没有方向标签的图（也就是大多数图）
+一点代价都不付。
+
+#### `doctor`把三种坏配置说成健康
+
+- **`link_kind = "cdn"` 配一个含 `/` 的分支。** 上传路径在解析凭据之前、发任何请求之前就按
+  `USAGE` 拒掉它，因为 jsDelivr 把 ref 编码成 `repo@branch/path`。而 `gitpic repos` 会把
+  GitHub 报的默认分支原样写进去，所以默认分支是 `release/v1` 的仓库就会跟默认的 `cdn` 一起
+  躺在 `config.toml` 里 —— 而且是合法的，`Config::validate` 每个键单独校验。`doctor` 压根
+  没读过 `cfg.upload.*`，于是报 ✓ ✓ ✓、退出 0，而每一次上传都退出 2、什么都没发。现在它报的
+  代码和文案跟上传那边完全一样。
+- **私有仓库配 `cdn` 链接。** `RepoInfo` 只反序列化了 `permissions`，把 `private` 从一个
+  `doctor` 本来就已经拉到的响应里丢掉了。这种配置下每次上传都成功、每个 jsDelivr 链接都 404，
+  而且没有任何地方说过：`repos` 只在选仓库那一刻警告，后来一句
+  `config set upload.link_kind cdn`、或者把仓库改成私有，都会静悄悄走到同一个死状态。这算
+  caveat 不算 failure，因为上传确实是成功的 —— 而这恰恰是它在某个意义上更糟的地方。
+- **给一份根本没查过的凭据报 `token_valid: false`。** 三个探针都挂在 `config_ok` 上，但其中
+  只有两个需要目标仓库。所以在「已经 `gitpic auth login`、还没 `gitpic repos`」的机器上，
+  `/user` 从来没被调用，报告却说凭据无效 —— 而同一台机器上 `gitpic auth status` 说它是好的，
+  GitPic.app 还会把这两个结论并排显示出来。看到 `✗ token valid`，人会去「重新登录」，那是拿
+  一个新 token 去修一个配置文件。`null` 把「没查」和「查了，不行」分开；凭据本身**解析不出来**
+  仍然是 `false`，因为那是一个确定的答案。要求 `true` 的 agent 不受影响。
+
+#### `gitpic auth login`：拒绝启动、丢掉 token、对着没人的管道轮询
+
+- 一个坏掉的 `auth.toml` 会挡住唯一能替换它的那条命令。`previous` 只是用来说一句「替换了原来
+  存的 X 的凭据」，却是用 `?` 读的。
+- 写失败会逃出它自己文档里承诺的流式契约，还把 token 一起带走。`auth::save` 在那个「错误会变成
+  `error` 事件」的块外面，所以磁盘满时产生的是 `main` 那个七行的 pretty 信封：App 的逐行解析器
+  把每一行都丢掉、报告「没有给出结果」，而几秒前刚拿到的 token 已经没了。
+- `--json` 丢了人类路径里写得明明白白的那个闭合管道检查，所以
+  `gitpic auth login --json | true` 会发出一次性码，然后对着 GitHub 轮询整整十五分钟 ——
+  为了一个没人收到的码。
+- `auth logout` 说的是「removed」，用户会理解成「revoked」。授权在 github.com 上仍然有效、
+  而且不过期，所以一块恢复出来的磁盘、或者一份同步过去的旧文件，仍然是一份能用的凭据。gitpic
+  没法吊销它（那需要 client secret），所以现在它把能吊销的那个页面地址说出来。
+
+另外还有 `oauth.rs`，同一个文件里两处注释对「这个值算不算秘密」意见相反：`Device` 的 `Debug`
+把 `device_code` 打码，理由是它「就是拿 token 的凭证」；而 `post` 说在设备端点「响应里没有任何
+东西是凭据」，解析失败时照打 200 个字符的原始 body。现在两个端点都不打 body，状态码和
+content-type 承担诊断，这两个都带不出秘密。
+
+#### 三种悄无声息丢东西的方式
+
+- **空的 `--repo` 会擦掉配好的目标。** `set_repo_spec` 只负责解析、不负责判断，所以一个空
+  spec 会把空仓库名**覆盖**到文件里的值上，而失败要到两层之后才以 `CONFIG_MISSING` 冒出来，
+  让用户去配一个文件里已经写着的仓库。触发它的就是一行普通脚本：`gitpic shot.png --repo "$REPO"`
+  而 `REPO` 没设。现在空值等于「没给」，跟 `GITPIC_REPO`、`--client-id ''` 一个规矩。
+- **一个坏字节毁掉整个 history 文件。** `read_to_string` 遇到非法 UTF-8 是整文件失败，所以一次
+  被截断的追加会让 `gitpic list` 永久变成 `GENERAL` 错误 —— 而 `trim_file` 从此在每一次追加时
+  提前返回，等于把 2 MB 上限关掉，文件无限长下去。现在两个读取都是 lossy 的，一个坏字节只花掉
+  一条记录。
+- **真正失败的 stdout 会报成功。** 同一个错误有两个相反的答案：`record_write` 直接 panic，
+  在 `panic = "abort"` 下就是退出 134；而 `finish` 把它咽下去，让这次运行以退出 0 结束、留下一个
+  被截断的文件 —— 你拿到哪个只取决于最后一次写有没有带换行。实测 `skill print` 在 `ulimit -f 1`
+  下：改之前退出 101 加一段裸 panic，改之后退出 1 加
+  `error: failed printing to stdout: File too large`。管道被关掉仍然算正常结束。
+
+#### 这次一并做的
+
+- **零字节文件会被拒掉**，跟 stdin 一直以来的规矩一样。`touch shot.png && gitpic shot.png`
+  以前会产生一个真的 commit，再打出一个渲染成破图的链接。
+- **大小上限在读文件之前就问。** `gitpic bigvideo.mov` 以前先分配三个 G，**然后**才说上限是
+  100 MB —— 内存紧的机器上则是直接被 OOM 杀掉，退出 137。
+- **只可能是 GET/PUT 竞态的那种 422 现在可重试。** 它的镜像是 409，从 0.13.2 起就是
+  `NETWORK`、「让 agent 重试」；而竞态里输掉的那一方被告知退出 1，`SKILL.md` 把 1 定义为不要重试。
+  按 body 判断，所以分支保护（也是 422）仍然是 `GENERAL`。（这个判断的第一版匹配的是带引号的
+  `"sha"`，在生产里永远不会命中 —— body 是原始 JSON，那对引号是转义过的。测试抓到了。）
+- **限流会说什么时候可以再试。** `retry-after` / `x-ratelimit-reset` 在读 body 前一行就被扔了，
+  所以退出 9 —— 唯一一个存在意义就是被重试的码 —— 携带的信息反而最少。
+- **`config edit` 能启动带参数的编辑器。** `EDITOR="code --wait"` 以前会去找一个就叫这个名字的
+  可执行文件。现在走平台 shell，跟 git 启动编辑器的做法一样，并且先看 `$VISUAL`。
+- **`skill install --dir` 指到 `skill path` 打出来的那个路径，不再多装一层**（写成
+  `gitpic/gitpic/SKILL.md` 还报成功）。写入改成原子的，崩溃不会留下一个 frontmatter 完好、
+  正文被截断的 skill。`--agent all` 部分失败时会报告已经装好的那些，而不是丢掉。列表里的字样从
+  `outdated` 改成 `differs` —— 前者是在替用户的文件下一个这里根本支持不了的结论。
+- **`XDG_CONFIG_HOME=.config` 不再让所有路径变成相对 cwd 的**，而 0.16.0 之后这会把凭据一起带走。
+
+#### GitPic.app
+
+- **关掉设置窗口真的会停掉登录。** `cancelLogin()` 只有一个调用者 —— 取消按钮，而 0.15.0 之后
+  窗口关闭不再释放，所以 ⌘W 会让 `gitpic auth login` 一直轮询到码过期。
+- **`gitpic` 找不到时，账号那一栏会一直转「检查登录状态…」直到进程结束。** `attach` 会回调
+  `refreshAuth`，失败那条分支不会，而别处也没人会。
+- **读不了 history 文件会被报成配置失败**，而两个面板对配置失败的处理是把整个可编辑表单换掉 ——
+  于是一个坏掉的 `history.jsonl` 让所有设置都不能改，还指着错的文件说事。
+- **启动跑了两遍 `reload()`**，在冷启动右键上传前面的串行闸口上多压了一次 `config path`、
+  一次 `config get` 和一次 `list`。
+- **启动日志用的是真的 `O_APPEND`**，不是 `seekToEnd()` 加一次写 —— `FileHandle` 上没有
+  `O_APPEND`，而那个 seek 本身就是证据。两个进程并发实测：改之前 400 行只剩 396，改之后 400。
+- **缩略图磁盘缓存的键带上了缩略图尺寸**，因为尺寸是「这些字节是什么」的一部分。原来调大
+  `maxPixel` 之后每一行都还是命中，而 `decode` 不放大，于是面板会在更大的框里永远画小图。
+
+#### CI 一直没在跑那个最要紧的检查
+
+`FinderServicePlistTests` 读打好包的 `Info.plist`，没有包就把自己禁用掉 —— 而两个 workflow
+都在 `scripts/build-app.sh` **之前**跑 `swift test`，`dist-app/` 又是 gitignore 的。所以从
+0.15.0 以来的每一次 CI，那个把 `NSServices` plist 和注册它的 Swift 钉在同一组名字上的唯一检查
+都在静静地什么都不检查 —— 而被跳过的测试仍然计入 "Test run with N tests"，连总数都没变。步骤
+顺序修好了，并且在设了 `CI` 时这个测试现在会**失败**而不是跳过，所以再把它弄坏不会没声音。
+
+另外三个原本不可能失败、现在可以了：`-q` 的源码扫描把「已被保护」的标记一直留到函数结束，所以
+把真的保护删掉它照样全绿；四个 `pbs` 线上键此前只跟自己比，所以改错那个新键会让整个 suite 通过，
+而开关会给一个已关闭的服务报「开」；`pngRoundTrip` 只断言了尺寸，而尺寸是能活过 JPEG 的，整个
+target 里也没有一张带透明的图能抓到那些黑块。`check_manifests.py` 也会让一个被截断成 `{}` 的
+manifest 通过，因为 `{}` 是 falsy 的。
+
+#### 文档里过期的部分，恰好在被读得最多的两个地方
+
+`release.yml` 的发布说明结尾还写着「Requires GitHub CLI (`brew install gh`)」—— 而 0.16.0
+删掉了 `gh`，这段话从那以后被追加到**每一个** release body 上。`SKILL.md` 说 `auth login`
+「refuses `--json` outright」，而同一个文件第 318 行详细描述了它的 `--json` 流。
+`new-worktree.sh` 和 `AGENTS.md` 承诺 `--seed-config` 就能真的上传，而凭据搬进按 worktree 隔离
+的 `auth.toml` 之后这句话就不成立了。
+
+#### 顺手收掉的重复
+
+`✓`/`✗` 存在四份、三种形状，`note:` 第四份 —— 正好是 `-q` 契约扫描看不见的那一份。路径模板的
+dummy 样本写了三遍、错误文案写了两遍，而且已经漂移了。`matches!(mode, Mode::Quiet)` 八处。
+`effective_link_kind`、`ConfigGate`、`Clipboard.write`、`UploadedLink.snippetOrReason`
+各自收掉一条原来靠人在两三个地方同步的规则。`build-app.sh` 现在认 `CARGO_TARGET_DIR` ——
+这个仓库自己的 worktree 流程就导出它 —— 失败时也不再留下一个长得像 bundle 的目录。
+
 ## [0.16.0] - 2026-08-23
 
 ### 只剩 `gitpic auth login` 一条路 —— `gh` 删掉了
@@ -1680,7 +1827,8 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic/compare/v0.16.0...HEAD
+[未发布]: https://github.com/tarnish233/gitpic/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.17.0
 [0.16.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.16.0
 [0.15.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.15.0
 [0.14.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.1
