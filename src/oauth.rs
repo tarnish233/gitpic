@@ -221,20 +221,26 @@ fn http_client() -> Result<reqwest::Client> {
 /// decides here — [`refuse`] reads the body. A status is consulted only when the
 /// body did not parse at all.
 ///
-/// `body_may_be_quoted` is a security parameter, not a style one. At
-/// `DEVICE_CODE_URL` nothing in a response is a credential, so quoting a bounded
-/// prefix is what makes a gateway page or a captive portal explicable. At
-/// `TOKEN_URL` a *successful* body **is** the grant — and it is JSON only because of
-/// the `Accept` header below: GitHub's default for that endpoint is form-encoded
-/// (`access_token=ghu_…&refresh_token=ghr_…`). So any proxy that drops or rewrites
-/// `Accept`, or any field whose type changes, turns a success into a parse failure,
-/// and quoting the body would print the token to stderr and into the scrollback.
-/// That would defeat every hand-written `Debug` in this module.
+/// **No response body is ever quoted, at either endpoint.** At `TOKEN_URL` a
+/// successful body *is* the grant, and it is JSON only because of the `Accept` header
+/// below: GitHub's default there is form-encoded (`access_token=ghu_…`), so any proxy
+/// that drops or rewrites `Accept` turns a success into a parse failure, and quoting
+/// would print the token to stderr and into the scrollback. `DEVICE_CODE_URL` used to
+/// be treated as the safe case on the grounds that "nothing in a response is a
+/// credential" — but its body carries the `device_code`, which [`Device`]'s
+/// hand-written `Debug` twenty lines up redacts precisely because it "is what
+/// authorises fetching the token". Two comments in one file disagreeing about whether
+/// a value is secret is how a secret gets printed, so the question is now settled the
+/// same way in both places.
+///
+/// `what` names the endpoint for the message instead. The status and content-type are
+/// what a captive portal or a gateway page needs to be explicable — `content-type
+/// text/html` says it — and neither can carry a credential.
 async fn post(
     client: &reqwest::Client,
     url: &str,
     form: &[(&str, &str)],
-    body_may_be_quoted: bool,
+    what: &str,
 ) -> Result<Body> {
     let resp = client
         .post(url)
@@ -244,8 +250,8 @@ async fn post(
         .await
         .map_err(|e| AppError::network(format!("network: {e}")))?;
     let status = resp.status();
-    // Read before the body is consumed; it is the one hint about *why* an
-    // unreadable response was unreadable that is safe to print either way.
+    // Read before the body is consumed; with the body itself never quoted, this is
+    // the one hint about *why* an unreadable response was unreadable.
     let content_type = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -267,17 +273,10 @@ async fn post(
         } else {
             AppError::general
         };
-        if body_may_be_quoted {
-            let shown: String = text.chars().take(200).collect();
-            classify(format!(
-                "GitHub sent an unreadable device-flow response ({status}): {e}: {shown:?}"
-            ))
-        } else {
-            classify(format!(
-                "GitHub sent an unreadable token response ({status}, content-type \
-                 {content_type}): {e}"
-            ))
-        }
+        classify(format!(
+            "GitHub sent an unreadable {what} response ({status}, content-type \
+             {content_type}): {e}"
+        ))
     })
 }
 
@@ -348,7 +347,7 @@ pub async fn start(client_id: &str, scope: &str) -> Result<Device> {
     let form = [("client_id", client_id), ("scope", scope)];
     // Quotable: a device-code response carries no credential, and an unreadable one
     // is usually a proxy worth showing the user.
-    let body = post(&client, DEVICE_CODE_URL, &form, true).await?;
+    let body = post(&client, DEVICE_CODE_URL, &form, "device-code").await?;
     if let Some(e) = body_error(&body) {
         return Err(e);
     }
@@ -446,7 +445,7 @@ pub async fn wait_for_token(client_id: &str, device: &Device) -> Result<Granted>
         }
 
         // Not quotable: this response body is the grant.
-        let body = match post(&client, TOKEN_URL, &form, false).await {
+        let body = match post(&client, TOKEN_URL, &form, "token").await {
             Ok(body) => {
                 faults = 0;
                 body
