@@ -174,14 +174,41 @@ impl Cli {
     }
 
     /// `--repo`, from whichever command actually accepts it.
+    ///
+    /// A blank value behaves like "not set", which is the rule `GITPIC_REPO` already
+    /// follows in [`crate::config::Config::apply_env`] and `--client-id ''` follows in
+    /// [`crate::oauth::client_id`]. Here it also stops the flag being *destructive*:
+    /// `--repo ''` reached `set_repo_spec`, which deliberately parses rather than
+    /// judges, so it assigned an empty repo **over** whatever `config.toml` supplied;
+    /// `check_segment` passes an empty segment on purpose, so validation let it
+    /// through and the failure surfaced two layers later as `CONFIG_MISSING` — telling
+    /// the user to configure a repository their file already named. The shape that
+    /// finds it is an ordinary script line, `gitpic shot.png --repo "$REPO"` with
+    /// `REPO` unset.
     pub fn repo_override(&self) -> Option<&str> {
-        match &self.command {
+        let given = match &self.command {
             // The two read-only checks that answer a question *about* a repository, so
             // both take one directly — that is what lets someone look before committing
             // the value to `config.toml`.
             Some(Command::Doctor { repo }) | Some(Command::Branches { repo }) => repo.as_deref(),
-            _ => self.upload_args().repo.as_deref(),
-        }
+            // The upload paths: the default command reads the top-level flatten, and
+            // `paste` its own copy.
+            None | Some(Command::Paste { .. }) => self.upload_args().repo.as_deref(),
+            // Spelled out rather than left to `_`, for the reason `main::dispatch`
+            // gives for its own single exhaustive match. A subcommand added later that
+            // declares its own `--repo` would otherwise compile here, silently read
+            // the top-level flatten — always `None` for a subcommand, since
+            // `reject_misplaced_upload_args` refuses upload flags before one — and
+            // drop the flag it was handed, which is the "accepted, then ignored" shape
+            // this crate closes everywhere else.
+            Some(Command::Auth { .. })
+            | Some(Command::Config { .. })
+            | Some(Command::Repos)
+            | Some(Command::List { .. })
+            | Some(Command::Completion { .. })
+            | Some(Command::Skill { .. }) => None,
+        };
+        given.filter(|r| !r.trim().is_empty())
     }
 
     /// The output format to actually use: the flag if given, else the config's
@@ -466,6 +493,34 @@ mod tests {
                 "{args:?} must not parse"
             );
         }
+    }
+
+    #[test]
+    fn a_blank_repo_flag_is_not_an_override() {
+        // Regression: `--repo ''` was honoured, and honouring it was *destructive*.
+        // `set_repo_spec` parses rather than judges, so an empty spec assigned an
+        // empty repo over whatever the file supplied, `check_segment` lets an empty
+        // segment through on purpose, and the result surfaced as `CONFIG_MISSING`
+        // advising the user to configure a repository the file already named. The
+        // shape that finds it is `gitpic shot.png --repo "$REPO"` with REPO unset.
+        for blank in ["", " ", "\t", "  \n "] {
+            for argv in [
+                vec!["gitpic", "a.png", "--repo", blank],
+                vec!["gitpic", "doctor", "--repo", blank],
+                vec!["gitpic", "branches", "--repo", blank],
+                vec!["gitpic", "paste", "--repo", blank],
+            ] {
+                let cli = Cli::try_parse_from(&argv).expect("parses");
+                assert_eq!(
+                    cli.repo_override(),
+                    None,
+                    "{argv:?} must behave like no --repo at all"
+                );
+            }
+        }
+        // A real value still overrides, and is still handed over untrimmed-of-meaning.
+        let cli = Cli::try_parse_from(["gitpic", "doctor", "--repo", "o/pics"]).unwrap();
+        assert_eq!(cli.repo_override(), Some("o/pics"));
     }
 
     #[test]
