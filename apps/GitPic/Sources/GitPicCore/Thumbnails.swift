@@ -265,9 +265,16 @@ public enum ThumbnailCache {
     /// Which files to delete to bring the cache back under `ceiling`, newest kept.
     ///
     /// The same shape as the CLI's history trim (`src/history.rs:trim_file`): a
-    /// ceiling, oldest evicted first, and a best-effort job that runs after the thing
-    /// worth keeping is already on disk. Newest-first because that is what the pane
-    /// shows — `list --limit 100` returns the tail of the history.
+    /// ceiling, and a best-effort job that runs after the thing worth keeping is
+    /// already on disk. Newest-first because that is what the pane shows —
+    /// `list --limit 100` returns the tail of the history.
+    ///
+    /// Not "oldest evicted first", which this used to claim: it walks newest→oldest and
+    /// keeps whatever still fits, so a *newer* file can be dropped while an older,
+    /// smaller one is kept (20 MB / 10 MB / 1 MB under a 25 MB ceiling evicts the
+    /// 10 MB). Harmless for a cache, and invisible to the tests because every fixture
+    /// uses the same byte count, where greedy and oldest-first coincide — but the
+    /// sentence was describing a policy the code does not implement.
     ///
     /// Ties on `modified` are broken by path so the choice is deterministic; a
     /// directory of thumbnails written in the same second is otherwise ordered by

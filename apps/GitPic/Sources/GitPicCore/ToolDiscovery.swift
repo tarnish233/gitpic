@@ -49,15 +49,15 @@ public enum ToolDiscovery {
         return loginShellLookup("gitpic")
     }
 
-    /// Ask the user's login shell where a tool is. A login shell sources the
-    /// user's profile, so this covers nix, asdf, and custom prefixes that no
-    /// Every measurement quoted here was taken while this probe was locating `gh`,
-    /// the second tool the app used to need. The tool name is a parameter and the
-    /// parse is unchanged, so the evidence still applies — it is left as recorded
-    /// rather than rewritten to name a tool it was never run against.
+    /// Ask the user's login shell where a tool is. A login shell sources the user's
+    /// profile, so this covers nix, asdf, and custom prefixes that no hardcoded list
+    /// would catch. Verified to return `/opt/homebrew/bin/gh` even from a
+    /// Finder-launched process whose own PATH lacks it.
     ///
-    /// hardcoded list would catch. Verified to return `/opt/homebrew/bin/gh`
-    /// even from a Finder-launched process whose own PATH lacks it.
+    /// Every measurement quoted here was taken while this probe was locating `gh`, the
+    /// second tool the app used to need. The tool name is a parameter and the parse is
+    /// unchanged, so the evidence still applies — it is left as recorded rather than
+    /// rewritten to name a tool it was never run against.
     static func loginShellLookup(_ tool: String) -> URL? {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         guard FileManager.default.isExecutableFile(atPath: shell) else { return nil }
