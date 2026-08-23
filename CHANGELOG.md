@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.15.0] - 2026-08-23
 
 ### Select an image, right-click, upload
 
@@ -1958,7 +1958,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.15.0
 [0.14.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.1
 [0.14.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.0
 [0.13.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.2
