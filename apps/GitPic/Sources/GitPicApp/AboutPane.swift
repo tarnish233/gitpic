@@ -40,7 +40,7 @@ struct AboutPane: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("GitPic")
                     .font(.title2.weight(.semibold))
-                Text("把图片传到 GitHub 图床，拿回一条链接。")
+                Text("GitHub 图床上传工具")
                     .font(.callout).foregroundStyle(.secondary)
             }
             Spacer()
@@ -58,7 +58,7 @@ struct AboutPane: View {
             // each case said nothing the numbers do not.
             Section("版本") {
                 LabeledContent("App") { Text(appVersion ?? "dev").monospacedDigit() }
-                LabeledContent("gitpic_cli") { Text(embeddedCLI ?? "未知").monospacedDigit() }
+                LabeledContent("CLI") { Text(embeddedCLI ?? "未知").monospacedDigit() }
             }
             Section("工具位置") {
                 LabeledContent("gitpic") {
@@ -67,7 +67,7 @@ struct AboutPane: View {
                 }
             }
             Section("项目") {
-                Text("CLI 与 App 同仓库、同版本发布，凭据由 `gitpic auth login` 存在单独的 auth.toml 里，配置文件里不存任何密钥。")
+                Text("CLI 与 App 同仓库、同版本发布，凭据由 `gitpic auth login` 存在单独的 auth.toml 里。")
                     .font(.caption).foregroundStyle(.secondary)
                 Link("github.com/tarnish233/gitpic",
                      destination: URL(string: "https://github.com/tarnish233/gitpic")!)

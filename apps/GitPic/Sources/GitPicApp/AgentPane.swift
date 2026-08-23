@@ -9,15 +9,15 @@ struct AgentPane: View {
             Section {
                 Label("管理 GitPic 与 AI Agent 的集成。",
                       systemImage: "cpu")
-                Text("Claude Code、Codex 与通用 Agent 分开管理；分别安装 gitpic Skill 后，"
-                     + "它们就能调用 gitpic 上传图片并返回链接。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 if let version = model.skillVersion {
                     LabeledContent("内置版本") {
                         Text(version).monospacedDigit()
                     }
                 }
+                Text("Claude Code、Codex 与通用 Agent 分开管理；分别安装 gitpic Skill 后，"
+                     + "它们就能调用 gitpic 上传图片并返回链接。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             switch model.toolState {

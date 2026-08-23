@@ -890,7 +890,7 @@ final class AppModel {
         guard let runner else {
             // Reachable from the status-item menu while discovery is still running,
             // and from the pane if `toolState` races the button. A silent return
-            // left the 连通性 section on "还没测过", which is a claim this did not test.
+            // left the 连通性 section on its idle explanation, hiding why nothing ran.
             lastDoctor = nil
             doctorFailure = switch toolState {
             case .resolving: "还在查找 gitpic，稍后再试"
