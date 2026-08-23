@@ -122,7 +122,10 @@ now; the status and content-type carry the diagnostic and neither can carry a se
   retried — carried the least information of any.
 - **`config edit` can launch an editor with arguments.** `EDITOR="code --wait"` looked for
   an executable of that literal name. It goes through the platform shell now, the way git
-  runs its editor, and `$VISUAL` is consulted first.
+  runs its editor, and `$VISUAL` is consulted first. The release audit also caught the
+  first Windows implementation treating `cmd /C`'s `%1` like `sh -c`'s `$1`; the path now
+  travels in a dedicated environment variable, outside the shell code, and cannot become
+  a literal `%1` on Windows.
 - **`skill install --dir` at the path `skill path` prints no longer installs one level
   too deep**, writing `gitpic/gitpic/SKILL.md` and reporting success. The write is atomic,
   so a crash cannot leave a skill with intact frontmatter and the instructions cut off. A
@@ -137,6 +140,12 @@ now; the status and content-type carry the diagnostic and neither can carry a se
 - **Closing the settings window really stops a login.** `cancelLogin()` had one caller —
   the 取消 button — and since 0.15.0 the window is no longer released on close, so ⌘W left
   `gitpic auth login` polling until the code expired.
+- **Starting another login immediately after cancelling no longer loses the new task.**
+  The old stream needs another scheduler turn to unwind, and its unconditional `defer`
+  could clear the new login's handle — making it look idle and leaving neither 取消 nor
+  window close able to stop it. A task may now clear only its own generation.
+- **Copying the one-time code no longer swallows a pasteboard failure.** The app tells the
+  user to enter it manually instead of letting the button look successful.
 - **With `gitpic` missing, 账号 span on 「检查登录状态…」 for the life of the process.**
   `attach` calls back into `refreshAuth`; the failure branch did not, and nothing else
   would.
