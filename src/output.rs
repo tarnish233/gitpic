@@ -332,6 +332,20 @@ pub fn mark(ok: bool) -> String {
     }
 }
 
+/// [`mark`] for a check that has a third state: it did not run.
+///
+/// `✗` for a check nobody performed is a false negative, and the remedy a reader
+/// derives from it is for a problem that may not exist. A dash says "not looked at",
+/// which is what `null` means in the JSON alongside it.
+pub fn mark_maybe(state: Option<bool>) -> String {
+    match state {
+        Some(v) => mark(v),
+        None => "—"
+            .if_supports_color(Stream::Stdout, |t| t.dimmed().to_string())
+            .to_string(),
+    }
+}
+
 /// The success half of [`mark`], for the sites that have nothing to fail.
 pub fn tick() -> String {
     mark(true)

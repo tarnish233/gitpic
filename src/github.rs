@@ -84,6 +84,13 @@ struct PutRequest<'a> {
 pub struct RepoInfo {
     #[serde(default)]
     pub permissions: Option<RepoPermissions>,
+    /// Whether GitHub reports the repository private.
+    ///
+    /// Read from a response `doctor` already fetches, and dropping it was why `doctor`
+    /// could not see that a private host plus `link_kind = "cdn"` makes every upload
+    /// succeed and every returned link 404: jsDelivr serves only public repositories.
+    #[serde(default)]
+    pub private: bool,
 }
 #[derive(Deserialize)]
 pub struct RepoPermissions {

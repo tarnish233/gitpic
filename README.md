@@ -247,6 +247,11 @@ codex plugin add gitpic@gitpic
 存在"（8）和"没有写权限"（7）从 stdout 就能分开，不必依赖退出码 —— 一旦管进 `jq`，退出码就变成
 `jq` 自己的了。
 
+`token_valid` 和 `repo_writable` 有三种取值：`true`、`false`，以及**没查过**时的 `null`。
+两个 GitHub 检查只在 `config_ok` 为真时才发，所以"已经 `gitpic auth login`、还没挑仓库"
+的机器上它们是 `null` —— 之前报 `false`，那是在替一份根本没人看过的凭据下结论，而
+`gitpic auth status` 在同一台机器上说它是好的。
+
 ## 更新日志
 
 见[中文更新日志](./CHANGELOG.zh-CN.md)；英文版见 [CHANGELOG.md](./CHANGELOG.md)。
