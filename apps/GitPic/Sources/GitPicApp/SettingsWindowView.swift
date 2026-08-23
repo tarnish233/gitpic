@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum SettingsTab: String, CaseIterable, Identifiable {
-    case host, upload, history, about
+    case host, upload, history, agent, about
     var id: Self { self }
 
     var title: String {
@@ -9,6 +9,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .host:    "图床"
         case .upload:  "上传"
         case .history: "历史"
+        case .agent:   "Agent"
         case .about:   "关于"
         }
     }
@@ -18,6 +19,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .host:    "photo.stack"
         case .upload:  "arrow.up.circle"
         case .history: "clock.arrow.circlepath"
+        case .agent:   "cpu"
         case .about:   "info.circle"
         }
     }
@@ -25,8 +27,8 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     /// Whether this pane edits the config file, and so carries the save bar.
     var savesConfig: Bool {
         switch self {
-        case .host, .upload:   true
-        case .history, .about: false
+        case .host, .upload:           true
+        case .history, .agent, .about: false
         }
     }
 }
@@ -81,6 +83,11 @@ struct SettingsWindowView: View {
     @State private var model = AppModel.shared
 
     private var activeTab: SettingsTab { navigation.selectedTab ?? .host }
+    private var refreshing: Bool {
+        activeTab == .agent
+            ? model.skillTargetsLoading || model.skillInstallID != nil
+            : model.busy
+    }
 
     /// **The sidebar does not collapse, and there is no button offering to collapse
     /// it.** Both were here and both are gone; the reasoning is on ``sidebar``.
@@ -129,9 +136,9 @@ struct SettingsWindowView: View {
                 // `gitpic config set` of every dirty key, so "nothing is happening"
                 // and "a write is queued" still need telling apart — this says it
                 // in the space the button already occupies.
-                Button { Task { await model.reload() } } label: {
+                Button { Task { await reloadActivePane() } } label: {
                     ZStack {
-                        if model.busy {
+                        if refreshing {
                             ProgressView().controlSize(.small)
                         } else {
                             Image(systemName: "arrow.clockwise")
@@ -153,7 +160,7 @@ struct SettingsWindowView: View {
                 // is why they were the two keys that *did* respond before the app had
                 // a main menu at all — see `MainMenu`.
                 .keyboardShortcut("r")
-                .help("重新读取配置与历史（⌘R）")
+                .help(activeTab == .agent ? "重新检查 Agent（⌘R）" : "重新读取配置与历史（⌘R）")
 
                 if activeTab.savesConfig {
                     // Present on every config pane whether or not anything is dirty,
@@ -199,7 +206,7 @@ struct SettingsWindowView: View {
         // match the platform", citing Passwords and Mail. But those are content
         // browsers with resizable sidebars, and this window is not modelled on them:
         // it is modelled on System Settings, which is said out loud twice elsewhere in
-        // this file — and **System Settings has no sidebar toggle.** Four fixed panes
+        // this file — and **System Settings has no sidebar toggle.** Five fixed panes
         // do not need one, and the analogy was to the wrong kind of window.
         //
         // The collapse was also measurably broken, which is what brought this back up.
@@ -233,6 +240,7 @@ struct SettingsWindowView: View {
             case .host:    HostPane(model: model)
             case .upload:  UploadPane(model: model)
             case .history: HistoryPane(model: model)
+            case .agent:   AgentPane(model: model)
             case .about:   AboutPane(model: model)
             }
         }
@@ -255,6 +263,14 @@ struct SettingsWindowView: View {
 
     private func canStep(_ delta: Int) -> Bool {
         navigation.history.indices.contains(navigation.historyIndex + delta)
+    }
+
+    private func reloadActivePane() async {
+        if activeTab == .agent {
+            await model.loadSkillTargets()
+        } else {
+            await model.reload()
+        }
     }
 
     private func step(_ delta: Int) {

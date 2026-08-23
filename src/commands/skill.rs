@@ -17,9 +17,10 @@ const SKILL_MD: &str = include_str!("../../skills/gitpic/SKILL.md");
 const SKILL_NAME: &str = "gitpic";
 
 /// Known agents: display name, home-dir env var, and `$HOME`-relative fallback.
-const AGENTS: [(&str, &str, &str); 2] = [
+const AGENTS: [(&str, &str, &str); 3] = [
     ("claude", "CLAUDE_CONFIG_DIR", ".claude"),
     ("codex", "CODEX_HOME", ".codex"),
+    ("generic", "AGENT_HOME", ".agent"),
 ];
 
 /// What writing to a target would do.
@@ -102,6 +103,7 @@ fn agent_entry(kind: AgentKind) -> Option<(&'static str, &'static str, &'static 
     let want = match kind {
         AgentKind::Claude => "claude",
         AgentKind::Codex => "codex",
+        AgentKind::Generic => "generic",
         AgentKind::All => return None,
     };
     AGENTS.iter().copied().find(|(name, _, _)| *name == want)
@@ -133,22 +135,30 @@ fn detect() -> Result<Vec<Target>> {
 }
 
 /// Compare the embedded document against what is already on disk.
-fn classify(path: &Path) -> Action {
+fn classify(path: &Path) -> Result<Action> {
     match std::fs::read_to_string(path) {
-        Ok(current) if current == SKILL_MD => Action::Unchanged,
-        Ok(_) => Action::Updated,
-        Err(_) => Action::Installed,
+        Ok(current) if current == SKILL_MD => Ok(Action::Unchanged),
+        Ok(_) => Ok(Action::Updated),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Action::Installed),
+        Err(error) => Err(AppError::general(format!(
+            "read skill {}: {error}",
+            path.display()
+        ))),
     }
 }
 
-fn write_skill(path: &Path) -> Result<()> {
+fn write_skill(path: &Path, force: bool) -> Result<()> {
     // Atomic, not `fs::write`, which truncates and then writes: a crash or a full disk
     // partway through left a *truncated* SKILL.md in an agent's skills directory —
     // frontmatter intact, instructions cut off — which an agent then loads as a valid
     // document. `write_atomic` is the config writer's temp-and-rename without the
     // permission tightening, which must not be applied to a directory the user's agent
     // owns.
-    crate::config::write_atomic(path, SKILL_MD, "skill")
+    if force {
+        crate::config::write_atomic(path, SKILL_MD, "skill")
+    } else {
+        crate::config::write_new_atomic(path, SKILL_MD, "skill")
+    }
 }
 /// Returns the process exit code.
 ///
@@ -176,7 +186,12 @@ pub fn run(action: &SkillAction, mode: Mode) -> Result<u8> {
             Ok(0)
         }
         SkillAction::Path => run_path(mode),
-        SkillAction::Install { agent, dir, yes } => run_install(*agent, dir.as_deref(), *yes, mode),
+        SkillAction::Install {
+            agent,
+            dir,
+            yes,
+            force,
+        } => run_install(*agent, dir.as_deref(), *yes, *force, mode),
     }
 }
 
@@ -191,6 +206,7 @@ struct PrintEnvelope<'a> {
 #[derive(Serialize)]
 struct TargetItem {
     agents: Vec<&'static str>,
+    action: &'static str,
     path: String,
 }
 
@@ -211,11 +227,14 @@ fn run_path(mode: Mode) -> Result<u8> {
             version: env!("CARGO_PKG_VERSION"),
             targets: targets
                 .iter()
-                .map(|t| TargetItem {
-                    agents: t.agents.clone(),
-                    path: t.path.display().to_string(),
+                .map(|t| {
+                    Ok(TargetItem {
+                        agents: t.agents.clone(),
+                        action: classify(&t.path)?.as_str(),
+                        path: t.path.display().to_string(),
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>>>()?,
         };
         crate::output::print_json(&env);
         return Ok(0);
@@ -251,7 +270,13 @@ struct InstallEnvelope {
     error: Option<ErrorBody>,
 }
 
-fn run_install(agent: Option<AgentKind>, dir: Option<&Path>, yes: bool, mode: Mode) -> Result<u8> {
+fn run_install(
+    agent: Option<AgentKind>,
+    dir: Option<&Path>,
+    yes: bool,
+    force: bool,
+    mode: Mode,
+) -> Result<u8> {
     let targets = choose_targets(agent, dir, yes, mode)?;
     if targets.is_empty() {
         // The user declined at the prompt; not an error.
@@ -267,9 +292,22 @@ fn run_install(agent: Option<AgentKind>, dir: Option<&Path>, yes: bool, mode: Mo
     // landed is said out loud.
     let mut failure = None;
     for t in &targets {
-        let action = classify(&t.path);
+        let action = match classify(&t.path) {
+            Ok(action) => action,
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        };
+        if action == Action::Updated && !force {
+            failure = Some(AppError::general(format!(
+                "refusing to replace differing skill at {}; inspect it and pass --force to overwrite",
+                t.path.display()
+            )));
+            break;
+        }
         if action != Action::Unchanged {
-            if let Err(e) = write_skill(&t.path) {
+            if let Err(e) = write_skill(&t.path, force) {
                 failure = Some(e);
                 break;
             }
@@ -351,7 +389,7 @@ fn choose_targets(
     let detected = detect()?;
     if detected.is_empty() {
         return Err(AppError::usage(
-            "no agent skills directory detected; pass --dir <DIR> or --agent claude|codex",
+            "no agent skills directory detected; pass --dir <DIR> or --agent claude|codex|generic",
         ));
     }
 
@@ -363,7 +401,7 @@ fn choose_targets(
     // Nothing named a target, so ask — but only when there is a human to ask.
     if mode.is_json() || !std::io::stdin().is_terminal() {
         return Err(AppError::usage(
-            "not a terminal: pass --yes, --agent claude|codex|all, or --dir <DIR>",
+            "not a terminal: pass --yes, --agent claude|codex|generic|all, or --dir <DIR>",
         ));
     }
     select_interactively(detected)
@@ -380,12 +418,13 @@ fn select_interactively(detected: Vec<Target>) -> Result<Vec<Target>> {
         .max()
         .unwrap_or(0);
     for (i, t) in detected.iter().enumerate() {
+        let action = classify(&t.path)?;
         crate::output::line(&format!(
             "  [{}] {:width$}  {}  ({})",
             i + 1,
             t.agent_list(),
             t.path.display(),
-            classify(&t.path).label(),
+            action.label(),
         ));
     }
     crate::output::line("");
@@ -465,6 +504,7 @@ mod tests {
         // `expect("every AgentKind has an AGENTS entry")` merely asserted.
         assert!(agent_entry(AgentKind::Claude).is_some());
         assert!(agent_entry(AgentKind::Codex).is_some());
+        assert!(agent_entry(AgentKind::Generic).is_some());
         assert!(agent_entry(AgentKind::All).is_none());
     }
     use crate::error::ErrorCode;
@@ -520,9 +560,24 @@ mod tests {
     #[test]
     fn classify_reports_installed_for_missing_file() {
         assert_eq!(
-            classify(Path::new("/nonexistent-root/skills/gitpic/SKILL.md")),
+            classify(Path::new("/nonexistent-root/skills/gitpic/SKILL.md")).unwrap(),
             Action::Installed
         );
+    }
+
+    #[test]
+    fn classify_reports_read_errors_instead_of_calling_them_missing() {
+        let dir =
+            std::env::temp_dir().join(format!("gitpic-skill-invalid-utf8-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
+
+        let error = classify(&path).expect_err("invalid UTF-8 is a read failure");
+        assert_eq!(error.code, ErrorCode::General);
+        assert!(error.message.contains("read skill"), "{}", error.message);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

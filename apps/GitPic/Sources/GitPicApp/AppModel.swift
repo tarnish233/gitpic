@@ -39,8 +39,21 @@ final class AppModel {
     /// launch reported "找不到 gitpic" for a binary that simply had not been located
     /// yet. The probe can shell out to a login shell, up to 8 s, so that window is
     /// wide enough to hit by hand.
-    enum ToolState: Sendable { case resolving, ready, missing }
+    enum ToolState: Sendable, Equatable { case resolving, ready, missing }
     private(set) var toolState: ToolState = .resolving
+
+    // MARK: - Agent skill
+
+    /// Detected agent targets and the action the bundled skill would take at each.
+    private(set) var skillTargets: [SkillTarget] = []
+    private(set) var skillVersion: String?
+    private(set) var skillTargetsLoaded = false
+    private(set) var skillTargetsLoading = false
+    private(set) var skillFailure: String?
+    /// `agent:<name>` while that agent's installation is running.
+    private(set) var skillInstallID: String?
+    /// Prevents an older refresh from replacing a newer answer.
+    private var skillTargetsGeneration = 0
 
     /// The config as last read from disk — the baseline a save diffs against.
     var savedConfig: GitpicConfig?
@@ -489,6 +502,95 @@ final class AppModel {
         // on the 「检查登录状态…」 spinner for the life of the process, for a machine
         // where the answer was simply "there is no gitpic".
         Task { await self.refreshAuth() }
+    }
+
+    /// Re-read every detected skill target from the CLI.
+    func loadSkillTargets() async {
+        guard let runner else {
+            if toolState == .missing {
+                skillTargets = []
+                skillTargetsLoaded = true
+                skillFailure = "找不到 gitpic 可执行文件，请重新安装 GitPic。"
+            }
+            return
+        }
+
+        skillTargetsGeneration += 1
+        let generation = skillTargetsGeneration
+        skillTargetsLoading = true
+        skillFailure = nil
+        defer {
+            if skillTargetsGeneration == generation {
+                skillTargetsLoading = false
+            }
+        }
+
+        do {
+            let report = try await runner.skillTargets()
+            guard skillTargetsGeneration == generation else { return }
+            skillTargets = report.targets
+            skillVersion = report.version
+            skillTargetsLoaded = true
+        } catch {
+            guard skillTargetsGeneration == generation else { return }
+            skillTargets = []
+            skillTargetsLoaded = true
+            skillFailure = Self.skillError(error)
+            Diagnostics.log("skill targets failed: \(String(describing: error))")
+        }
+    }
+
+    func installSkill(for agent: SkillAgent, force: Bool) async {
+        await performSkillInstall(id: "agent:\(agent.rawValue)") { runner in
+            try await runner.installSkill(for: agent, force: force)
+        }
+    }
+
+    private func performSkillInstall(
+        id: String,
+        operation: (GitpicRunner) async throws -> SkillInstallEnvelope
+    ) async {
+        guard let runner, skillInstallID == nil else { return }
+        skillInstallID = id
+        skillFailure = nil
+        defer { skillInstallID = nil }
+
+        do {
+            let report = try await operation(runner)
+            skillVersion = report.version
+            await loadSkillTargets()
+
+            if report.ok == false {
+                let message = report.error.map { "\($0.code)：\($0.message)" }
+                    ?? "gitpic 返回了失败结果，但没有给出错误说明。"
+                skillFailure = message
+                let prefix = report.installed.isEmpty
+                    ? "没有写入任何位置。"
+                    : "已写入 \(report.installed.count) 个位置，但没有全部完成。"
+                notify(title: "Skill 安装失败", body: "\(prefix) \(message)")
+                return
+            }
+
+            let changed = report.installed.filter { $0.action != .unchanged }.count
+            if changed == 0 {
+                notify(title: "Skill 已是最新", body: "所有目标都已经是 v\(report.version) 的内容。")
+            } else {
+                notify(title: "Skill 安装完成",
+                       body: "已在 \(changed) 个位置写入 gitpic skill v\(report.version)。")
+            }
+        } catch {
+            let message = Self.skillError(error)
+            skillFailure = message
+            Diagnostics.log("skill install failed: \(String(describing: error))")
+            notify(title: "Skill 安装失败", body: message)
+        }
+    }
+
+    private static func skillError(_ error: Error) -> String {
+        if case let RunFailure.cli(_, body) = error {
+            return "\(body.code)：\(body.message)"
+        }
+        return String(describing: error)
     }
 
     // MARK: - The Finder right-click switch

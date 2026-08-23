@@ -319,6 +319,10 @@ pub enum SkillAction {
         /// Skip the prompt and install into every detected directory
         #[arg(short = 'y', long)]
         yes: bool,
+
+        /// Replace an existing SKILL.md whose content differs
+        #[arg(long)]
+        force: bool,
     },
     /// Print the skill document to stdout
     Print,
@@ -332,6 +336,8 @@ pub enum AgentKind {
     Claude,
     /// Codex CLI (`~/.codex/skills`)
     Codex,
+    /// Generic agents (`~/.agent/skills`)
+    Generic,
     /// Every detected agent
     All,
 }
@@ -551,28 +557,45 @@ mod tests {
         let cli = Cli::try_parse_from(["gitpic", "skill", "install"]).unwrap();
         match cli.command {
             Some(Command::Skill {
-                action: SkillAction::Install { agent, dir, yes },
+                action:
+                    SkillAction::Install {
+                        agent,
+                        dir,
+                        yes,
+                        force,
+                    },
             }) => {
                 assert!(agent.is_none());
                 assert!(dir.is_none());
                 assert!(!yes);
+                assert!(!force);
             }
             other => panic!("expected skill install, got {other:?}"),
         }
     }
 
     #[test]
-    fn skill_install_parses_agent_and_yes() {
-        let cli =
-            Cli::try_parse_from(["gitpic", "skill", "install", "--agent", "codex", "-y"]).unwrap();
-        match cli.command {
-            Some(Command::Skill {
-                action: SkillAction::Install { agent, yes, .. },
-            }) => {
-                assert_eq!(agent, Some(AgentKind::Codex));
-                assert!(yes);
+    fn skill_install_parses_each_agent_and_yes() {
+        for (name, expected) in [
+            ("claude", AgentKind::Claude),
+            ("codex", AgentKind::Codex),
+            ("generic", AgentKind::Generic),
+        ] {
+            let cli =
+                Cli::try_parse_from(["gitpic", "skill", "install", "--agent", name, "-y"]).unwrap();
+            match cli.command {
+                Some(Command::Skill {
+                    action:
+                        SkillAction::Install {
+                            agent, yes, force, ..
+                        },
+                }) => {
+                    assert_eq!(agent, Some(expected));
+                    assert!(yes);
+                    assert!(!force);
+                }
+                other => panic!("expected skill install, got {other:?}"),
             }
-            other => panic!("expected skill install, got {other:?}"),
         }
     }
 
@@ -584,6 +607,20 @@ mod tests {
             Some(Command::Skill {
                 action: SkillAction::Install { dir, .. },
             }) => assert_eq!(dir, Some(PathBuf::from("/tmp/skills"))),
+            other => panic!("expected skill install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skill_install_parses_force() {
+        let cli = Cli::try_parse_from([
+            "gitpic", "skill", "install", "--agent", "generic", "--force",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Skill {
+                action: SkillAction::Install { force, .. },
+            }) => assert!(force),
             other => panic!("expected skill install, got {other:?}"),
         }
     }

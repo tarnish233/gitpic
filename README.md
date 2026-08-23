@@ -219,15 +219,22 @@ jsDelivr 只服务公开仓库。
 `gitpic` 自带一份 [Agent Skill](./skills/gitpic/SKILL.md)，告诉 Claude Code、Codex 等助手怎么
 调用它。技能文档编进了二进制，所以装上的版本永远和你正在跑的 `gitpic` 一致。
 
+使用 GitPic.app 时也可以打开「设置 ▸ Agent」，分别管理 Claude Code、Codex 与通用 Agent：查看各自
+是未安装、有差异还是已是最新，并单独安装或更新；替换一份有差异的 `SKILL.md` 前，App 会先确认。
+
 ```bash
 gitpic skill install                 # 从检测到的助手里选
 gitpic skill install --agent codex   # 或指定一家
+gitpic skill install --agent generic # 通用 Agent（~/.agent/skills）
 gitpic skill install --dir DIR       # 或指定任意 skills 目录
+gitpic skill install --agent codex --force # 检查后替换有差异的文件
 gitpic skill print                   # 打到 stdout
 ```
 
-自动检测 `~/.claude/skills` 与 `~/.codex/skills`（尊重 `CLAUDE_CONFIG_DIR` / `CODEX_HOME`），
-写入前先问。脚本和 CI 里请加 `--yes`、`--agent` 或 `--dir` —— 没有终端时它会报错而不是替你猜。
+自动检测 `~/.claude/skills`、`~/.codex/skills` 与 `~/.agent/skills`（分别尊重
+`CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`AGENT_HOME`），写入前先问。脚本和 CI 里请加 `--yes`、
+`--agent` 或 `--dir` —— 没有终端时它会报错而不是替你猜。已有 `SKILL.md` 内容不同时，CLI
+会保留原文件并报错；检查后只有显式传入 `--force` 才会替换。App 会在确认对话框之后代为传入。
 
 也可以作为插件装：
 

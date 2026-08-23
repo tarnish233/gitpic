@@ -439,6 +439,34 @@ extension GitpicRunner {
     }
 }
 
+// MARK: - Agent skill
+
+extension GitpicRunner {
+    /// Detected agent homes and what installing the bundled skill would do at each.
+    public func skillTargets() async throws -> SkillPathEnvelope {
+        try await runJSON(["skill", "path", "--json"], as: SkillPathEnvelope.self)
+    }
+
+    /// Install to a named agent even when its home has not been detected yet.
+    static func skillInstallArguments(for agent: SkillAgent, force: Bool) -> [String] {
+        var arguments = ["skill", "install", "--agent", agent.rawValue]
+        if force {
+            arguments.append("--force")
+        }
+        arguments.append("--json")
+        return arguments
+    }
+
+    public func installSkill(
+        for agent: SkillAgent,
+        force: Bool
+    ) async throws -> SkillInstallEnvelope {
+        try await runJSON(
+            Self.skillInstallArguments(for: agent, force: force),
+            as: SkillInstallEnvelope.self)
+    }
+}
+
 // MARK: - Config and history
 
 extension GitpicRunner {

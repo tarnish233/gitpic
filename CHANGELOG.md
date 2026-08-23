@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-08-23
+
+### Agent integrations, managed separately and never overwritten silently
+
+### CLI
+
+- `gitpic skill install --agent generic` installs the bundled skill for Generic Agent under
+  `~/.agent/skills` (or `AGENT_HOME/skills`).
+- `gitpic skill path --json` now reports the prospective `action` for every target so UI
+  clients can distinguish a new install, a differing file, and an unchanged copy without
+  writing first.
+- `gitpic skill install` refuses to replace a differing `SKILL.md` unless `--force` is
+  explicit. A new install is published atomically without clobbering a file created after
+  the status check, and read errors are reported instead of being mistaken for a missing
+  file.
+
+### App
+
+- GitPic.app now has an **Agent** settings pane that manages Claude Code, Codex, and a
+  Generic Agent separately, showing whether each copy is missing, different, or current
+  with its own install or update action. Only a confirmed replacement passes the CLI's
+  overwrite permission.
+
 ## [0.17.0] - 2026-08-23
 
 ### A whole-project review: three health reports that lied, two writes that lost things
@@ -2420,7 +2443,7 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.17.0...HEAD
+[0.18.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.18.0
 [0.17.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.17.0
 [0.16.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.16.0
 [0.15.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.15.0

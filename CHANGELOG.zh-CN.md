@@ -4,6 +4,26 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.18.0] - 2026-08-23
+
+### Agent 集成各自管理，覆盖不再靠猜
+
+### CLI
+
+- `gitpic skill install --agent generic` 可把内置 Skill 安装到通用 Agent 的
+  `~/.agent/skills`（或 `AGENT_HOME/skills`）。
+- `gitpic skill path --json` 现在为每个目标报告预期的 `action`，UI 客户端无需先写入，就能区分
+  新安装、有差异和未变化三种状态。
+- `gitpic skill install` 默认拒绝替换有差异的 `SKILL.md`，只有显式传入 `--force` 才会覆盖。
+  新安装采用原子无覆盖写入：即使状态检查后有其他进程创建了文件也不会误覆盖；读取失败也会如实
+  报错，不再当成文件不存在。
+
+### App
+
+- GitPic.app 新增 **Agent** 设置页：Claude Code、Codex 与通用 Agent 分开管理，各自显示未安装、
+  内容有差异或已是最新，并有独立的安装或更新操作。只有用户确认替换后，App 才会把覆盖权限传给
+  CLI。
+
 ## [0.17.0] - 2026-08-23
 
 ### 一次全项目 review：三份会骗人的体检报告，两处会悄悄丢东西的写入
@@ -1834,7 +1854,7 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic/compare/v0.17.0...HEAD
+[0.18.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.18.0
 [0.17.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.17.0
 [0.16.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.16.0
 [0.15.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.15.0

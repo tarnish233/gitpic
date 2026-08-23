@@ -603,6 +603,161 @@ fn no_prompt_is_answered_from_a_pipe() {
     assert!(installed.is_file(), "and it lands inside the sandbox");
 }
 
+/// The app renders these strings as three distinct states and uses the path to
+/// install into the same target, so the read-only report has to track the real file.
+#[test]
+fn skill_path_reports_what_install_would_do() {
+    let sb = Sandbox::new("skill-state");
+    let claude_home = sb.dir.join("claude");
+    let codex_home = sb.dir.join("codex-not-installed");
+    let generic_home = sb.dir.join("generic-not-installed");
+    std::fs::create_dir_all(&claude_home).expect("mkdir agent home");
+    let installed = claude_home.join("skills/gitpic/SKILL.md");
+    let env: &[(&str, &str)] = &[
+        (
+            "CLAUDE_CONFIG_DIR",
+            claude_home.to_str().expect("utf-8 claude path"),
+        ),
+        ("CODEX_HOME", codex_home.to_str().expect("utf-8 codex path")),
+        (
+            "AGENT_HOME",
+            generic_home.to_str().expect("utf-8 generic path"),
+        ),
+    ];
+
+    let action = |stdout: &str| {
+        parse(stdout, "skill path --json")
+            .pointer("/targets/0/action")
+            .and_then(|a| a.as_str())
+            .map(str::to_owned)
+    };
+
+    let (stdout, stderr, code) = sb.run_with_env(&["skill", "path", "--json"], env);
+    assert_eq!(code, 0, "initial status\n{stdout}\n{stderr}");
+    assert_eq!(action(&stdout).as_deref(), Some("installed"), "{stdout}");
+
+    let (stdout, stderr, code) =
+        sb.run_with_env(&["skill", "install", "--agent", "claude", "--json"], env);
+    assert_eq!(code, 0, "explicit install\n{stdout}\n{stderr}");
+    assert_eq!(
+        parse(&stdout, "skill install --json")
+            .pointer("/installed/0/action")
+            .and_then(|a| a.as_str()),
+        Some("installed"),
+        "{stdout}"
+    );
+    assert!(installed.is_file(), "the reported write must exist");
+
+    let (stdout, stderr, code) = sb.run_with_env(&["skill", "path", "--json"], env);
+    assert_eq!(code, 0, "status after install\n{stdout}\n{stderr}");
+    assert_eq!(
+        action(&stdout).as_deref(),
+        Some("already up to date"),
+        "{stdout}"
+    );
+
+    std::fs::write(&installed, "user-edited skill\n").expect("replace installed skill");
+    let (stdout, stderr, code) = sb.run_with_env(&["skill", "path", "--json"], env);
+    assert_eq!(code, 0, "status after edit\n{stdout}\n{stderr}");
+    assert_eq!(action(&stdout).as_deref(), Some("updated"), "{stdout}");
+}
+
+/// A status snapshot is advisory; the install command must decide again at write time.
+/// Otherwise the app can report "not installed", then overwrite a file created by
+/// another process between the refresh and the button click without ever asking.
+#[test]
+fn skill_install_never_replaces_differing_content_without_force() {
+    let sb = Sandbox::new("skill-no-clobber");
+    let claude_home = sb.dir.join("claude");
+    let installed = claude_home.join("skills/gitpic/SKILL.md");
+    std::fs::create_dir_all(installed.parent().expect("skill parent")).expect("mkdir skill");
+    std::fs::write(&installed, "user-edited skill\n").expect("write user skill");
+    let env: &[(&str, &str)] = &[(
+        "CLAUDE_CONFIG_DIR",
+        claude_home.to_str().expect("utf-8 claude path"),
+    )];
+
+    let (stdout, stderr, code) =
+        sb.run_with_env(&["skill", "install", "--agent", "claude", "--json"], env);
+    assert_eq!(
+        code, 1,
+        "an unconfirmed replacement must fail\n{stdout}\n{stderr}"
+    );
+    let report = parse(&stdout, "refused skill replacement");
+    assert_eq!(
+        report.get("ok").and_then(|value| value.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        report
+            .pointer("/error/code")
+            .and_then(|value| value.as_str()),
+        Some("GENERAL"),
+        "{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&installed).expect("user skill remains readable"),
+        "user-edited skill\n",
+        "refusal must leave the existing file byte-for-byte intact"
+    );
+
+    let (stdout, stderr, code) = sb.run_with_env(
+        &["skill", "install", "--agent", "claude", "--force", "--json"],
+        env,
+    );
+    assert_eq!(code, 0, "confirmed replacement\n{stdout}\n{stderr}");
+    assert_eq!(
+        parse(&stdout, "forced skill replacement")
+            .pointer("/installed/0/action")
+            .and_then(|value| value.as_str()),
+        Some("updated"),
+        "{stdout}"
+    );
+    let bundled = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/gitpic/SKILL.md"),
+    )
+    .expect("bundled skill source");
+    assert_eq!(
+        std::fs::read_to_string(&installed).expect("installed skill"),
+        bundled,
+        "--force replaces the reviewed file with the bundled skill"
+    );
+}
+
+#[test]
+fn generic_agent_installs_under_agent_home() {
+    let sb = Sandbox::new("generic-agent");
+    let agent_home = sb.dir.join(".agent");
+    let installed = agent_home.join("skills/gitpic/SKILL.md");
+    let env: &[(&str, &str)] = &[(
+        "AGENT_HOME",
+        agent_home.to_str().expect("utf-8 generic agent path"),
+    )];
+
+    let (stdout, stderr, code) =
+        sb.run_with_env(&["skill", "install", "--agent", "generic", "--json"], env);
+    assert_eq!(code, 0, "generic install\n{stdout}\n{stderr}");
+    let report = parse(&stdout, "generic skill install --json");
+    assert_eq!(
+        report
+            .pointer("/installed/0/agents/0")
+            .and_then(|a| a.as_str()),
+        Some("generic"),
+        "{stdout}"
+    );
+    assert_eq!(
+        report
+            .pointer("/installed/0/path")
+            .and_then(|path| path.as_str()),
+        installed.to_str(),
+        "{stdout}"
+    );
+    assert!(
+        installed.is_file(),
+        "the generic skill must land under .agent"
+    );
+}
+
 #[test]
 fn quiet_mode_prints_only_machine_usable_lines() {
     let sb = Sandbox::new("quiet");
