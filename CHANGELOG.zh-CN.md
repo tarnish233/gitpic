@@ -4,7 +4,7 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.16.0] - 2026-08-23
 
 ### 只剩 `gitpic auth login` 一条路 —— `gh` 删掉了
 
@@ -57,6 +57,12 @@ token 落在 `~/.config/gitpic/auth.toml`，权限 0600，用的是和 `config.t
 
 #### 这次一并做的
 
+- **`gitpic init`没有了。** 它会依次问仓库、分支、链接形态，三样都得手打。前两样由
+  `gitpic repos` 取代，而且做得更好：它列出这个凭据真的能 push 的仓库，按编号选，然后把
+  `owner`/`repo` 连同 **GitHub 报告的默认分支**一起存下来 —— 手打分支正是默认分支为
+  `master` 的仓库被配成 `main` 的原因，之后每次上传都会在一个不存在的 ref 上 404。
+  链接形态改由 `gitpic config set upload.link_kind cdn|raw` 设置。所以第一次用现在是
+  `gitpic auth login`，然后 `gitpic repos`。
 - **`token_source` 字段删了**（`doctor --json` 里的；`auth status` 从来没有过）。只剩一个来源时，一个
   取值只可能是 `"gitpic"` 的字段，重复的是产生它的那条命令。`gitpic doctor` 也因此少打印一段。
 - **所有持有 token 的类型都手写了 `Debug`**（`auth::Stored`、`oauth::Granted`），打印成 `<redacted>`。
@@ -1674,7 +1680,8 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic/compare/v0.15.0...HEAD
+[未发布]: https://github.com/tarnish233/gitpic/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.16.0
 [0.15.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.15.0
 [0.14.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.1
 [0.14.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.0
