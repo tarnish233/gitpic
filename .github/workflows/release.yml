@@ -153,7 +153,7 @@ jobs:
   # GitPic.app. Builds and verifies here, publishes nowhere: the zip travels to
   # `publish` as an artifact so there is still exactly one publisher.
   #
-  # Must stay on macOS — `ditto`, `codesign`, `plutil`, and `actool` are all
+  # Must stay on macOS — `hdiutil`, `codesign`, `plutil`, and `actool` are all
   # required, and the embedded CLI has to be a native build.
   app:
     name: Build GitPic.app
@@ -171,16 +171,23 @@ jobs:
       - name: Build the CLI that gets embedded
         run: cargo build --release --locked
 
-      - name: Swift tests (offline only)
-        working-directory: apps/GitPic
-        # GITPIC_LIVE is intentionally unset: the live suite uploads to a real
-        # repository and needs a gh credential, neither of which belongs in CI.
-        run: swift test
-
       # This also re-checks the unified version: the script fails if the binary it
       # is about to embed does not report the Cargo.toml version.
       - name: Build the app bundle
         run: ./scripts/build-app.sh
+
+      # After the bundle, and the order is load-bearing: `FinderServicePlistTests`
+      # reads `dist-app/GitPic.app/Contents/Info.plist` and disables itself when there
+      # is none, so running this first — as it did — silently skipped the one check
+      # that holds the `NSServices` plist and the Swift that registers it to the same
+      # names, on every release.
+      #
+      # GITPIC_LIVE is intentionally unset: the live suite uploads to a real
+      # repository and needs a gitpic credential (`auth.toml`), neither of which
+      # belongs in CI.
+      - name: Swift tests (offline only)
+        working-directory: apps/GitPic
+        run: swift test
 
       - name: Package
         id: package

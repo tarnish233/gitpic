@@ -106,12 +106,6 @@ jobs:
         working-directory: apps/GitPic
         run: swift build
 
-      # Offline suites only. The live suite is gated behind GITPIC_LIVE because it
-      # uploads to a real repository and needs a gh credential.
-      - name: Test
-        working-directory: apps/GitPic
-        run: swift test
-
       # The bundle path, not just the Swift package.
       #
       # This job used to stop at `swift build` / `swift test`, so the bundle, the
@@ -130,6 +124,21 @@ jobs:
 
       - name: Build the app bundle
         run: ./scripts/build-app.sh
+
+      # Offline suites only. The live suite is gated behind GITPIC_LIVE because it
+      # uploads to a real repository and needs a gitpic credential (`auth.toml`, from
+      # `gitpic auth login`).
+      #
+      # After the bundle on purpose, and this ordering is load-bearing:
+      # `FinderServicePlistTests` reads `dist-app/GitPic.app/Contents/Info.plist` and
+      # disables itself when there is no bundle to read. Run before `build-app.sh` — as
+      # it was — the one check that holds the `NSServices` plist and the Swift that
+      # registers it to the same names silently skipped on every CI run, which is the
+      # single outcome that suite exists to prevent. `dist-app/` is gitignored, so a
+      # fresh checkout never has one by accident.
+      - name: Test
+        working-directory: apps/GitPic
+        run: swift test
 
       - name: The bundle carries the Cargo.toml version and a complete icon
         run: |
