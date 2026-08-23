@@ -75,7 +75,7 @@ async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
         // is wrong or absent.
         Some(Command::Repos) => commands::repos::run(mode).await,
         Some(Command::Completion { shell }) => commands::completion::run(*shell).map(|_| 0),
-        Some(Command::Skill { action }) => commands::skill::run(action, mode).map(|_| 0),
+        Some(Command::Skill { action }) => commands::skill::run(action, mode),
 
         Some(Command::Doctor { .. }) => {
             let cfg = resolve_config(cli)?;

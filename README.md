@@ -208,8 +208,11 @@ jsDelivr 只服务公开仓库。
 **流式**的 —— 每行一个带 `event` 字段的完整 JSON 对象（`code` 带一次性码，最后一行一定是 `done` 或
 `error`），因为一次性码必须在"等浏览器"之前就发出去，而一个信封只能写一次。这是 App 能把登录做进设置
 窗口的原因，也是唯一一处不遵守"一次调用一个信封"的地方，所以脚本和 AI 助手不该调它。另外
-`gitpic completion <shell>` 忽略 `--json`、照打 shell 脚本；`gitpic config edit` 把 stdout 交给
-`$EDITOR`。参数解析错误在 `--json` 下同样是 `{ "ok": false, "error": … }`。
+`gitpic completion <shell>` 忽略 `--json`、照打 shell 脚本；`gitpic config edit` 则在 `--json` 下
+**直接拒掉**（`USAGE`）—— 它要把 stdout 交给编辑器，没法同时是一份 JSON。要读配置用
+`gitpic config get --json`，要改用 `gitpic config set`。编辑器取 `$VISUAL`、再取 `$EDITOR`，
+带参数的写法（`EDITOR="code --wait"`）也能用。参数解析错误在 `--json` 下同样是
+`{ "ok": false, "error": … }`。
 
 ## AI 助手技能
 

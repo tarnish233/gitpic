@@ -4,7 +4,7 @@ use super::prompt_opt;
 use crate::cli::{AgentKind, SkillAction};
 use crate::config;
 use crate::error::{AppError, Result};
-use crate::output::Mode;
+use crate::output::{ErrorBody, Mode};
 use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -43,7 +43,11 @@ impl Action {
     fn label(self) -> &'static str {
         match self {
             Action::Installed => "new",
-            Action::Updated => "outdated",
+            // Not "outdated": `classify` returns this for *any* difference, and
+            // SKILL.md carries no version, so a file the user edited by hand is
+            // indistinguishable from a stale one. Calling it outdated is a claim about
+            // their file that this cannot support.
+            Action::Updated => "differs",
             Action::Unchanged => "up to date",
         }
     }
@@ -66,6 +70,18 @@ impl Target {
 /// symlinks as far as they exist so that two agents pointing at one real
 /// directory are recognised as one target rather than written to twice.
 fn resolve(skills_dir: &Path) -> PathBuf {
+    // `--dir` pointed at the skill directory itself installs one level too deep and
+    // reports success: `gitpic skill install --dir ~/.claude/skills/gitpic` — which is
+    // the path `gitpic skill path` prints, and what shell completion offers — wrote
+    // `.../gitpic/gitpic/SKILL.md`, said `✓ installed`, and no agent ever found it.
+    // A directory already named `gitpic` is the skill directory, not a directory of
+    // skills; nothing legitimate nests one inside the other.
+    if skills_dir.file_name().and_then(|n| n.to_str()) == Some(SKILL_NAME) {
+        if let Ok(real) = skills_dir.canonicalize() {
+            return real.join("SKILL.md");
+        }
+        return skills_dir.join("SKILL.md");
+    }
     let skill_dir = skills_dir.join(SKILL_NAME);
     if let Ok(real) = skill_dir.canonicalize() {
         return real.join("SKILL.md");
@@ -126,13 +142,22 @@ fn classify(path: &Path) -> Action {
 }
 
 fn write_skill(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| AppError::general(format!("mkdir: {e}")))?;
-    }
-    std::fs::write(path, SKILL_MD).map_err(|e| AppError::general(format!("write skill: {e}")))
+    // Atomic, not `fs::write`, which truncates and then writes: a crash or a full disk
+    // partway through left a *truncated* SKILL.md in an agent's skills directory —
+    // frontmatter intact, instructions cut off — which an agent then loads as a valid
+    // document. `write_atomic` is the config writer's temp-and-rename without the
+    // permission tightening, which must not be applied to a directory the user's agent
+    // owns.
+    crate::config::write_atomic(path, SKILL_MD, "skill")
 }
-
-pub fn run(action: &SkillAction, mode: Mode) -> Result<()> {
+/// Returns the process exit code.
+///
+/// `Result<u8>` rather than `Result<()>` for one reason: `skill install --agent all` can
+/// half-succeed, and reporting that means printing the envelope *here* and still exiting
+/// non-zero. Propagating an `Err` instead would have `main` print a second envelope onto
+/// a stream the caller is parsing as one document — the same shape `upload`'s partial
+/// report solves the same way.
+pub fn run(action: &SkillAction, mode: Mode) -> Result<u8> {
     match action {
         SkillAction::Print => {
             if mode.is_json() {
@@ -148,7 +173,7 @@ pub fn run(action: &SkillAction, mode: Mode) -> Result<()> {
                 crate::output::raw(SKILL_MD);
                 crate::output::finish();
             }
-            Ok(())
+            Ok(0)
         }
         SkillAction::Path => run_path(mode),
         SkillAction::Install { agent, dir, yes } => run_install(*agent, dir.as_deref(), *yes, mode),
@@ -177,7 +202,7 @@ struct PathEnvelope {
     targets: Vec<TargetItem>,
 }
 
-fn run_path(mode: Mode) -> Result<()> {
+fn run_path(mode: Mode) -> Result<u8> {
     let targets = detect()?;
     if mode.is_json() {
         let env = PathEnvelope {
@@ -193,16 +218,16 @@ fn run_path(mode: Mode) -> Result<()> {
                 .collect(),
         };
         crate::output::print_json(&env);
-        return Ok(());
+        return Ok(0);
     }
     if targets.is_empty() {
         eprintln!("no agent skills directory detected; use --dir to name one");
-        return Ok(());
+        return Ok(0);
     }
     for t in &targets {
         crate::output::line(&t.path.display().to_string());
     }
-    Ok(())
+    Ok(0)
 }
 
 #[derive(Serialize)]
@@ -218,20 +243,36 @@ struct InstallEnvelope {
     name: &'static str,
     version: &'static str,
     installed: Vec<InstalledItem>,
+    /// Present exactly when `ok` is false, in the same shape every other subcommand
+    /// uses — so a partly successful install carries both halves: what landed, and why
+    /// the rest did not. This is `output::print_partial`'s shape applied to the one
+    /// other command that can half-succeed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<ErrorBody>,
 }
 
-fn run_install(agent: Option<AgentKind>, dir: Option<&Path>, yes: bool, mode: Mode) -> Result<()> {
+fn run_install(agent: Option<AgentKind>, dir: Option<&Path>, yes: bool, mode: Mode) -> Result<u8> {
     let targets = choose_targets(agent, dir, yes, mode)?;
     if targets.is_empty() {
         // The user declined at the prompt; not an error.
-        return Ok(());
+        return Ok(0);
     }
 
     let mut installed = Vec::new();
+    // Reported rather than propagated on the spot: `--agent all` with the second
+    // directory unwritable used to write the first, return the error, and print nothing
+    // but an error envelope — so the caller was never told that one target had in fact
+    // been installed, and a re-run is the only way to find out. The first failure still
+    // stops the loop and still decides the exit code; what changes is that what already
+    // landed is said out loud.
+    let mut failure = None;
     for t in &targets {
         let action = classify(&t.path);
         if action != Action::Unchanged {
-            write_skill(&t.path)?;
+            if let Err(e) = write_skill(&t.path) {
+                failure = Some(e);
+                break;
+            }
         }
         installed.push(InstalledItem {
             agents: t.agents.clone(),
@@ -242,13 +283,18 @@ fn run_install(agent: Option<AgentKind>, dir: Option<&Path>, yes: bool, mode: Mo
 
     if mode.is_json() {
         let env = InstallEnvelope {
-            ok: true,
+            ok: failure.is_none(),
             name: SKILL_NAME,
             version: env!("CARGO_PKG_VERSION"),
             installed,
+            error: failure
+                .as_ref()
+                .map(|e: &AppError| ErrorBody::new(e.code.as_str(), &e.message)),
         };
         crate::output::print_json(&env);
-        return Ok(());
+        // The envelope *is* the report, so `main` must not print a second one; the
+        // failure's own code still decides the exit status.
+        return Ok(failure.map_or(0, |e| e.code.exit_code()));
     }
 
     for item in &installed {
@@ -267,7 +313,13 @@ fn run_install(agent: Option<AgentKind>, dir: Option<&Path>, yes: bool, mode: Mo
             item.path,
         ));
     }
-    Ok(())
+    // After the lines, so what landed is on screen before the reason the rest did not.
+    // An `Err` is right here: `main` renders it as `error: <message>` on stderr, which
+    // is a second *line*, not a second envelope.
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(0),
+    }
 }
 
 /// Work out which targets to write, prompting only when the invocation did not
