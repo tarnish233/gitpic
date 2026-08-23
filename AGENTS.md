@@ -118,7 +118,11 @@ at one shared `CARGO_TARGET_DIR`. What stays global no matter what:
 
 - **The image-host repo** — any successful upload is a real commit in it. The
   scratch config starts empty, so `gitpic` reports `CONFIG_MISSING` instead of
-  uploading; pass `--seed-config` only when you mean to write for real.
+  uploading; pass `--seed-config` only when you mean to write for real. Since 0.16.0
+  the **credential is per-worktree too** — `auth.toml` sits beside `config.toml` under
+  `XDG_CONFIG_HOME`, where it used to come from `gh`'s machine-wide keyring — so
+  `--seed-config` seeds the target but not the token, and a real upload from a fresh
+  worktree needs one `gitpic auth login` of its own.
 - The skills directory that `gitpic skill install` writes to.
 - `/Applications/GitPic.app` and `~/Library/Logs/GitPic.log` — one per machine.
 
