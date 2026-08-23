@@ -137,6 +137,42 @@ final class AppModel {
 
     // MARK: - Telling the user what happened
 
+    /// Whether the Finder right-click item is switched on.
+    ///
+    /// A mirror of system state, not a setting of our own: the truth is the `pbs` entry
+    /// ``FinderService`` reads, and this exists only because `@Observable` cannot watch
+    /// another process's preferences.
+    ///
+    /// Seeded with `true` rather than a real read, deliberately. `AppModel.shared` is
+    /// first touched from `setUpStatusItem()`, so a `FinderService.isEnabled` default
+    /// would put a cross-process preference read (measured 1.9 ms on a cold domain) on
+    /// the launch path — to produce a value nothing reads until 设置 ▸ 上传 opens, which
+    /// calls ``refreshFinderService()`` before showing it anyway. `true` is also the right
+    /// placeholder: it is what the system reports for a service nobody has toggled.
+    private(set) var finderServiceEnabled = true
+
+    /// Re-read the switch from the system. Called whenever the settings window is
+    /// about to show it — System Settings can change the same switch, so a value
+    /// cached since launch would show 开 for an item the user removed an hour ago.
+    func refreshFinderService() {
+        finderServiceEnabled = FinderService.isEnabled
+    }
+
+    /// Flip the switch, and show what the system actually did.
+    ///
+    /// `setEnabled` returns the state it observed after writing, so this assigns that —
+    /// one read, one comparison. A switch that slid over while the menu item stayed put
+    /// would be a lie the user cannot see through, so a refusal springs the switch back
+    /// and says where the same setting can be changed by hand.
+    func setFinderServiceEnabled(_ enabled: Bool) {
+        let observed = FinderService.setEnabled(enabled)
+        finderServiceEnabled = observed
+        guard observed != enabled else { return }
+        notify(title: "改不了右键菜单",
+               body: "系统没有接受这次修改。可在「系统设置 ▸ 键盘 ▸ 键盘快捷键 ▸ 服务」"
+                     + "里手动开关 GitPic。")
+    }
+
     /// Post an outcome to Notification Center, and log it.
     ///
     /// The window has no status line any more: outcomes are events, the window is

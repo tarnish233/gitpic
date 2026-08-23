@@ -57,11 +57,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // shortcuts are dead inside it — see `MainMenu`.
         MainMenu.install()
         setUpStatusItem()
+        // Before the first turn of the run loop: a right-click that launched the app
+        // is delivered as soon as one comes round, and a service message that
+        // arrives with no provider registered is simply dropped.
+        installServiceProvider()
         // The menu's checkmarks are derived from the config, so they have to be
         // redrawn whenever it changes — including when the change came from the
         // window's 保存 two panes away.
         AppModel.shared.onConfigChange = { [weak self] in self?.rebuildMenu() }
-        Task { await resolveTools() }
+        // Held rather than fired and forgotten: `resolvedRunner()` awaits it.
+        discovery = Task { await resolveTools() }
         // Ask at launch rather than at the first upload: the prompt is a modal
         // interruption, and the moment a result is ready is the worst time to
         // discover the app cannot show it.
@@ -74,6 +79,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Tools
+
+    /// The one discovery run, held so callers can await it instead of each inventing a
+    /// policy for "not resolved yet".
+    ///
+    /// A right-click upload is normally a *cold launch*: the service starts the app, and
+    /// the files arrive while this is still spawning `gh`. The first shape of that fix
+    /// was a queue of deferred uploads drained from both outcomes of `resolveTools()` —
+    /// which worked, but put the wait *above* `beginUpload()`, so the status icon stayed
+    /// at rest and `.started` posts no banner by design: the app looked asleep for as
+    /// long as discovery took. It was also a third answer to a question
+    /// `uploadClipboard()` and `AppModel.reload()` each answered differently.
+    ///
+    /// Holding the task instead lets every caller say `await resolvedRunner()` and put
+    /// its own feedback wherever it belongs.
+    private var discovery: Task<Void, Never>?
+
+    /// The runner, once discovery has an answer — `nil` means it finished and found
+    /// nothing, never "still looking".
+    private func resolvedRunner() async -> GitpicRunner? {
+        await discovery?.value
+        return runner
+    }
 
     /// Locating `gh` and probing `gh auth status` spawn processes and can block
     /// on a login shell. Keep that off the main thread so a hung probe cannot
@@ -138,10 +165,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// What to say when `runner` is nil.
+    /// What to say when discovery finished and found no `gitpic`.
     ///
-    /// "找不到 gitpic" while discovery is still running is a lie the user can act on
-    /// wrongly — reinstalling a binary that is present and merely not located yet.
+    /// The `.resolving` wording is a backstop, not the normal path: both upload entry
+    /// points now `await resolvedRunner()`, so by the time either calls this the state
+    /// is settled. It stays because "找不到 gitpic" while the search is still running is
+    /// a lie the user can act on wrongly — reinstalling a binary that is present and
+    /// merely not located yet — and a future caller that forgets to await should get the
+    /// harmless sentence rather than that one.
     private func missingToolSummary() -> String {
         AppModel.shared.toolState == .resolving
             ? "正在查找 gitpic，请稍候重试"
@@ -464,24 +495,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         upload(paths: p.urls)
     }
 
+    // MARK: - Finder service
+
+    /// Held strongly on purpose.
+    ///
+    /// `NSApplication.servicesProvider` is an untyped `Any?` whose ownership Apple
+    /// does not document, and the failure mode of guessing wrong is the worst kind
+    /// this feature has: the menu item still appears in Finder, still highlights,
+    /// and does nothing when clicked. Same reason `Main` holds the app delegate.
+    private var serviceProvider: ServiceProvider?
+
+    private func installServiceProvider() {
+        let provider = ServiceProvider(
+            upload: { [weak self] urls in self?.upload(paths: urls) },
+            // Through `report`, not `AppModel.notify`: a right-click that uploaded
+            // nothing is an upload failure and belongs in the log under the same
+            // heading as every other one.
+            refuse: { [weak self] why in self?.report(.failed(summary: why)) })
+        serviceProvider = provider
+        NSApp.servicesProvider = provider
+        // The one half of the plist contract that *can* be checked from here. The
+        // selector is a compile-time literal and `NSMessage` is a string in the plist;
+        // if they ever disagree the menu item appears, highlights, and does nothing, with
+        // no other trace. Logged rather than fatal: a broken right-click must not stop
+        // the other three upload entry points from working.
+        let selector = Selector("\(ServiceProvider.message):userData:error:")
+        if !provider.responds(to: selector) {
+            Diagnostics.log("finder service: provider does not respond to"
+                            + " \(selector) — NSMessage in Info.plist and"
+                            + " ServiceProvider's method name have drifted apart")
+        }
+        // Nudge the pasteboard server to re-read this bundle's `NSServices` now.
+        //
+        // Not a fix for first-install latency — that is Launch Services' business and
+        // this call cannot reach it. What it does buy is the *upgrade* case: a build
+        // that changes the item's title or its send types is picked up when the new
+        // app first runs, instead of leaving the old wording in Finder's menu until
+        // something else happens to flush the cache.
+        NSUpdateDynamicServices()
+    }
+
     // MARK: - Upload
 
     private func upload(paths: [URL]) {
         Diagnostics.log("upload requested: \(paths.count) item(s) -> "
                         + paths.map(\.lastPathComponent).joined(separator: ", "))
-        guard let runner else {
-            report(.failed(summary: missingToolSummary()))
-            return
-        }
         if dryRun {
             Diagnostics.log("  DRY RUN: skipping upload")
             report(.succeeded(summary: "DRY RUN 收到 \(paths.count) 个文件"))
             return
         }
+        // Icon and 「开始上传」 first, *then* the wait for discovery. A right-click that
+        // launched the app arrives before `resolveTools()` has an answer, and the whole
+        // point of showing the in-flight glyph now is that the wait is the part the user
+        // would otherwise experience as nothing happening.
         beginUpload()
         report(.started(count: paths.count))
         Task { @MainActor in
             defer { endUpload() }
+            // Awaited rather than read: a nil here means discovery *finished* and found
+            // nothing, so 「找不到 gitpic」 is the truth rather than a guess made while
+            // the search was still running.
+            guard let runner = await resolvedRunner() else {
+                report(.failed(summary: missingToolSummary()))
+                return
+            }
             do {
                 let env = try await runner.upload(paths: paths)
                 self.present(env)
@@ -492,10 +570,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func uploadClipboard() {
-        guard let runner else {
-            report(.failed(summary: missingToolSummary()))
-            return
-        }
+        // No `guard let runner` here any more. It used to refuse with 「正在查找
+        // gitpic，请稍候重试」 while discovery was still running — the same second in
+        // which a right-click now waits and succeeds. Same user intent, same file URLs,
+        // opposite outcome, decided only by which entry point was used. Both branches
+        // below await instead.
+        //
         // The GUI owns the pasteboard on both ends: `--json` suppresses the CLI's
         // own clipboard write (`src/commands/upload.rs:205` requires Mode::Human),
         // and reading here avoids the `paste` subcommand's arboard dependency
@@ -525,6 +605,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             report(.started(count: 1))
             Task { @MainActor in
                 defer { endUpload() }
+                guard let runner = await resolvedRunner() else {
+                    report(.failed(summary: missingToolSummary()))
+                    return
+                }
                 do {
                     let env = try await runner.upload(pngData: data)
                     self.present(env)

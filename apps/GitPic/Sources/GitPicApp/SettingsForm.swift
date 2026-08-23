@@ -121,6 +121,38 @@ struct ConfigTrouble: View {
     private var name: String { model.configPath?.lastPathComponent ?? "config.toml" }
 }
 
+/// A switch with a line of explanation under its label.
+///
+/// Beside ``ConfigField`` because it answers the same question for toggles that
+/// `ConfigField` answers for text rows: the shape was being rebuilt by hand at every
+/// call site, and with it the two invariants that are easy to get wrong.
+///
+/// - `.toggleStyle(.switch)` is **explicit and required**. A `Toggle` in a `.grouped`
+///   Form already renders as a switch on macOS, but the style is inherited — one
+///   `.toggleStyle` anywhere up the tree silently turns every one of these into a
+///   checkbox.
+/// - The caption is `.caption` + `.secondary` at `spacing: 2`, which is what keeps rows
+///   in different sections looking like the same control.
+///
+/// A row that needs no caption should use a plain `Toggle` — the switch says what it
+/// does, and an empty caption here would reserve the space anyway.
+struct CaptionedToggle: View {
+    let label: String
+    let caption: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                Text(caption)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .toggleStyle(.switch)
+    }
+}
+
 /// One editable text row in a grouped form.
 ///
 /// Hand-built rather than letting the form label the `TextField`, and both halves

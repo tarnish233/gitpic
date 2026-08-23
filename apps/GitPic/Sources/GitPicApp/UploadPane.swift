@@ -60,18 +60,9 @@ struct UploadPane: View {
                 }
 
                 Section("行为") {
-                    // `.switch` explicitly on both. A `Toggle` in a grouped Form
-                    // already renders as a switch on macOS, but the style is
-                    // inherited — one `.toggleStyle` anywhere up the tree silently
-                    // turns these into checkboxes.
-                    Toggle(isOn: draft.upload.dedup) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("内容去重")
-                            Text("相同内容不再重复提交，直接返回已有链接。")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    .toggleStyle(.switch)
+                    CaptionedToggle(label: "内容去重",
+                                    caption: "相同内容不再重复提交，直接返回已有链接。",
+                                    isOn: draft.upload.dedup)
                     // Label only, no caption: the switch says what it does. The app
                     // performs the copy itself (`--json` never writes the clipboard)
                     // and reads this same key, so one switch covers app and CLI alike
@@ -112,8 +103,32 @@ struct UploadPane: View {
             } else {
                 ConfigTrouble(model: model, repairs: false)
             }
+
+            finderSection
         }
         .formChrome()
+        // System Settings can flip the same switch, so the state is re-read whenever
+        // this pane comes back rather than trusted from launch.
+        .onAppear { model.refreshFinderService() }
+    }
+
+    /// Outside the `draft` branch above, and that placement is the point.
+    ///
+    /// Every other row on this pane edits the config file and waits for 保存. This one
+    /// writes system state the moment it moves, and it has nothing to do with the
+    /// config — so it stays reachable when the config is unreadable, which is exactly
+    /// when someone might want to switch the right-click entry off. Its own section
+    /// with its own caption is what keeps the two kinds of row from being mistaken
+    /// for each other.
+    @ViewBuilder private var finderSection: some View {
+        Section("Finder 右键") {
+            CaptionedToggle(
+                label: "在右键菜单里显示「\(FinderService.menuItemTitle)」",
+                caption: "选中图片后右键即可上传。改完立即生效，不用按「保存」；"
+                         + "已经打开的右键菜单要关掉再开。",
+                isOn: Binding(get: { model.finderServiceEnabled },
+                              set: { model.setFinderServiceEnabled($0) }))
+        }
     }
 
     /// Slider works in Double; the config stores Int.

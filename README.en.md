@@ -26,9 +26,11 @@ brew install tarnish233/tap/gitpic      # the app, plus the terminal command
 
 Use the menu to pick a file, or upload whatever is on the clipboard — the link goes
 straight to the clipboard, and both success and failure are reported as system
-notifications. The settings window has four panes: 图床
-(repository, connectivity test), 上传 (path template, link form, compression), 历史
-(history, with thumbnails and one-click copy), and 关于.
+notifications. **You can also select images in Finder and right-click 「GitPic
+上传至图床」** (the app is launched if it is not running; the 「Finder 右键」 switch on the
+上传 pane takes the item back out of the menu). The settings window has four panes: 图床
+(repository, connectivity test), 上传 (path template, link form, compression, Finder
+right-click), 历史 (history, with thumbnails and one-click copy), and 关于.
 
 To get started, open the settings window and fill in owner / repo / branch — or run
 `gitpic init` in a terminal.

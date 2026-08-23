@@ -4,6 +4,95 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Select an image, right-click, upload
+
+**Right-clicking a selected image in Finder now offers 「GitPic 上传至图床」.** It runs
+exactly the path 选择文件上传 already runs — `gitpic <files> --json`, then the link on the
+clipboard in the current 格式 / 地址, then a notification. Multiple selections work as one
+batch. The app does not need to be running: the right-click launches it.
+
+**It is an `NSServices` entry, not a Finder extension.** The other two ways to put an item
+in that menu were both costed. An Action extension (`com.apple.services`) and a
+`FIFinderSync` plug-in can carry the app's icon, but the first needs a signed extension
+bundle in `Contents/PlugIns` — a target SwiftPM does not build — and the second has to be
+switched on by hand in 系统设置 ▸ 登录项与扩展 and only fires inside directories it
+registers. Both need a real Developer ID to register reliably, and this project has only
+ad-hoc signing (`docs/macos-app-plan.md` C4). `NSServices` rides in the bundle's own
+`Info.plist`, where Launch Services reads it, so an ad-hoc signature is no obstacle and
+there is nothing for the user to enable. The cost is that the menu item has no icon.
+
+It should land at the **top level** of the context menu rather than inside a 服务 submenu —
+on the evidence of `/Applications/Ghostty.app`, whose two `NSServices` entries render there
+on this machine. GitPic's own item has not been confirmed by eye yet; that needs a real
+right-click in Finder.
+
+**A right-click upload is normally a cold launch, and that changed one thing about
+uploading.** The service launches the app, so the files arrive while `resolveTools()` is
+still looking for `gh` — where the old code answered 「正在查找 gitpic，请稍候重试」, which
+asks the user to redo the step they just took. Discovery is now held as a `Task`: an upload
+lights the status icon and reports 「开始上传」 *first*, and only then awaits the runner.
+That order is the point — the wait is exactly the stretch the user would otherwise
+experience as nothing happening. Measured on a cold dispatch, `upload started` really does
+appear ahead of discovery's own launch record.
+
+上传剪贴板 changed with it. It used to refuse during discovery while a right-click in the
+same second waited and succeeded — same intent, same file URLs, opposite outcome, decided
+only by which entry point was used. Both paths await now.
+
+**Non-images are refused, and that check is load-bearing.** Measured: the `public.image` in
+`NSSendFileTypes` only decides whether the item appears in the menu. At dispatch, pbs checks
+only that the pasteboard carries `public.file-url` — it says so itself ("Pasteboard
+contained types (), but service expects types (public.file-url)") — and it handed a
+`notes.txt` all the way through to the app. The CLI does not check either: `gitpic <file>`
+uploads whatever bytes it is given (`src/commands/upload.rs` sniffs formats only for
+`--stdin` naming, and `imageproc::maybe_compress` passes anything it cannot decode
+through). This is the only place that can say no, and without it a PDF becomes a real commit
+in the image-host repository.
+
+### There is a switch for it in 设置
+
+**上传 gains a 「Finder 右键」 section with one switch for whether the item is in the
+context menu.** It writes the one place macOS keeps that state: a per-service entry under
+`NSServicesStatus` in the `pbs` domain — the same entry the checkbox in 系统设置 ▸ 键盘 ▸
+键盘快捷键 ▸ 服务 writes. It has to be written there because the menu item comes from the
+bundle's `Info.plist`, which nothing the running app does can take back.
+
+**There is no second copy of the state.** The switch reads that entry rather than keeping a
+private flag beside it — otherwise turning the service off in System Settings would leave
+GitPic's switch reading 开. The menu title is not a second copy either: `pbs` keys the entry
+by title, so the title is read back out of the **running bundle's `NSServices` array** by
+`NSMessage`, and the switch's key cannot disagree with the menu it belongs to. That also
+makes it apply immediately instead of waiting for 保存, and since it has nothing to do with
+the config file, the section sits **outside** the config-dependent branch and stays usable
+when the config cannot be read.
+
+**With the switch off, the provider checks again.** Measured: pbs still dispatches to a
+disabled service, so `ServiceProvider` re-checks. The item being gone is the ordinary case,
+but when the services cache has not caught up — or the entry is still filed under an old
+menu title — this is what keeps the switch's answer true.
+
+**Reading that entry had a trap in it.** The same flag can be a boolean, an integer, *or a
+string* in a real `pbs.plist`: the `0` that `defaults write … '{enabled_context_menu = 0;}'`
+stores is an `NSTaggedPointerString`, because old-style plist text has no number syntax. An
+`as? NSNumber`-only reader returned nil for it, fell through to "no entry means on", and
+showed 开 for a service that was off. All three spellings are now read, and regression-tested.
+
+### App
+
+- The status-item menu is unchanged: right-click is a fourth entry point, and the first
+  three (file picker, clipboard, CLI) all remain.
+- Failure wording is split by cause: no images says 「选中的不是图片：<names>」 (more than
+  three collapse to 等 N 个, because the system truncates a notification body at a length it
+  picks), no files at all says 「右键上传没有收到文件」, and a disabled switch says
+  「右键上传已在 GitPic 设置里关闭」. A `pbs` write that fails springs the switch back and
+  points at System Settings rather than sliding over and pretending.
+- `~/Library/Logs/GitPic.log` records every dispatch: how many items arrived, how many were
+  images, and which were skipped.
+
+Not one line of the CLI changed.
+
 ## [0.14.1] - 2026-08-23
 
 ### The stdin failure told you to do the thing you had just done
