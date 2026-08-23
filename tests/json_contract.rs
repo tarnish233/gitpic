@@ -975,7 +975,12 @@ fn the_repository_lookups_accept_a_target_and_the_others_refuse_one() {
     ] {
         let label = args.join(" ");
         let (stdout, _stderr, code) = sb.run(&args);
-        assert_ne!(code, 2, "`{label}` must not be a usage error\n{stdout}");
+        // The exact code, not merely "not 2": the comment above says both stop at
+        // `CONFIG_MISSING`, and `assert_ne!` would also pass for a panic or a crash.
+        assert_eq!(
+            code, 3,
+            "`{label}` must be accepted and then stop at CONFIG_MISSING\n{stdout}"
+        );
     }
     // Refused, and the message says where the flag does work rather than only "not
     // here" — without that last clause this was a two-step dead end.
