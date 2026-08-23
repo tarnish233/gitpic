@@ -73,7 +73,15 @@ async fn login(
     client_id: Option<&str>,
     mode: Mode,
 ) -> Result<u8> {
-    let previous = auth::load()?.and_then(|s| s.login);
+    // Deliberately not `?`: this is read only to say "replaced the credential that
+    // was stored for X", and `auth::load` is `CONFIG_INVALID` for a file that exists
+    // but will not parse. Propagating it made a corrupt `auth.toml` — the shape
+    // dotfiles sync produces, and the reason `auth.toml` is the one file in that
+    // directory to keep out of it — refuse the single command that overwrites the bad
+    // file with a good one, while pointing at `auth logout`, which is not what anyone
+    // reaches for to repair a login. A credential we cannot read is not a reason to
+    // decline to mint one; `auth::save` below is the gate that still reports for real.
+    let previous = auth::load().ok().flatten().and_then(|s| s.login);
 
     // The one subcommand whose `--json` is a *stream* rather than a single envelope,
     // because the shape of the interaction leaves no alternative: the code has to
@@ -310,7 +318,7 @@ async fn login_streaming(
     previous: Option<String>,
 ) -> Result<u8> {
     let mut issued = false;
-    let outcome = async {
+    let outcome: Result<(Stored, std::path::PathBuf)> = async {
         let client_id = crate::oauth::client_id(client_id)?;
         let device = crate::oauth::start(&client_id, &crate::oauth::scope(scope)).await?;
         crate::output::print_json_line(&CodeEvent {
@@ -324,17 +332,38 @@ async fn login_streaming(
         // reach the caller while the poll below is still blocking.
         crate::output::finish();
         issued = true;
+        // `from_device_flow`'s probe, at the only point this path can make it. The
+        // code has just been written and flushed, so a reader that has already gone
+        // is discoverable now; the alternative to looking is polling GitHub every few
+        // seconds for the fifteen minutes the code stays valid, on behalf of a code
+        // that reached nobody — the exact `| true` hang the human path fixed. It
+        // cannot happen *before* the code is minted the way it does over there:
+        // there is nothing a JSON reader would accept to probe with.
+        if crate::output::stdout_lost() {
+            return Err(AppError::general(
+                "stdout closed before the one-time code could be read; abandoning a \
+                 login nobody can complete",
+            ));
+        }
         if !no_browser {
             open_browser(&device.verification_uri);
         }
         let granted = crate::oauth::wait_for_token(&client_id, &device).await?;
-        stored_from(granted, client_id).await
+        let stored = stored_from(granted, client_id).await?;
+        // In here rather than in the `Ok` arm below, which is where it was: this is
+        // the one failure where the tagged event matters most. The token has been
+        // minted and is about to be lost, and `?` out there reaches `main`, whose
+        // `print_json` is `to_string_pretty` — seven lines, none of them carrying
+        // `event`, so a line-per-event reader drops every one and reports no outcome
+        // at all for a login that really did fail. That is precisely what this
+        // function's doc promises cannot happen.
+        let path = auth::save(&stored)?;
+        Ok((stored, path))
     }
     .await;
 
     match outcome {
-        Ok(stored) => {
-            let path = auth::save(&stored)?;
+        Ok((stored, path)) => {
             crate::output::print_json_line(&DoneEvent {
                 event: "done",
                 ok: true,
