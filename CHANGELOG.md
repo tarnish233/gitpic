@@ -4,6 +4,191 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-08-23
+
+### A whole-project review: three health reports that lied, two writes that lost things
+
+Nothing here is a new feature. Seven reviews were run across the CLI, the app, the
+scripts and the workflows, and this is what they found — with, throughout, a preference
+for the version of a fix that a test can fail on.
+
+**Breaking, in three places, all narrow.**
+
+- `doctor --json`'s `token_valid` and `repo_writable` are now `true | false | **null**`,
+  where `null` means the probe did not run. See below for why `false` was a lie.
+- `gitpic config edit --json` is refused as `USAGE` instead of handing stdout to an
+  editor and then printing an envelope after it.
+- A file upload is named for what its bytes are, so a `.jpeg` renders `.jpg` and a
+  mislabelled file gets its real extension. New uploads of such files land at a new
+  remote path and will not dedup against the copy already there — one extra blob, once,
+  per file. Nothing already uploaded moves or breaks.
+
+#### `--compress` was rotating people's photos
+
+A phone camera writes landscape pixels plus `Orientation = 6` rather than rotating
+anything itself. `load_from_memory_with_format` never calls `orientation()`, and neither
+re-encoder writes EXIF back — `JpegEncoder` emits it only when `set_exif` was called, and
+it is not. So the pixels were re-encoded as stored and the tag saying to rotate them was
+dropped: every viewer then showed the photo 90° from what the user saw locally, reported
+`ok: true`, with nothing to suggest the file had been altered. `--max-width` was wrong on
+the same photo for the same reason — it compared against the stored width and resized the
+wrong axis.
+
+Baking the rotation in is the only option that survives the metadata being dropped. It
+costs nothing for an image with no tag, which is most of them.
+
+#### `doctor` called three broken setups healthy
+
+- **`link_kind = "cdn"` with a branch containing `/`.** The upload path refuses that as
+  `USAGE` before the credential is resolved and before any request, because jsDelivr
+  encodes the ref as `repo@branch/path`. `gitpic repos` writes GitHub's default branch
+  verbatim, so a repository whose default is `release/v1` lands in `config.toml` beside
+  the default `cdn` — legally, since `Config::validate` checks each key alone. `doctor`
+  never read `cfg.upload.*` at all, so it reported ✓ ✓ ✓ and exit 0 while every upload
+  exited 2 having sent nothing. It now reports the same code and message the upload would.
+- **A private repository with `cdn` links.** `RepoInfo` deserialized only `permissions`,
+  dropping `private` from a response `doctor` already fetches. Every upload succeeds and
+  every jsDelivr link 404s, and nothing said so: `repos` warns at picker time, but a later
+  `config set upload.link_kind cdn`, or a repository flipped to private, reached the same
+  dead state silently. A caveat rather than a failure, because the upload really does
+  work — which is what makes it worse in one respect.
+- **`token_valid: false` for a credential nothing had checked.** The probes are gated on
+  `config_ok` but only two of the three need a target, so on a machine that had run
+  `gitpic auth login` and not yet `gitpic repos`, `/user` was never called and the report
+  said the credential was invalid — while `gitpic auth status` on the same machine said it
+  worked, and GitPic.app showed both claims side by side. The remedy a reader takes from
+  `✗ token valid` is "log in again", which mints a second token to fix a config file.
+  `null` distinguishes "not checked" from "checked and bad"; a credential that could not be
+  *resolved* stays `false`, because that is a definite answer. Agents requiring `true` are
+  unaffected.
+
+#### `gitpic auth login`: refusing to run, losing a token, polling nobody
+
+- A corrupt `auth.toml` blocked the one command that replaces it. `previous` is read only
+  to say "replaced the credential that was stored for X", and it was read with `?`.
+- A failed write escaped the documented stream contract and took the token with it.
+  `auth::save` sat outside the block whose errors become an `error` event, so a full disk
+  produced `main`'s seven-line pretty envelope: the app's line parser dropped every line,
+  reported no outcome, and the token minted seconds earlier was gone.
+- `--json` had lost the closed-pipe guard the human path documents, so
+  `gitpic auth login --json | true` minted a one-time code and polled GitHub for the full
+  fifteen minutes it stayed valid, for a code that reached nobody.
+- `auth logout` said "removed" and left the user to infer "revoked". The authorisation
+  stays live on github.com with no expiry, so a recovered disk or a synced copy of the old
+  file is still a working credential. gitpic cannot revoke it — that needs the client
+  secret — so it now names the page that can.
+
+Also `oauth.rs`, where two comments disagreed about whether a value is secret: `Device`'s
+`Debug` redacts `device_code` because it "is what authorises fetching the token", while
+`post` said that at the device endpoint "nothing in a response is a credential" and quoted
+200 characters of the raw body on a parse failure. No body is quoted at either endpoint
+now; the status and content-type carry the diagnostic and neither can carry a secret.
+
+#### Three ways to lose data quietly
+
+- **A blank `--repo` erased the configured target.** `set_repo_spec` parses rather than
+  judges, so an empty spec assigned an empty repo *over* the file's value, and the failure
+  surfaced two layers later as `CONFIG_MISSING` telling the user to configure a repository
+  their file already named. `gitpic shot.png --repo "$REPO"` with `REPO` unset is the shape
+  that finds it. Blank now behaves like "not set", the rule `GITPIC_REPO` and
+  `--client-id ''` already follow.
+- **One bad byte cost the whole history file.** `read_to_string` fails whole-file on
+  invalid UTF-8, so a torn append made `gitpic list` a permanent `GENERAL` failure — and
+  `trim_file` then returned early on every subsequent append, switching the 2 MB ceiling
+  off and letting the file grow without bound. Both readers are lossy now, so one bad byte
+  costs one record.
+- **A stdout that really failed reported success.** The same error had two opposite
+  answers: `record_write` panicked, which under `panic = "abort"` is exit 134, while
+  `finish` swallowed it and let the run exit 0 with a truncated file — and which one you
+  got depended only on whether the last write carried a newline. Measured on `skill print`
+  under `ulimit -f 1`: exit 101 and a raw panic before, exit 1 and
+  `error: failed printing to stdout: File too large` after. A broken pipe is still a
+  normal end.
+
+#### Also in this change
+
+- **A zero-byte file is refused**, the way stdin always was. `touch shot.png && gitpic
+  shot.png` used to make a real commit and print a link that renders as a broken image.
+- **The size ceiling is asked before the file is read.** `gitpic bigvideo.mov` allocated
+  three gigabytes and *then* said the limit is 100 MB — or was an OOM kill, exit 137.
+- **A 422 that is only ever the GET/PUT race is retryable.** The mirror image is a 409,
+  which has been `NETWORK` "so agents retry it" since 0.13.2; the loser of the race was
+  told exit 1, which `SKILL.md` defines as do-not-retry. Guarded on the body so branch
+  protection stays `GENERAL`. (The first version of that guard matched the quoted
+  `"sha"` and would never have fired, because the body is raw JSON and those quotes
+  arrive backslash-escaped. The test caught it.)
+- **A rate limit says when to retry.** `retry-after` / `x-ratelimit-reset` were dropped
+  one line before the body was read, so exit 9 — the one code whose purpose is to be
+  retried — carried the least information of any.
+- **`config edit` can launch an editor with arguments.** `EDITOR="code --wait"` looked for
+  an executable of that literal name. It goes through the platform shell now, the way git
+  runs its editor, and `$VISUAL` is consulted first.
+- **`skill install --dir` at the path `skill path` prints no longer installs one level
+  too deep**, writing `gitpic/gitpic/SKILL.md` and reporting success. The write is atomic,
+  so a crash cannot leave a skill with intact frontmatter and the instructions cut off. A
+  partial `--agent all` reports what landed instead of discarding it. And the listing says
+  `differs` rather than `outdated`, which was a claim about the user's file that nothing
+  here can support.
+- **`XDG_CONFIG_HOME=.config` no longer makes every path cwd-relative**, which since
+  0.16.0 took the credential with it.
+
+#### GitPic.app
+
+- **Closing the settings window really stops a login.** `cancelLogin()` had one caller —
+  the 取消 button — and since 0.15.0 the window is no longer released on close, so ⌘W left
+  `gitpic auth login` polling until the code expired.
+- **With `gitpic` missing, 账号 span on 「检查登录状态…」 for the life of the process.**
+  `attach` calls back into `refreshAuth`; the failure branch did not, and nothing else
+  would.
+- **An unreadable history file was reported as a config failure**, which both panes render
+  by replacing the entire editable form — so a bad `history.jsonl` made every setting
+  uneditable and named the wrong file.
+- **Launch ran `reload()` twice**, putting a duplicate `config path`, `config get` and
+  `list` on the serial gate in front of a cold-launch right-click upload.
+- **The launch log is a real `O_APPEND`** rather than `seekToEnd()` plus a write — there is
+  no `O_APPEND` on `FileHandle`, and the seek was itself the proof. Measured with two
+  concurrent writers: 396 of 400 lines before, 400 after.
+- **The thumbnail disk cache is keyed on the thumbnail size**, which is part of what the
+  cached bytes are. Raising `maxPixel` left every cached row a hit, and `decode` does not
+  upscale, so the pane would have drawn small images in a larger box for good.
+
+#### CI was not running the check that matters most
+
+`FinderServicePlistTests` reads the built bundle's `Info.plist` and disables itself when
+there is none — and both workflows ran `swift test` **before** `scripts/build-app.sh`,
+with `dist-app/` gitignored. So on every CI run since 0.15.0 the one check holding the
+`NSServices` plist and the Swift that registers it to the same names quietly checked
+nothing, and a skipped test still counts in "Test run with N tests", so even the total was
+unchanged. The step order is fixed, and the test now *fails* rather than skips when `CI` is
+set, so re-breaking it cannot go quiet.
+
+Three more that could not fail, and now can: the `-q` source scan latched its "guarded"
+flag for the rest of each function, so deleting a real guard left it green; the four `pbs`
+wire keys were only ever asserted against themselves, so a typo in the modern key left the
+whole suite passing while the switch reported 开 for a service that was off; and
+`pngRoundTrip` asserted only dimensions, which survive a JPEG, with no transparent fixture
+anywhere to catch the black boxes. `check_manifests.py` also passed a manifest truncated to
+`{}`, because `{}` is falsy.
+
+#### Documentation that had gone stale, in the two places it is read most
+
+`release.yml`'s release notes still ended with "Requires GitHub CLI (`brew install gh`)" —
+appended to **every** release body since 0.16.0 deleted `gh`. And `SKILL.md` said
+`auth login` "refuses `--json` outright" while line 318 of the same file described its
+`--json` stream in detail. `new-worktree.sh` and `AGENTS.md` promised that `--seed-config`
+makes real uploads possible, which stopped being true when the credential moved into the
+per-worktree `auth.toml`.
+
+#### Simplifications
+
+`✓`/`✗` existed four times in three shapes and `note:` a fourth time — the copy the `-q`
+contract scan could not see. The path-template dummy sample was written three times and its
+message twice, already drifted. `matches!(mode, Mode::Quiet)` eight times.
+`effective_link_kind`, `ConfigGate`, `Clipboard.write` and `UploadedLink.snippetOrReason`
+each collapse a rule that was being held by hand in two or three places. `build-app.sh`
+honours `CARGO_TARGET_DIR` — which this repo's own worktree flow exports — and no longer
+leaves a bundle-shaped directory behind on failure.
+
 ## [0.16.0] - 2026-08-23
 
 ### `gitpic auth login` is the only way in — `gh` is gone
@@ -2224,7 +2409,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.17.0
 [0.16.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.16.0
 [0.15.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.15.0
 [0.14.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.1
