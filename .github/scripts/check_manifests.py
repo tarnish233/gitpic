@@ -36,6 +36,13 @@ def fail(msg: str) -> None:
 
 
 def load_json(path: Path):
+    """Parse `path`, or record a failure and return None.
+
+    Callers gate on `is not None` rather than on truthiness: `{}` and `[]` parse
+    fine and are falsy, so a manifest truncated to `{}` used to skip every check
+    below it *and* record no failure — the script then printed "Manifest check
+    passed" for a file with no version and no plugin entry in it.
+    """
     try:
         return json.loads(path.read_text())
     except FileNotFoundError:
@@ -79,7 +86,7 @@ def check_skill_source() -> None:
 
 def check_versions(version: str) -> None:
     claude = load_json(CLAUDE_MARKET)
-    if claude:
+    if claude is not None:
         got = claude.get("metadata", {}).get("version")
         if got != version:
             fail(f"{CLAUDE_MARKET.name}: metadata.version {got!r} != Cargo.toml {version!r}")
@@ -96,7 +103,7 @@ def check_versions(version: str) -> None:
                 fail(f"{CLAUDE_MARKET.name}: plugins[].name {p.get('name')!r} != {SKILL_NAME!r}")
 
     codex = load_json(CODEX_PLUGIN)
-    if codex:
+    if codex is not None:
         if codex.get("version") != version:
             fail(
                 f"{CODEX_PLUGIN.name}: version {codex.get('version')!r} "
@@ -109,7 +116,7 @@ def check_versions(version: str) -> None:
             fail(f"{CODEX_PLUGIN.name}: skills must be \"./skills/\", got {codex.get('skills')!r}")
 
     market = load_json(CODEX_MARKET)
-    if market:
+    if market is not None:
         plugins = market.get("plugins") or []
         if len(plugins) != 1:
             fail(f"{CODEX_MARKET}: expected exactly one plugin entry, got {len(plugins)}")

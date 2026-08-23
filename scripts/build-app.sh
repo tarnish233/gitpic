@@ -35,14 +35,19 @@ BIN="$(cd "$PKG" && swift build -c release --show-bin-path)/GitPicApp"
 [[ -x "$BIN" ]] || { echo "error: $BIN missing" >&2; exit 1; }
 
 echo "==> resolving the gitpic binary to embed"
+# Where cargo will actually put it. `new-worktree.sh` exports CARGO_TARGET_DIR into
+# every worktree's `.local/env.sh` and AGENTS.md tells agents to source it, so
+# hardcoding `$ROOT/target` here meant the self-build path ran a full release build
+# and then failed on a path cargo was never going to write.
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 GITPIC_BIN="${GITPIC_BIN:-}"
 if [[ -z "$GITPIC_BIN" ]]; then
-  if [[ -x "$ROOT/target/release/gitpic" ]]; then
-    GITPIC_BIN="$ROOT/target/release/gitpic"
+  if [[ -x "$TARGET_DIR/release/gitpic" ]]; then
+    GITPIC_BIN="$TARGET_DIR/release/gitpic"
   else
-    echo "    no target/release/gitpic; building it"
+    echo "    no $TARGET_DIR/release/gitpic; building it"
     ( cd "$ROOT" && cargo build --release --locked )
-    GITPIC_BIN="$ROOT/target/release/gitpic"
+    GITPIC_BIN="$TARGET_DIR/release/gitpic"
   fi
 fi
 [[ -x "$GITPIC_BIN" ]] || { echo "error: gitpic binary not found at $GITPIC_BIN" >&2; exit 1; }
@@ -62,6 +67,20 @@ fi
 echo "    embedding gitpic $CLI_VERSION from $GITPIC_BIN"
 
 echo "==> assembling $APP"
+# From here on a failure must not leave a bundle behind. `rm -rf "$APP"` destroys the
+# previous good bundle before actool, `plutil -lint` and codesign have run, and what
+# survives an abort in between is a GitPic.app holding two executables and no
+# Info.plist: `open` fails obscurely on it, and — since FinderServicePlistTests keys
+# off `dist-app/GitPic.app/Contents/Info.plist` existing — a stale partial bundle is
+# also what silently disarms that tripwire on a dev machine.
+ICON_TMP=""
+cleanup() {
+  local code=$?
+  [[ -n "$ICON_TMP" ]] && rm -rf "$ICON_TMP"
+  (( code == 0 )) || rm -rf "$APP"
+  exit "$code"
+}
+trap cleanup EXIT
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/GitPic"
@@ -72,7 +91,6 @@ echo "==> compiling AppIcon.icon (Icon Composer)"
 ICON_DOC="$PKG/AppIcon.icon"
 [[ -d "$ICON_DOC" ]] || { echo "error: $ICON_DOC missing" >&2; exit 1; }
 ICON_TMP="$(mktemp -d)"
-trap 'rm -rf "$ICON_TMP"' EXIT
 # 14.0 matches LSMinimumSystemVersion: actool emits the Tahoe glass
 # appearances in Assets.car and flattened bitmaps in the icns for older macOS.
 xcrun actool --compile "$ICON_TMP" \
