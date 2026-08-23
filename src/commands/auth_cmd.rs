@@ -42,9 +42,8 @@ struct AuthReport {
     client_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     expires_at: Option<String>,
-    /// Where the credential file is.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path: Option<String>,
+    /// Where the credential file is. Always present.
+    path: String,
     /// The one human-readable note — an expiry that will bite, an account that could
     /// not be confirmed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -409,7 +408,9 @@ async fn status(mode: Mode) -> Result<u8> {
         login,
         client_id: stored.as_ref().and_then(|s| s.client_id.clone()),
         expires_at: stored.as_ref().and_then(|s| s.expires_at.clone()),
-        path: Some(auth::store_path()?.display().to_string()),
+        // Not an `Option`: it is unconditionally present, and declaring it optional
+        // suggested to a reader that some report omits it. Wire-identical either way.
+        path: auth::store_path()?.display().to_string(),
         detail: failure.as_ref().map(|e| e.message.clone()),
         error: failure
             .as_ref()
@@ -434,9 +435,7 @@ async fn status(mode: Mode) -> Result<u8> {
         if let Some(at) = &report.expires_at {
             crate::output::line(&format!("  expires: {at}"));
         }
-        if let Some(path) = &report.path {
-            crate::output::line(&format!("  stored in: {path}"));
-        }
+        crate::output::line(&format!("  stored in: {}", report.path));
         if let Some(detail) = &report.detail {
             note(detail);
         }
@@ -458,6 +457,13 @@ struct LogoutReport {
 
 fn logout(mode: Mode) -> Result<u8> {
     let path = auth::store_path()?;
+    // Read before the delete, for the note below: which app the grant belongs to is
+    // recorded in the file that is about to go.
+    let client_id = auth::load()
+        .ok()
+        .flatten()
+        .and_then(|s| s.client_id)
+        .unwrap_or_else(|| crate::oauth::DEFAULT_CLIENT_ID.to_string());
     let removed = auth::delete()?;
 
     if mode.is_json() {
@@ -477,6 +483,18 @@ fn logout(mode: Mode) -> Result<u8> {
         // There is no fallback source left, so a logout really is a logout — worth
         // saying, because the next upload will fail until someone logs in again.
         note("gitpic now has no credential: run `gitpic auth login` before uploading");
+        // And what it is *not*. Deleting the file removes this machine's copy; the
+        // authorisation stays live on github.com, with `public_repo` write on every
+        // public repository the account owns and no expiry. Someone decommissioning a
+        // shared machine reasonably reads "removed" as "revoked", and a recovered disk,
+        // a backup, or a synced copy of the old file is then still a working
+        // credential. gitpic cannot revoke it — that needs the app's client secret,
+        // which a distributed binary has no way to hold — so it names the page that
+        // can.
+        note(&format!(
+            "this removed the local copy only; the authorisation is still live at \
+             https://github.com/settings/connections/applications/{client_id}"
+        ));
     } else {
         crate::output::line("no credential was stored");
     }
@@ -591,7 +609,7 @@ mod tests {
             login: Some("octocat".to_string()),
             client_id: Some("Ov23liX".to_string()),
             expires_at: None,
-            path: Some("/tmp/auth.toml".to_string()),
+            path: "/tmp/auth.toml".to_string(),
             detail: None,
             error: None,
         };

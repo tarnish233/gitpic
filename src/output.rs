@@ -105,6 +105,40 @@ fn note_stdout_lost() {
     STDOUT_LOST.store(true, Ordering::Relaxed);
 }
 
+/// A stdout write that failed for a reason that is *not* a closed reader: a full
+/// filesystem, a closed descriptor, an I/O error on the file it points at.
+///
+/// These are real failures, and the same one used to get two opposite answers
+/// depending on which write it landed on. `record_write` panicked — with
+/// `panic = "abort"` that is SIGABRT, exit 134, precisely the code `main`'s
+/// "no catch-all arm" comment exists to keep out of the documented 1-10 range — while
+/// `finish` swallowed it and let the process report whatever success it had already
+/// decided on. So `gitpic list --json > out.json` on a full filesystem gave exit 134
+/// and a raw Rust panic when ENOSPC hit a `writeln!`, and **exit 0 with a truncated or
+/// empty file** when it hit the final flush instead. `Stdout` is a `LineWriter`, so
+/// which of the two you get depends only on whether the last write carried a newline.
+static STDOUT_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Record a real stdout failure, and say so on stderr the first time.
+///
+/// Reported rather than acted on, for the same reason a broken pipe is: `print_error`
+/// writes stdout too, so exiting from in here would replace the code the caller is
+/// owed with one about the reporting. stderr is a different descriptor and is very
+/// likely still fine, and this is the last moment the actual reason is known. Only the
+/// first is printed — a stream of writes into a full disk fails once per line, and the
+/// reason does not change.
+fn note_stdout_failed(e: &io::Error, when: &str) {
+    if !STDOUT_FAILED.swap(true, Ordering::Relaxed) {
+        eprint_error_label(&format!("failed {when} stdout: {e}"));
+    }
+}
+
+/// Whether stdout could not be written for a real reason. Read once by `main`, after
+/// the final flush, which is where a buffered write's error actually surfaces.
+pub fn stdout_failed() -> bool {
+    STDOUT_FAILED.load(Ordering::Relaxed)
+}
+
 /// Whether any stdout write has been discarded because the reader closed the pipe.
 ///
 /// The caller that must ask is an interactive prompt: a question the user could
@@ -127,9 +161,9 @@ pub fn stdout_lost() -> bool {
 /// One-way output never has to look; a caller that expects the reader to answer
 /// does, because for it a dropped write is not the end of a successful run.
 ///
-/// Other write errors (a full disk, a closed descriptor) still abort loudly rather
-/// than being silently dropped: those *are* failures, and pretending output
-/// happened would be worse than a panic.
+/// Other write errors (a full disk, a closed descriptor) are real failures and are
+/// recorded, not dropped and not aborted on — see [`STDOUT_FAILED`] for why neither of
+/// those was right, and [`stdout_failed`] for who acts on it.
 pub fn line(text: &str) {
     write_stdout(|out| writeln!(out, "{text}"));
 }
@@ -172,7 +206,10 @@ fn record_write(result: io::Result<()>) {
         // exit 0, while `prompt_opt` refuses to read an answer to a question that
         // was never delivered.
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => note_stdout_lost(),
-        Err(e) => panic!("failed printing to stdout: {e}"),
+        // Recorded, not a panic. See [`STDOUT_FAILED`]: aborting turned a full disk
+        // into exit 134 and a raw panic message, and the identical error one flush
+        // later was exit 0 with a truncated file.
+        Err(e) => note_stdout_failed(&e, "printing to"),
     }
 }
 
@@ -192,10 +229,11 @@ pub fn finish() {
     match io::stdout().flush() {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => note_stdout_lost(),
-        // Any other flush failure has nowhere left to be reported: `main` calls
-        // this after the exit code is decided, and panicking would replace a real
-        // code with 134.
-        Err(_) => {}
+        // The other half of the same rule. This used to be an empty arm — the reason
+        // given was that panicking here would replace a real code with 134, which was
+        // right about the panic and wrong about the alternative being silence. `main`
+        // reads [`stdout_failed`] after this returns.
+        Err(e) => note_stdout_failed(&e, "flushing"),
     }
 }
 
@@ -205,6 +243,11 @@ pub fn finish() {
 /// `cargo test` runs these tests as threads in one process: a leaked `true` would
 /// make an unrelated test believe stdout had vanished, and an interleaved `false`
 /// would make the prompt test pass for the wrong reason.
+#[cfg(test)]
+pub(crate) fn stdout_failed_test_reset() {
+    STDOUT_FAILED.store(false, Ordering::Relaxed);
+}
+
 #[cfg(test)]
 pub(crate) fn stdout_lost_test_guard(lost: bool) -> StdoutLostGuard {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -474,6 +517,28 @@ mod tests {
             stdout_lost(),
             "a write a closed reader threw away must be recorded"
         );
+    }
+
+    /// A full disk is not a closed reader, and used to be answered two opposite ways.
+    #[test]
+    fn a_real_stdout_failure_is_recorded_rather_than_aborted_on() {
+        let _serialised = stdout_lost_test_guard(false);
+        stdout_failed_test_reset();
+        // A closed reader is not a failure: the reader got what it asked for.
+        record_write(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
+        assert!(
+            !stdout_failed(),
+            "a broken pipe must stay a normal end, or `head` starts reporting errors"
+        );
+        // ENOSPC is. This used to `panic!`, which under `panic = "abort"` is exit 134
+        // — outside the documented 1-10 range — while the same error at the final
+        // flush was swallowed and the run reported success with a truncated file.
+        record_write(Err(io::Error::from(io::ErrorKind::StorageFull)));
+        assert!(
+            stdout_failed(),
+            "a write that really failed must be recorded"
+        );
+        stdout_failed_test_reset();
     }
 
     /// Every broken-pipe arm in this module has to record the loss, and one of them

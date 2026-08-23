@@ -45,15 +45,24 @@ async fn main() -> ExitCode {
     };
     let mode = Mode::from_flags(cli.json, cli.quiet);
 
-    let code = match dispatch(&cli, mode).await {
-        Ok(code) => ExitCode::from(code),
+    let mut code = match dispatch(&cli, mode).await {
+        Ok(code) => code,
         Err(e) => {
             output::print_error(mode, e.code.as_str(), &e.message);
-            ExitCode::from(e.code.exit_code())
+            e.code.exit_code()
         }
     };
     output::finish();
-    code
+    // After `finish`, because a buffered write's failure surfaces at the flush and not
+    // before it. A run whose report never reached stdout — a full filesystem, a closed
+    // descriptor — must not exit 0: `gitpic list --json > out.json` leaving a truncated
+    // or empty file and reporting success is the outcome a caller cannot detect. The
+    // reason is already on stderr; only the status is left to fix, and only when the run
+    // would otherwise have claimed to succeed. A failure already carries its own code.
+    if code == 0 && output::stdout_failed() {
+        code = ErrorCode::General.exit_code();
+    }
+    ExitCode::from(code)
 }
 
 async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
