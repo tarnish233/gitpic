@@ -35,14 +35,39 @@ struct FinderServicePlistTests {
         return plist
     }
 
-    /// Skipped when there is no bundle — `swift test` alone does not build one, and a
-    /// missing `dist-app` is not a drifted plist. Everything past that point fails
-    /// rather than skips: the entry is looked up the same way the app looks it up, so a
-    /// renamed `NSMessage` cannot make this suite quietly pass by finding nothing.
+    /// True in GitHub Actions, which sets both of these.
+    ///
+    /// The tripwire has to hold its own precondition here, because for two releases it
+    /// did not: both workflows ran `swift test` *before* `scripts/build-app.sh`, and
+    /// `dist-app/` is gitignored, so on every CI run there was no bundle and this test
+    /// skipped. Nothing said so — a skipped test still counts in "Test run with N
+    /// tests", so even the total was unchanged — and the one check holding the
+    /// `NSServices` plist and the Swift that registers it to the same names was dead
+    /// for exactly as long as nobody looked. The step order is fixed; this is what
+    /// makes re-breaking it fail instead of going quiet.
+    static var isCI: Bool {
+        let env = ProcessInfo.processInfo.environment
+        return env["CI"] != nil || env["GITHUB_ACTIONS"] != nil
+    }
+
+    /// Skipped when there is no bundle *and* nobody is watching — `swift test` alone
+    /// does not build one, and a missing `dist-app` on a dev machine is not a drifted
+    /// plist. In CI a missing bundle is not an excuse but the bug itself, so the suite
+    /// stays enabled there and the `#require` below turns it into a failure that names
+    /// the cause. Everything past that point fails rather than skips: the entry is
+    /// looked up the same way the app looks it up, so a renamed `NSMessage` cannot make
+    /// this suite quietly pass by finding nothing.
     @Test("the built bundle declares the message and title the Swift side assumes",
-          .enabled(if: FinderServicePlistTests.infoPlist != nil))
+          .enabled(if: FinderServicePlistTests.infoPlist != nil
+                       || FinderServicePlistTests.isCI))
     func plistMatchesConstants() throws {
-        let plist = try #require(Self.infoPlist)
+        let plist = try #require(
+            Self.infoPlist,
+            """
+            no dist-app/GitPic.app/Contents/Info.plist to check. In CI this is the \
+            failure, not a reason to skip: `swift test` must run *after* \
+            `scripts/build-app.sh`, or this suite silently checks nothing.
+            """)
         let services = try #require(plist["NSServices"] as? [[String: Any]],
                                     "the built bundle declares no NSServices at all")
         let entry = try #require(
