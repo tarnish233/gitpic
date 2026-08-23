@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.16.0] - 2026-08-23
 
 ### `gitpic auth login` is the only way in — `gh` is gone
 
@@ -68,6 +68,14 @@ and `config.toml` gets printed by `config get`. A `token` line still in the file
 
 #### Also in this change
 
+- **`gitpic init` is gone.** It prompted for the repository, the branch, and the link kind,
+  all three typed by hand. `gitpic repos` replaces the first two and is better at them: it
+  lists the repositories this credential can actually push to, takes a number, and saves
+  `owner`/`repo` alongside the branch **GitHub reports as the default** — typing that
+  branch was how a repository whose default is `master` ended up configured for `main`,
+  with every upload then 404ing on a ref that does not exist. The link kind moves to
+  `gitpic config set upload.link_kind cdn|raw`. A first run is now `gitpic auth login`
+  followed by `gitpic repos`.
 - **`token_source` is gone** from `doctor --json` (and never existed on `auth status`).
   With one source, a field whose value could only be `"gitpic"` restates the command that
   produced it. `gitpic doctor` prints one line fewer for the same reason.
@@ -2216,7 +2224,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.16.0
 [0.15.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.15.0
 [0.14.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.1
 [0.14.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.0
