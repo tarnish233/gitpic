@@ -28,16 +28,6 @@ struct FinderServiceStatusTests {
         #expect(FinderServiceStatus.isEnabled(["someone.else - X - y": [:]], key: key))
     }
 
-    @Test("an explicit off is read as off, and an explicit on as on")
-    func readsExplicitState() {
-        let off = [key: [FinderServiceStatus.contextMenuKey: 0,
-                         FinderServiceStatus.servicesMenuKey: 0]]
-        #expect(FinderServiceStatus.isEnabled(off, key: key) == false)
-        let on = [key: [FinderServiceStatus.contextMenuKey: 1,
-                        FinderServiceStatus.servicesMenuKey: 1]]
-        #expect(FinderServiceStatus.isEnabled(on, key: key))
-    }
-
     /// Regression test for a switch that read 开 next to a service that was off.
     ///
     /// A real `pbs.plist` can hold this flag as a boolean, an integer, **or a string** —
@@ -82,8 +72,9 @@ struct FinderServiceStatusTests {
     @Test("presentation_modes decides, in either encoding")
     func readsPresentationModes() {
         let asDict: [String: Any] = [key: [
-            FinderServiceStatus.presentationModesKey: ["ContextMenu": false,
-                                                       "ServicesMenu": true],
+            FinderServiceStatus.presentationModesKey: [
+                FinderServiceStatus.contextMenuMode: false, "ServicesMenu": true,
+            ],
         ]]
         #expect(FinderServiceStatus.isEnabled(asDict, key: key) == false)
 
@@ -93,7 +84,9 @@ struct FinderServiceStatusTests {
         #expect(FinderServiceStatus.isEnabled(asList, key: key) == false)
 
         let listWithIt: [String: Any] = [key: [
-            FinderServiceStatus.presentationModesKey: ["ContextMenu", "ServicesMenu"],
+            FinderServiceStatus.presentationModesKey: [
+                FinderServiceStatus.contextMenuMode, "ServicesMenu",
+            ],
         ]]
         #expect(FinderServiceStatus.isEnabled(listWithIt, key: key))
     }
@@ -101,7 +94,9 @@ struct FinderServiceStatusTests {
     @Test("the modern key wins over a stale legacy one")
     func modernKeyWins() {
         let status: [String: Any] = [key: [
-            FinderServiceStatus.presentationModesKey: ["ContextMenu": false],
+            FinderServiceStatus.presentationModesKey: [
+                FinderServiceStatus.contextMenuMode: false,
+            ],
             FinderServiceStatus.contextMenuKey: true,
         ]]
         #expect(FinderServiceStatus.isEnabled(status, key: key) == false)
@@ -149,6 +144,9 @@ struct FinderServiceStatusTests {
         let entry = next[key] as? [String: Any]
         #expect(entry?["key_equivalent"] as? String == "$@g")
         #expect(FinderServiceStatus.isEnabled(next, key: key) == false)
+        // Both legacy keys are written, which is the path watched working end to end.
+        #expect(entry?[FinderServiceStatus.contextMenuKey] as? Bool == false)
+        #expect(entry?[FinderServiceStatus.servicesMenuKey] as? Bool == false)
     }
 
     /// `presentation_modes` is updated in place, keeping its shape and its other modes —
@@ -156,13 +154,14 @@ struct FinderServiceStatusTests {
     @Test("an existing presentation_modes is updated, not replaced or invented")
     func updatesPresentationModesInPlace() {
         let dictShape: [String: Any] = [key: [
-            FinderServiceStatus.presentationModesKey: ["ContextMenu": true,
-                                                       "ServicesMenu": true],
+            FinderServiceStatus.presentationModesKey: [
+                FinderServiceStatus.contextMenuMode: true, "ServicesMenu": true,
+            ],
         ]]
         let offDict = FinderServiceStatus.applying(enabled: false, to: dictShape, key: key)
         let modes = (offDict[key] as? [String: Any])?[
             FinderServiceStatus.presentationModesKey] as? [String: Any]
-        #expect(modes?["ContextMenu"] as? Bool == false)
+        #expect(modes?[FinderServiceStatus.contextMenuMode] as? Bool == false)
         // The placement this switch is not about survives.
         #expect(modes?["ServicesMenu"] as? Bool == true)
         #expect(FinderServiceStatus.isEnabled(offDict, key: key) == false)

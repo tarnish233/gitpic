@@ -64,8 +64,8 @@ public enum FinderServiceStatus {
     /// Spaced hyphens, and the title is the one from `NSMenuItem.default` — so
     /// renaming the menu item orphans the old entry and the service comes back on.
     /// That is the system's own behaviour, not something this can paper over; it is
-    /// the reason ``ServiceProvider/message`` and the plist title are treated as a
-    /// contract rather than as strings.
+    /// the reason ``message`` and the plist title are treated as a contract rather than
+    /// as strings.
     public static func statusKey(bundleID: String, menuItem: String,
                                  message: String) -> String {
         "\(bundleID) - \(menuItem) - \(message)"
@@ -89,22 +89,30 @@ public enum FinderServiceStatus {
         return true
     }
 
+    /// Whether a mode name is the placement this switch is about.
+    ///
+    /// Matched case-insensitively: `ContextMenu` is AppKit's spelling, and a plist written
+    /// by something else is not worth failing over. One place rather than four because the
+    /// reader and the writer must agree — a rule that drifted between them would write one
+    /// spelling and read another, and the `applying` → `isEnabled` round-trip would still
+    /// pass, being wrong on both sides.
+    static func isContextMenu(_ name: String) -> Bool {
+        name.caseInsensitiveCompare(contextMenuMode) == .orderedSame
+    }
+
     /// Read the context-menu mode out of a `presentation_modes` value.
     ///
     /// Two encodings are accepted because the real one has not been seen (see
     /// ``presentationModesKey``): a dictionary of mode name → boolean, and a list of the
     /// enabled mode names. `nil` means "this value did not say", which leaves the legacy
     /// key to answer instead of guessing.
-    ///
-    /// Mode names are matched case-insensitively: `ContextMenu` is AppKit's spelling, and
-    /// a plist written by something else is not worth failing over.
     static func modeEnabled(in value: Any) -> Bool? {
         if let dict = value as? [String: Any] {
-            let hit = dict.first { $0.key.caseInsensitiveCompare(contextMenuMode) == .orderedSame }
+            let hit = dict.first { isContextMenu($0.key) }
             return hit.flatMap { boolValue($0.value) }
         }
         if let names = value as? [String] {
-            return names.contains { $0.caseInsensitiveCompare(contextMenuMode) == .orderedSame }
+            return names.contains(where: isContextMenu)
         }
         return nil
     }
@@ -171,16 +179,12 @@ public enum FinderServiceStatus {
     /// `presentation_modes` is not something to "fix" by overwriting.
     static func applyingMode(enabled: Bool, to value: Any) -> Any {
         if var dict = value as? [String: Any] {
-            let existing = dict.keys.first {
-                $0.caseInsensitiveCompare(contextMenuMode) == .orderedSame
-            }
+            let existing = dict.keys.first(where: isContextMenu)
             dict[existing ?? contextMenuMode] = enabled
             return dict
         }
         if let names = value as? [String] {
-            var kept = names.filter {
-                $0.caseInsensitiveCompare(contextMenuMode) != .orderedSame
-            }
+            var kept = names.filter { !isContextMenu($0) }
             if enabled { kept.append(contextMenuMode) }
             return kept
         }
