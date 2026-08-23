@@ -67,13 +67,11 @@ struct UploadPane: View {
                     // performs the copy itself (`--json` never writes the clipboard)
                     // and reads this same key, so one switch covers app and CLI alike
                     // — which is why it is no longer labelled 仅 CLI.
-                    Toggle("自动复制到剪贴板", isOn: draft.upload.autoCopy)
-                        .toggleStyle(.switch)
+                    CaptionedToggle(label: "自动复制到剪贴板", isOn: draft.upload.autoCopy)
                 }
 
                 Section("压缩") {
-                    Toggle("上传前压缩", isOn: draft.upload.compress)
-                        .toggleStyle(.switch)
+                    CaptionedToggle(label: "上传前压缩", isOn: draft.upload.compress)
                     // Only the parameters are gated on the toggle. Disabling the
                     // whole section would disable the toggle too, leaving no way
                     // to switch compression back on.

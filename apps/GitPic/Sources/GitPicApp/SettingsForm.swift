@@ -134,19 +134,29 @@ struct ConfigTrouble: View {
 /// - The caption is `.caption` + `.secondary` at `spacing: 2`, which is what keeps rows
 ///   in different sections looking like the same control.
 ///
-/// A row that needs no caption should use a plain `Toggle` — the switch says what it
-/// does, and an empty caption here would reserve the space anyway.
+/// `caption` is optional rather than absent for the caption-less rows: an empty caption
+/// would reserve the space, but a `nil` one renders no `Text` at all, so a plain switch
+/// row looks exactly as it did while still going through the one place that spells
+/// `.toggleStyle(.switch)`. Every switch in the app comes through here — a row that
+/// hand-built its own was one `.toggleStyle` up the tree away from becoming a checkbox
+/// while its captioned neighbours stayed switches.
 struct CaptionedToggle: View {
     let label: String
-    let caption: String
+    var caption: String?
     @Binding var isOn: Bool
 
     var body: some View {
         Toggle(isOn: $isOn) {
-            VStack(alignment: .leading, spacing: 2) {
+            if let caption {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label)
+                    Text(caption)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                // Not a one-child `VStack`: this is the exact view tree the rows that
+                // used a plain `Toggle` had, so adopting this type cannot move them.
                 Text(label)
-                Text(caption)
-                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .toggleStyle(.switch)

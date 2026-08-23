@@ -43,15 +43,6 @@ import GitPicCore
 @MainActor
 final class ServiceProvider: NSObject {
 
-    /// The `NSMessage` value in `Info.plist`, which is the selector name without
-    /// its `:userData:error:` tail.
-    ///
-    /// Lives in `GitPicCore` so a test can pin it together with the `pbs` key it goes
-    /// into — see ``FinderServiceStatus/message``. Renaming the method below without
-    /// editing the plist leaves a menu item that appears, is clickable, and does
-    /// nothing at all; `installServiceProvider()` checks the two agree at launch.
-    static var message: String { FinderServiceStatus.message }
-
     private let upload: ([URL]) -> Void
     private let refuse: (String) -> Void
 

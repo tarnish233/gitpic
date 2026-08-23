@@ -135,7 +135,7 @@ final class AppModel {
         toolState = .missing
     }
 
-    // MARK: - Telling the user what happened
+    // MARK: - The Finder right-click switch
 
     /// Whether the Finder right-click item is switched on.
     ///
@@ -168,6 +168,8 @@ final class AppModel {
         FinderService.setEnabled(enabled)
         finderServiceEnabled = enabled
     }
+
+    // MARK: - Telling the user what happened
 
     /// Post an outcome to Notification Center, and log it.
     ///

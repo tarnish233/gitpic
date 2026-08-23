@@ -1,7 +1,6 @@
 import AppKit
 import SwiftUI
 import GitPicCore
-import UniformTypeIdentifiers
 
 @main
 @MainActor
@@ -48,8 +47,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// entirely. Exists so the file-picker and clipboard plumbing can be verified without
     /// committing anything to the image-host repository.
     ///
-    /// Every upload entry point must check this. A dry run that silently uploads
-    /// from one path is worse than having no dry-run mode at all.
+    /// Every upload entry point must check this — a dry run that silently uploads from
+    /// one path is worse than having no dry-run mode at all. Enforced by construction:
+    /// the gate lives in ``runUpload(count:dryRunSummary:_:)``, which is the only way
+    /// an upload starts.
     private let dryRun = ProcessInfo.processInfo.environment["GITPIC_APP_DRY_RUN"] == "1"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -488,7 +489,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let p = NSOpenPanel()
         p.allowsMultipleSelection = true
         p.canChooseDirectories = false
-        p.allowedContentTypes = [.image]
+        p.allowedContentTypes = [ImageFilter.accepted]
         // Become .regular for the life of the panel, the same way the settings window
         // does — an .accessory app cannot own a focused, title-barred window, and
         // that includes a modal panel. `AppActivationPolicy` is reference-counted
@@ -533,7 +534,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // if they ever disagree the menu item appears, highlights, and does nothing, with
         // no other trace. Logged rather than fatal: a broken right-click must not stop
         // the other three upload entry points from working.
-        let selector = Selector("\(ServiceProvider.message):userData:error:")
+        //
+        // The other half — that the plist's `NSMessage` and title are the ones the Swift
+        // constants assume — is asserted against the built bundle by
+        // `FinderServicePlistTests`, so drift fails a test instead of only writing a log
+        // line on a machine where nobody is reading it.
+        let selector = Selector("\(FinderServiceStatus.message):userData:error:")
         if !provider.responds(to: selector) {
             Diagnostics.log("finder service: provider does not respond to"
                             + " \(selector) — NSMessage in Info.plist and"
@@ -553,20 +559,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Upload
 
-    private func upload(paths: [URL]) {
-        Diagnostics.log("upload requested: \(paths.count) item(s) -> "
-                        + paths.map(\.lastPathComponent).joined(separator: ", "))
+    /// The one upload shell: the dry-run gate, the in-flight icon, the wait for
+    /// discovery, and a single `present` for either outcome.
+    ///
+    /// Both entry points had a copy of this, and the cold-launch wait had to be written
+    /// into each — so the two invariants here were being held by hand across two sites.
+    /// They are now structural: `dryRun` cannot be skipped by an entry point that does
+    /// not implement the gate, and the icon cannot light after the await.
+    ///
+    /// Icon and 「开始上传」 first, *then* the wait for discovery. A right-click that
+    /// launched the app arrives before `resolveTools()` has an answer, and the whole
+    /// point of showing the in-flight glyph now is that the wait is the part the user
+    /// would otherwise experience as nothing happening.
+    private func runUpload(count: Int, dryRunSummary: String,
+                           _ body: @escaping @Sendable (GitpicRunner) async throws
+                               -> UploadEnvelope) {
         if dryRun {
             Diagnostics.log("  DRY RUN: skipping upload")
-            report(.succeeded(summary: "DRY RUN 收到 \(paths.count) 个文件"))
+            report(.succeeded(summary: dryRunSummary))
             return
         }
-        // Icon and 「开始上传」 first, *then* the wait for discovery. A right-click that
-        // launched the app arrives before `resolveTools()` has an answer, and the whole
-        // point of showing the in-flight glyph now is that the wait is the part the user
-        // would otherwise experience as nothing happening.
         beginUpload()
-        report(.started(count: paths.count))
+        report(.started(count: count))
         Task { @MainActor in
             defer { endUpload() }
             // Awaited rather than read: a nil here means discovery *finished* and found
@@ -577,11 +591,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             do {
-                let env = try await runner.upload(paths: paths)
-                self.present(env)
+                self.present(try await body(runner))
             } catch {
                 self.present(error)
             }
+        }
+    }
+
+    private func upload(paths: [URL]) {
+        Diagnostics.log("upload requested: \(paths.count) item(s) -> "
+                        + paths.map(\.lastPathComponent).joined(separator: ", "))
+        runUpload(count: paths.count,
+                  dryRunSummary: "DRY RUN 收到 \(paths.count) 个文件") {
+            try await $0.upload(paths: paths)
         }
     }
 
@@ -612,25 +634,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             upload(paths: urls)
         case .data(let data):
             Diagnostics.log("clipboard upload requested: \(data.count) bytes")
-            if dryRun {
-                Diagnostics.log("  DRY RUN: skipping upload")
-                report(.succeeded(summary: "DRY RUN 收到剪贴板图片 \(data.count) 字节"))
-                return
-            }
-            beginUpload()
-            report(.started(count: 1))
-            Task { @MainActor in
-                defer { endUpload() }
-                guard let runner = await resolvedRunner() else {
-                    report(.failed(summary: missingToolSummary()))
-                    return
-                }
-                do {
-                    let env = try await runner.upload(pngData: data)
-                    self.present(env)
-                } catch {
-                    self.present(error)
-                }
+            runUpload(count: 1,
+                      dryRunSummary: "DRY RUN 收到剪贴板图片 \(data.count) 字节") {
+                try await $0.upload(pngData: data)
             }
         }
     }
@@ -661,7 +667,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let urls = pb.readObjects(
             forClasses: [NSURL.self],
             options: [.urlReadingFileURLsOnly: true,
-                      .urlReadingContentsConformToTypes: [UTType.image.identifier]]
+                      .urlReadingContentsConformToTypes: [ImageFilter.accepted.identifier]]
         ) as? [URL], !urls.isEmpty {
             return .files(urls)
         }

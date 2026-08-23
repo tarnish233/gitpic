@@ -52,6 +52,17 @@ public struct ImageSelection: Equatable, Sendable {
 /// Splits file URLs into the images and everything else.
 public enum ImageFilter {
 
+    /// What GitPic accepts, in one place.
+    ///
+    /// The same rule reaches the user through three different AppKit spellings — the
+    /// picker's `allowedContentTypes`, the pasteboard's
+    /// `urlReadingContentsConformToTypes`, and this type's own `conforms(to:)` — plus a
+    /// fourth in `scripts/build-app.sh`, where `NSSendFileTypes` has to be the literal
+    /// `public.image` because a plist cannot reference this. Deciding to narrow or widen
+    /// what GitPic takes is then one edit here and one in the plist, instead of four
+    /// spellings to find and keep in step.
+    public static let accepted: UTType = .image
+
     /// Why this filters at all, when the service already declares `public.image`:
     ///
     /// **`NSSendFileTypes` is not enforced at dispatch.** Measured against the built
@@ -77,7 +88,7 @@ public enum ImageFilter {
         var images: [URL] = []
         var skipped: [URL] = []
         for url in urls {
-            if let type = contentType(url), type.conforms(to: .image) {
+            if let type = contentType(url), type.conforms(to: accepted) {
                 images.append(url)
             } else {
                 skipped.append(url)

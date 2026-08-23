@@ -343,9 +343,14 @@ extension UploadedLink {
     ///
     /// `config` is optional only because it is loaded asynchronously. In practice it
     /// is always there by the time an envelope arrives — an upload that succeeded
-    /// proves a valid config is on disk, and `AppModel.reload`'s `config get` is
-    /// queued ahead of every upload on `GitpicRunner`'s gate — and when it is not,
-    /// the raw address is still real and still copyable.
+    /// proves a valid config is on disk, and `resolveTools()` awaits the first
+    /// `AppModel.reload()` before any upload can resume, so the config has been read
+    /// once by then — and when it is not, the raw address is still real and still
+    /// copyable.
+    ///
+    /// Not the serial gate: a reload makes two separate trips through it, so an upload
+    /// can slot between them and see a nil config. That was measured, and the enforcer
+    /// is the `await` in `resolveTools()` — see its comment.
     public init(_ r: ItemResult, config c: GitpicConfig?) {
         self.init(
             id: r.id,
