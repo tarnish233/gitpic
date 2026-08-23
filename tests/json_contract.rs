@@ -692,19 +692,13 @@ fn a_closed_reader_does_not_zero_an_error_exit() {
     assert_eq!(code, 2, "USAGE must survive a closed stdout, got {code}");
 }
 
-/// The complement of `a_closed_reader_does_not_zero_an_error_exit`: that one locks
-/// "a closed reader must not turn an error into 0", this one locks "a closed reader
-/// must not turn an unseen question into a yes".
+/// `--name` with more than one file is refused, rather than accepted and ignored.
 ///
-/// `printf 'someone/pics\nmain\ncdn\n' | gitpic init | true` threw every prompt
-/// into the closed pipe, read the piped answers anyway, and wrote
-/// `owner="someone" repo="pics" branch="main"` to config.toml — a saved
-/// configuration for three questions the user was never shown one of.
-///
-/// Unix-only for both of its neighbours' reasons: EPIPE is what the write returns
-/// (Rust ignores SIGPIPE), and reading the *producer's* status out of a pipeline
-/// needs a shell with `PIPESTATUS`.
-#[cfg(unix)]
+/// The comment that used to sit here described the closed-pipe `gitpic init` test, and
+/// that rule has lived in `no_prompt_is_answered_from_a_pipe` since `init` was removed.
+/// Its `#[cfg(unix)]` came along with it and was inherited by this test, which has no
+/// pipe, no shell and nothing platform-shaped in it — so the rule below went unchecked
+/// on the `windows-latest` leg CI actually runs.
 #[test]
 fn name_with_two_files_is_usage_not_a_silent_drop() {
     // `--name` used to be accepted on a multi-file upload and then ignored.
@@ -1011,8 +1005,18 @@ fn a_quiet_listing_prints_only_the_thing_it_lists() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
         let text = std::fs::read_to_string(&path).expect("readable source");
         let mut takes_mode = false;
-        let mut guarded = false;
         let mut checked_a_function = false;
+        // Brace depth inside the current function, and the depth *outside* the block
+        // the innermost quiet check opened.
+        //
+        // Tracked rather than latched. A plain `guarded = true` for the rest of the
+        // function is what this was, and it made the scan unable to fail on the file
+        // it reads: in `branches::run` the check at the top of the row loop set it,
+        // and every `note(` after that — including the two the regression is actually
+        // about — was exempt for the remaining eighty lines. Deleting the real guard
+        // left the test green.
+        let mut depth: i32 = 0;
+        let mut guard_outside: Option<i32> = None;
         let mut offenders = Vec::new();
         for (i, line) in text.lines().enumerate() {
             let code = line.trim_start();
@@ -1020,15 +1024,31 @@ fn a_quiet_listing_prints_only_the_thing_it_lists() {
                 continue;
             }
             // A signature at column 0 starts a new function, and only one that was
-            // handed a `mode` can be asked to consult it.
-            if line.starts_with("pub ") && line.contains("fn ") {
+            // handed a `mode` can be asked to consult it. `starts_with("pub")` without
+            // the space so `pub(crate) async fn` is a boundary too — as `pub `, it was
+            // not, and `repos::choose_target` inherited `run`'s state instead of being
+            // judged on its own signature.
+            if (line.starts_with("pub") || line.starts_with("fn ") || line.starts_with("async fn "))
+                && line.contains("fn ")
+            {
                 takes_mode = line.contains("mode: Mode");
-                guarded = false;
                 checked_a_function |= takes_mode;
+                depth = 0;
+                guard_outside = None;
             }
-            if code.contains("Mode::Quiet") {
-                guarded = true;
+            // A quiet check guards the block it opens, so it applies while we are
+            // deeper than the line it sits on.
+            if code.contains("Mode::Quiet") || code.contains("is_quiet()") {
+                guard_outside = Some(depth);
             }
+            let before = depth;
+            depth += code.matches('{').count() as i32;
+            depth -= code.matches('}').count() as i32;
+            // Left the guarded block: the exemption ends with it.
+            if guard_outside.is_some_and(|d| depth <= d) && before != depth {
+                guard_outside = None;
+            }
+            let guarded = guard_outside.is_some();
             if takes_mode && !guarded && code.contains("output::note(") {
                 offenders.push(format!("{file}:{}: {}", i + 1, code));
             }

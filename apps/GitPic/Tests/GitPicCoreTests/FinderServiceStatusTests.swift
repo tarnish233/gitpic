@@ -19,6 +19,24 @@ struct FinderServiceStatusTests {
         #expect(key == "dev.gitpic.app - GitPic 上传至图床 - uploadImagesToGitPic")
     }
 
+    /// The four raw strings this file has to spell the way the OS does.
+    ///
+    /// Pinned against literals for the same reason ``keyShape()`` is. Every other test
+    /// in this suite builds its fixtures *from* these constants, so all of them stay
+    /// green through a typo in any one — and these are exactly the four values
+    /// `FinderServiceStatus` marks as inferred rather than observed, which is where a
+    /// typo is most likely and least visible. Rename `presentationModesKey` to the
+    /// singular and the whole suite still passes, while `isEnabled` stops finding the
+    /// modern key on a real machine and reports 开 for a service the user switched off:
+    /// the precise regression the modern-key read was added for.
+    @Test("the pbs wire keys are the strings the OS writes, not what we call them")
+    func wireKeys() {
+        #expect(FinderServiceStatus.presentationModesKey == "presentation_modes")
+        #expect(FinderServiceStatus.contextMenuMode == "ContextMenu")
+        #expect(FinderServiceStatus.contextMenuKey == "enabled_context_menu")
+        #expect(FinderServiceStatus.servicesMenuKey == "enabled_services_menu")
+    }
+
     /// The case a fresh install is in. Reading absence as off would show 关 next to a
     /// right-click item that is right there in the menu.
     @Test("a service nothing has toggled reads as on")
