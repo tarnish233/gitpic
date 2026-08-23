@@ -25,6 +25,12 @@ impl Mode {
     pub fn is_json(self) -> bool {
         matches!(self, Mode::Json)
     }
+    /// Beside [`Mode::is_json`], which existed while this did not — so
+    /// `matches!(mode, Mode::Quiet)` was spelled out eight times across four
+    /// subcommands, four of them inside one function.
+    pub fn is_quiet(self) -> bool {
+        matches!(self, Mode::Quiet)
+    }
 }
 
 /// One uploaded image result (stable JSON schema).
@@ -303,6 +309,32 @@ pub fn print_partial(mode: Mode, results: &[ItemResult], code: &str, message: &s
 pub fn note(text: &str) {
     let label = "note:".if_supports_color(Stream::Stdout, |t| t.yellow().to_string());
     line(&format!("  {label} {text}"));
+}
+
+/// A green `✓` or a red `✗`, for a line reporting one pass/fail check.
+///
+/// Beside [`note`] and for the same reason it is here: this pair had been written out
+/// four times — `auth status`, `doctor`, `repos`, `config set` — two of them coloured
+/// and two not, so the same judgement was already three different shapes on screen.
+/// The next check to be added is the one that would have picked whichever copy it was
+/// nearest.
+pub fn mark(ok: bool) -> String {
+    // `.to_string()` inside each arm, not once around the `if`: `if_supports_color`
+    // returns a type carrying the closure, and no two closures share a type.
+    if ok {
+        "✓"
+            .if_supports_color(Stream::Stdout, |t| t.green().to_string())
+            .to_string()
+    } else {
+        "✗"
+            .if_supports_color(Stream::Stdout, |t| t.red().to_string())
+            .to_string()
+    }
+}
+
+/// The success half of [`mark`], for the sites that have nothing to fail.
+pub fn tick() -> String {
+    mark(true)
 }
 
 /// Write `error: <message>` to stderr, coloured only when stderr is a terminal.

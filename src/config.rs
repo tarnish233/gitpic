@@ -215,15 +215,10 @@ impl Config {
                 self.upload.quality
             ));
         }
-        // Same dummy-render as `--path`: `{name}` cannot inject `..` (slugify).
-        if !crate::naming::template_renders_safe(&self.upload.path_template) {
-            let sample = crate::naming::render_path(
-                &self.upload.path_template,
-                "sample.png",
-                &"0".repeat(64),
-            );
+        // `naming` owns both the dummy sample and the sentence; this names the field.
+        if let Err(why) = crate::naming::check_template(&self.upload.path_template) {
             return Err(format!(
-                "upload.path_template {:?} must be repo-relative with no empty or `..` segments (renders to {sample:?})",
+                "upload.path_template {:?} {why}",
                 self.upload.path_template
             ));
         }

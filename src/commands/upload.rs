@@ -297,12 +297,8 @@ fn reject_dead_cdn_link(kind: LinkKind, branch: &str) -> Result<()> {
 /// file). Split out of `run` so it can be tested without a token. The per-file
 /// `is_safe_remote_path` on the rendered result stays as belt-and-suspenders.
 fn reject_unsafe_path_template(template: &str) -> Result<()> {
-    if !naming::template_renders_safe(template) {
-        let sample = naming::render_path(template, "sample.png", &"0".repeat(64));
-        return Err(AppError::usage(format!(
-            "path template {template:?} must be repo-relative with no empty or `..` segments \
-             (renders to {sample:?})"
-        )));
+    if let Err(why) = naming::check_template(template) {
+        return Err(AppError::usage(format!("path template {template:?} {why}")));
     }
     Ok(())
 }

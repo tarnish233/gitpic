@@ -27,8 +27,26 @@ const NOTHING_TO_OFFER: &str = "no repositories are available to this credential
      private repositories at all.";
 
 /// What to do when the list cannot be used: the two routes that take a value directly.
-const SET_IT_BY_HAND: &str = "set the image host with `gitpic config set github.repo \
+pub(crate) const SET_IT_BY_HAND: &str = "set the image host with `gitpic config set github.repo \
      owner/name`, or export GITPIC_REPO=owner/name";
+
+/// The caveats worth printing beside a repository's name.
+///
+/// Both listings need branch-plus-private, and each was building it separately with its
+/// own near-identical comment about jsDelivr. `run` appends `read-only` to this; the
+/// picker never needs that one, because it only ever lists what can be pushed to. One
+/// owner so a fourth caveat — archived, fork, empty — is one edit rather than two, and
+/// so the two lists cannot drift again the way they already had.
+fn caveats(r: &RepoCandidate) -> Vec<String> {
+    let mut notes = vec![format!("branch {}", r.default_branch)];
+    if r.private {
+        // Said next to the name rather than after the choice: jsDelivr serves only
+        // public repositories, so a private one needs `link_kind = raw` — and a private
+        // repository's `raw` links need a token the app does not hold either.
+        notes.push("private".to_string());
+    }
+    notes
+}
 
 #[derive(Serialize)]
 struct ReposReport<'a> {
@@ -56,7 +74,7 @@ pub async fn run(mode: Mode) -> Result<u8> {
     if repos.is_empty() {
         // Not an error: an authorised app with no repositories granted is a real and
         // recoverable state, and the remedy is on GitHub rather than in gitpic.
-        if !matches!(mode, Mode::Quiet) {
+        if !mode.is_quiet() {
             crate::output::line(NOTHING_TO_OFFER);
         }
         return Ok(0);
@@ -66,16 +84,11 @@ pub async fn run(mode: Mode) -> Result<u8> {
         // `owner/name` first on every line, so the whole output is pasteable into
         // `gitpic config set github.repo …` with nothing to strip.
         let spec = r.spec();
-        if matches!(mode, Mode::Quiet) {
+        if mode.is_quiet() {
             crate::output::line(&spec);
             continue;
         }
-        let mut notes = vec![format!("branch {}", r.default_branch)];
-        if r.private {
-            // Worth saying next to the name: a private repo's `raw` links need a
-            // token the app does not hold, and jsDelivr cannot serve it at all.
-            notes.push("private".to_string());
-        }
+        let mut notes = caveats(r);
         if !r.can_push {
             notes.push(
                 "read-only"
@@ -87,7 +100,7 @@ pub async fn run(mode: Mode) -> Result<u8> {
     }
     // Same rule as the rows above: `-q` promises one `owner/name` per line, and a
     // `note:` line in that stream is a repository spec the caller will try to use.
-    if !complete && !matches!(mode, Mode::Quiet) {
+    if !complete && !mode.is_quiet() {
         // Only reachable on an account with more repositories than the page ceiling
         // allows, so the way out is a value rather than a longer list.
         crate::output::note(
@@ -125,7 +138,7 @@ const MAX_TRIES: usize = 3;
 /// reason applied — and none of them is an error: the caller has just completed a
 /// browser login, and a target that could not be offered must not turn that into a
 /// failure the user would answer by logging in again.
-pub(crate) async fn choose_target(token: &str) -> Result<bool> {
+pub(crate) async fn choose_target(token: &str) -> Result<()> {
     let (all, complete) = GitHub::for_user(token)?.repo_candidates().await?;
 
     // Only what can actually be uploaded to. A read-only repository in this list would
@@ -136,7 +149,7 @@ pub(crate) async fn choose_target(token: &str) -> Result<bool> {
     let repos: Vec<RepoCandidate> = all.into_iter().filter(|r| r.can_push).collect();
     if repos.is_empty() {
         crate::output::line(NOTHING_TO_OFFER);
-        return Ok(false);
+        return Ok(());
     }
 
     let mut cfg = Config::load()?;
@@ -147,12 +160,7 @@ pub(crate) async fn choose_target(token: &str) -> Result<bool> {
     crate::output::line("which repository should gitpic upload to?\n");
     let width = repos.iter().map(|r| r.spec().len()).max().unwrap_or(0);
     for (i, r) in repos.iter().enumerate() {
-        let mut notes = vec![format!("branch {}", r.default_branch)];
-        if r.private {
-            // Worth saying next to the name rather than after the choice: jsDelivr
-            // serves only public repositories, so a private one needs `link_kind = raw`.
-            notes.push("private".to_string());
-        }
+        let notes = caveats(r);
         // Marks the one already configured, which is also the default — so a re-login
         // that only meant to widen a scope costs one keystroke instead of a decision.
         let marker = if Some(i) == current { "*" } else { " " };
@@ -182,7 +190,7 @@ pub(crate) async fn choose_target(token: &str) -> Result<bool> {
     let Some(chosen) = ask(&format!("image host? [{range}]"), &default, repos.len())? else {
         crate::output::line("");
         crate::output::note(SET_IT_BY_HAND);
-        return Ok(false);
+        return Ok(());
     };
     let repo = &repos[chosen];
 
@@ -198,9 +206,9 @@ pub(crate) async fn choose_target(token: &str) -> Result<bool> {
     cfg.validate_input()?;
     let path = cfg.save()?;
 
-    let tick = "\u{2713}".if_supports_color(Stream::Stdout, |t| t.green().to_string());
     crate::output::line(&format!(
-        "\n{tick} {} on {} — saved to {}",
+        "\n{} {} on {} — saved to {}",
+        crate::output::tick(),
         repo.spec(),
         cfg.github.branch,
         path.display()
@@ -211,7 +219,7 @@ pub(crate) async fn choose_target(token: &str) -> Result<bool> {
              `gitpic config set upload.link_kind raw`.",
         );
     }
-    Ok(true)
+    Ok(())
 }
 
 /// Read one choice, re-asking a mistyped reply rather than failing the caller over it.

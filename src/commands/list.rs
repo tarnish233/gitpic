@@ -26,7 +26,7 @@ pub fn run(limit: usize, mode: Mode) -> Result<()> {
     // friendly)", which is what the upload path already does with it. It used to
     // print the full human listing, and on an empty history even printed the "no
     // uploads recorded yet" prose — output a script would have to filter out.
-    if matches!(mode, Mode::Quiet) {
+    if mode.is_quiet() {
         for r in &recs {
             crate::output::line(&r.url);
         }
