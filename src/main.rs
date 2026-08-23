@@ -10,6 +10,7 @@ mod history;
 mod imageproc;
 mod link;
 mod naming;
+mod oauth;
 mod output;
 
 use clap::{error::ErrorKind, Parser};
@@ -66,26 +67,25 @@ async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
     match &cli.command {
         // Config-free: these must work even when config.toml is missing or
         // unparseable, so they never touch `resolve_config`.
-        Some(Command::Init) => {
-            // `init` is a conversation: it writes prompts to stdout and waits. There
-            // is no JSON stream to produce, and pretending otherwise would interleave
-            // prompts with an envelope. Every other subcommand honours `--json`.
-            if mode.is_json() {
-                return Err(error::AppError::usage(
-                    "`init` is interactive and has no JSON output; set GITPIC_REPO \
-                     or use `gitpic config set` in scripts",
-                ));
-            }
-            commands::init::run().map(|_| 0)
-        }
+        Some(Command::Auth { action }) => commands::auth_cmd::run(action, mode).await,
         Some(Command::Config { action }) => commands::config_cmd::run(action, mode).map(|_| 0),
         Some(Command::List { limit }) => commands::list::run(*limit, mode).map(|_| 0),
+        // Config-free like the rest of this group: it answers "which repo *could* I
+        // use", which is the question someone asks precisely when the configured one
+        // is wrong or absent.
+        Some(Command::Repos) => commands::repos::run(mode).await,
         Some(Command::Completion { shell }) => commands::completion::run(*shell).map(|_| 0),
         Some(Command::Skill { action }) => commands::skill::run(action, mode).map(|_| 0),
 
         Some(Command::Doctor { .. }) => {
             let cfg = resolve_config(cli)?;
             commands::doctor::run(&cfg, mode).await
+        }
+        // Needs a target, unlike `repos`: branches belong to a repository, so this one
+        // resolves the config and honours `--repo` / `GITPIC_REPO`.
+        Some(Command::Branches { .. }) => {
+            let cfg = resolve_config(cli)?;
+            commands::branches::run(&cfg, mode).await
         }
         // No subcommand means the default upload path. `paste` carries the same
         // upload flags, flattened onto the subcommand rather than marked global.

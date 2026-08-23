@@ -4,7 +4,266 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### `gitpic auth login` is the only way in — `gh` is gone
+
+**Breaking.** gitpic no longer reads a credential from anywhere but its own login:
+
+```bash
+gitpic auth login     # authorise in the browser (GitHub device flow)
+gitpic auth status    # whose credential this is
+gitpic auth logout    # remove it
+gitpic repos          # which repositories this credential can upload to
+```
+
+The token lands in `~/.config/gitpic/auth.toml` at mode 0600, written through the same
+atomic-private helper `config.toml` uses — extracted into one function rather than copied,
+because "private from before the first byte" is not a property worth re-deriving next to a
+secret. It is a separate file on purpose: `gitpic config get` prints every key it knows and
+`config edit` opens the file in `$EDITOR`, so neither can reach a credential. That also
+makes `auth.toml` the one file in `~/.config/gitpic/` to keep out of dotfiles sync.
+
+**To upgrade: run `gitpic auth login` once.** Then `gitpic repos` lists every repository
+the new credential can upload to — pick one instead of typing an `owner/repo` that may not
+be reachable.
+
+The authorisation asks for **`public_repo`**: write access to public repositories, the
+narrowest OAuth scope that can do the job, since GitHub has none meaning "this one
+repository". It is also all a working image host needs — jsDelivr, which `link_kind =
+"cdn"` points at, serves only public repositories. A private image host needs
+`gitpic auth login --scope repo`, which is broad enough that it is not the default;
+`GITPIC_SCOPE` overrides it the way `GITPIC_CLIENT_ID` overrides the app.
+
+A **GitHub App** was the other candidate and would have been narrower — `Contents: write`
+on one chosen repository. It lost on the *flow*, not the permissions: a GitHub App's user
+token reaches only repositories the app has been **installed** on, and the device flow
+performs no installation, so every user would authorise in a terminal and then have to
+visit a browser again to install the app and select repositories. One login that
+immediately yields a list to choose from is worth more than a tighter grant half the users
+never finish.
+
+#### One route removed, and one that never shipped
+
+**`gh auth token` is the breaking one.** It worked in every release through 0.14.0, so a
+machine relying on it needs one `gitpic auth login`. A second source meant a second
+identity: on a machine with a `gh` session, which account an upload was attributed to
+depended on whether a file happened to exist, and every credential failure had two
+remedies to explain. It also made `gh` a de-facto dependency for the one job gitpic now
+does itself in a single command.
+
+`--with-token` existed only between commits on the way here, so no release ever offered
+it and nobody's setup depended on it. The reasoning is worth keeping:
+
+- **A pasted token (`--with-token`).** A token that travels by hand ends up in shell
+  history, in a scrollback, in a chat log — and it let an agent ask a user to paste a
+  credential into a conversation. The device flow moves no secret through human hands.
+  The flag is refused rather than ignored: silently discarding a token someone piped in is
+  the worst available outcome, because the secret has already left its keychain.
+
+`GITPIC_TOKEN` and a `github.token` config key remain unsupported, for the reasons they
+were dropped in the first place: the environment leaks into process listings and CI logs,
+and `config.toml` gets printed by `config get`. A `token` line still in the file is a
+`CONFIG_INVALID` error naming it.
+
+#### Also in this change
+
+- **`token_source` is gone** from `doctor --json` (and never existed on `auth status`).
+  With one source, a field whose value could only be `"gitpic"` restates the command that
+  produced it. `gitpic doctor` prints one line fewer for the same reason.
+- **`Debug` is hand-written on every type that holds a token** (`auth::Stored`,
+  `oauth::Granted`), printing `<redacted>`. A derived one would put the credential into
+  panic messages and `expect` output, which is the last place anyone looks for one.
+- **An expired token is `AUTH_FAILED`, not `CONFIG_MISSING`.** Both name the same command
+  now, but an agent that reads 3 as "nothing is set up yet" would otherwise go and
+  reconfigure a repository that was never the problem.
+- **`gitpic repos` is new.** Every repository the credential can reach, with its default
+  branch, whether it is private, and whether you can push — `--json` for a picker, plain
+  lines for a human. It exists because a hand-typed `owner/repo` that the token cannot see
+  fails as a bare `404`, and because `default_branch` is not always `main`.
+- **`auth login --json` is the one subcommand that streams.** Everywhere else `--json` is
+  exactly one envelope per invocation; here the code has to reach the caller minutes
+  before the outcome exists, and one envelope can only be written once. So it is
+  newline-delimited JSON: one object per line, each tagged `event` (`code`, then `done` or
+  `error`), the last line always the outcome. This is what lets GitPic.app run the login
+  inside its own window. An agent still must not call it — a reader parsing stdout as a
+  single object fails on the first line, and only a human can type the code.
+- **A login nobody can see is refused before it starts.** `gitpic auth login | true` threw
+  the one-time code into a closed pipe and then polled GitHub for the full fifteen minutes
+  it stayed valid. The heading is now written *before* the device-code request and doubles
+  as the probe: a closed stdout can only be discovered by writing to it, so checking
+  earlier than that can never fire, and checking later means the code has already been
+  minted.
+- **An expiring token is reported at login time**, rather than discovered by the upload
+  that fails eight hours later. gitpic's app has token expiration switched off, so this
+  normally does not appear; it can if `GITPIC_CLIENT_ID` points at an app that has it on.
+  gitpic does not refresh automatically — the note says to log in again. (Refreshing is
+  possible without a client secret for device-flow tokens, so this is a gap rather than an
+  impossibility; the `refresh_token` is currently not stored.)
+- `GITPIC_CLIENT_ID` / `--client-id` point the flow at a different OAuth app, `GITPIC_SCOPE`
+  / `--scope` at a different grant; `--no-browser` skips the opener, which only ever
+  launches a `https://github.com/` URL.
+
+#### GitPic.app: log in and pick a repository without a terminal
+
+图床 grew an 账号 section and a repository dropdown, so first-run setup no longer starts
+with "open a terminal". The login happens in the window: the one-time code is shown (and
+copyable), the browser opens itself, and the pane switches to the account as soon as GitHub
+confirms. The repository is **chosen**, never typed: there are no Owner / Repo / Branch
+fields any more, and the branch comes with the repository — GitHub's default, not an
+assumed `main`. Nothing is written until 保存, exactly as before. For a repository the
+listing cannot show, `gitpic config set github.repo owner/name` still takes a value
+directly.
+
+Three things behind it worth naming:
+
+- **The login does not go through the invocation gate.** Every other `gitpic` call is
+  serialised there so two uploads cannot race on the branch ref, and the gate has no
+  timeout — so a device-flow login, which blocks for as long as its code stays valid,
+  would have held it for fifteen minutes and wedged every upload behind it. A login races
+  with nothing: it writes `auth.toml`, which no other command touches.
+- **Streaming reuses the existing drain.** `ChildProcess` reads both pipes in one `poll`
+  loop precisely so neither can be starved into the 64 KiB deadlock; a second loop reading
+  only stdout would have reintroduced it. The line callback is threaded into that loop
+  instead.
+- **Cancelling really stops it.** Closing the window or pressing 取消 terminates the child,
+  rather than leaving it polling GitHub until the code expires.
+
+And everything the app had for `gh` is gone with it: `ToolPaths.gh`, `locateGH`, `GHStatus`, `GHProbe`, the gh row
+in 关于, and the 凭据来源 row in 图床. `childPATH` no longer prepends anything, since the
+CLI spawns nothing to authenticate.
+
+The gh probe existed for exactly one reason — the CLI collapsed "gh missing", "gh not
+logged in" and "gh failed" into one `CONFIG_MISSING` message with gh's stderr discarded, so
+the GUI re-ran `gh auth status` itself to say something actionable. One source means one
+state and one remedy, already in `error.message`, so the app now echoes what the CLI said
+instead of re-deriving it and risking drift.
+
 ## [0.14.0] - 2026-08-23
+
+### `gitpic branches`, and the branch is a choice too
+
+The branch was read-only in the app and taken from the repository's `default_branch`, which
+is right almost always and wrong the moment someone wants a dedicated `images` branch or a
+`gh-pages` one. It is now a second dropdown, backed by a new subcommand:
+
+```bash
+$ gitpic branches                              # the configured repository
+* main  (configured, protected)
+  images
+
+$ gitpic branches --repo octocat/legacy --json  # any repository
+{ "ok": true, "repo": "octocat/legacy", "configured": "main", "complete": true,
+  "branches": [ { "name": "master", "protected": false } ] }
+```
+
+A list rather than a text field, for a reason specific to this field: the Contents API
+writes into an **existing** ref and will not create one, so the set of values
+`github.branch` may legally hold is exactly the repository's branches. A name outside that
+set fails every upload with `REMOTE_NOT_FOUND` — and GitHub answers 404 for a missing ref
+exactly as it does for a repository the token cannot see, which makes a mistyped branch the
+least informative failure gitpic has.
+
+That is also what the plain output leads with when it applies:
+
+```
+$ gitpic branches --repo tarnish233/GitPic-legacy
+  master
+  tmp-verify-sha
+  note: `main` is configured but not in this list, so every upload will fail on a ref
+        that does not exist — `gitpic config set github.branch <one of the above>`
+```
+
+Which is the exact hazard `config set github.repo` leaves behind, now visible in one
+command instead of after an upload.
+
+- **Protected branches are labelled, never filtered.** Protection does not mean unwritable
+  — the rules may well permit this account — so removing one from the list would remove a
+  legitimate choice. It is reported because it is the usual explanation for a 409/422 when
+  every other check passed.
+- **A repository with no commits lists nothing, and that is not an error.** The first
+  upload creates the ref, so `ok` stays true and the human output says so.
+- **`--repo` works here**, as it does on `doctor` — the two read-only lookups that answer a
+  question *about* a repository, which is what makes checking one before saving it useful.
+  The usage error for a misplaced upload flag names both.
+- **The app's picker is driven off the draft, not the saved file.** The interesting moment
+  is after choosing a repository and before 保存, which is exactly when the previous
+  repository's branches would still be on screen — so a listing that arrives for a
+  repository the user has already moved away from is discarded rather than offered.
+- **The 图床 pane lost its `App` row.** It showed the OAuth client id, a constant string
+  next to the account name. `gitpic auth status` prints it, which is the right surface for
+  a twenty-character opaque value; the one thing a different app actually changes — token
+  expiration being on — already has its own row.
+- **`gitpic branches --json` follows the branch listing agents read** (§0c of the skill),
+  including the rule that `configured` not appearing in `branches` is the finding, not a
+  permissions problem.
+
+### `gitpic init` is gone: the repository is chosen where the credential is
+
+**Breaking.** `gitpic init` has been removed. `gitpic auth login` now ends by listing the
+repositories the new credential can upload to and writing the one you pick:
+
+```
+✓ logged in to github.com as octocat
+  stored in: /Users/x/.config/gitpic/auth.toml
+
+which repository should gitpic upload to?
+
+  [1] octocat/GitPic-legacy   (branch master)
+* [2] octocat/picture_of_notes  (branch main)
+  [3] octocat/dotfiles        (branch main, private)
+
+image host? [1-3] [2]:
+
+✓ octocat/picture_of_notes on main — saved to /Users/x/.config/gitpic/config.toml
+```
+
+`init` had become the wrong shape twice over. It stopped being an *initialisation* once it
+required a credential — a list has nothing to offer until gitpic knows who you are — so the
+one command whose name promised to be the first you ran was strictly the second, and both
+READMEs documented it with no mention of the order. And it had nothing left of its own to
+ask: with the target chosen from a list rather than typed, `init` was one question, asked
+one command too late, at a moment when the caller already had exactly the credential
+needed to answer it.
+
+**To change the image host afterwards:** `gitpic config set github.repo owner/name`, with
+`gitpic repos` to see the candidates (the app: the dropdown on 图床). One caveat that
+`init` used to hide — **`config set github.repo` does not touch `github.branch`**. A repo
+whose default is `master`, configured for `main`, fails every upload on a ref that does not
+exist; `gitpic repos` prints each candidate's `default_branch` next to it, and
+`gitpic doctor` names the missing branch when it happens.
+
+`gitpic init` is not special-cased into a message. `Cli` takes positional filenames and
+deliberately does not set `args_conflicts_with_subcommands`, so the word is now read as one:
+`error: file not found: init`, exit 6 — the same thing every mistyped subcommand has always
+said.
+
+Also in this change:
+
+- **The `CONFIG_MISSING` remedies no longer name it.** `Config::require_target` and
+  `doctor` both published "run `gitpic init`" as the fix for the most common first-run
+  failure, which would have left the advice for exit 3 pointing at a subcommand that no
+  longer resolves — and, for an agent following it, a loop. Both now name `gitpic repos`
+  and `gitpic config set github.repo`, neither of which is ever the wrong advice: `repos`
+  resolves the credential itself, so someone who has not logged in gets the login
+  instruction from the command that actually needs one. An integration test reads the
+  message an unconfigured user receives and requires it to name something that parses.
+- **The picker lives next to the listing** (`commands::repos`), not in `auth_cmd`. Which
+  repositories may be offered at all — push access, the private/jsDelivr caveat, a
+  truncated page — is one set of rules, and the `--json` listing agents read has to obey
+  the same ones.
+- **A mistyped choice is re-asked, not returned.** The picker runs *after* the credential
+  is on disk, so `USAGE` for a typo would end a completed browser login in a failure, and
+  the obvious response to "login failed" is to log in again — minting a second token to fix
+  a repository listing. Three tries, then the fallback command. A failure that is not the
+  user's to fix (no network for the listing) is a note for the same reason.
+- **`commands::prompt` is gone** with the command that needed it. It read EOF as consent to
+  the default, which was safe only for `init`'s "keep what is configured" fields; the two
+  prompts left — the picker and `skill install` — both treat EOF as an abort, because both
+  write something.
+- **Read-only repositories are excluded from the picker but counted in the output.** A
+  repository that cannot be pushed to is not a choice, it is a choice that fails later. But
+  "my repository is missing" is the harder question, so the count is printed.
 
 ### Drag-and-drop upload is gone, menu-bar icon included
 

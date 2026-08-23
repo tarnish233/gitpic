@@ -111,8 +111,9 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
     // wait until after the credential to fail.
     reject_unsafe_path_template(template)?;
 
-    // Resolved here, after the inputs are in hand: a credential helper may take
-    // a moment, and there is no point paying for it to upload a broken image.
+    // Resolved here, after the inputs are in hand. It is one read of a small file,
+    // but the ordering still matters: there is no point reporting a missing
+    // credential to someone whose real problem is an unreadable image.
     let token = crate::auth::token()?;
 
     let gh = GitHub::new(

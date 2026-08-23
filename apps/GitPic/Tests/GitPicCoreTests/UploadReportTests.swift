@@ -140,7 +140,10 @@ struct UploadReportTests {
         let ok = try #require(UploadReport.succeeded(summary: "已复制 Markdown").notice)
         #expect(ok == UploadNotice(title: "GitPic", body: "已复制 Markdown"))
 
-        let bad = try #require(UploadReport.failed(summary: "gh 未登录").notice)
-        #expect(bad == UploadNotice(title: "GitPic 上传失败", body: "gh 未登录"))
+        // The shape a real credential failure has now, so the fixture cannot outlive
+        // the tool it named.
+        let summary = "CONFIG_MISSING：no GitHub credential: run `gitpic auth login`"
+        let bad = try #require(UploadReport.failed(summary: summary).notice)
+        #expect(bad == UploadNotice(title: "GitPic 上传失败", body: summary))
     }
 }

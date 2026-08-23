@@ -141,8 +141,8 @@ public enum ThumbnailFailure: Sendable, Hashable, Error {
         case .http(404):
             // Both causes, because raw.githubusercontent.com answers 404 for a
             // private repository exactly as it does for a missing file, and the app
-            // holds no token to tell them apart (the CLI gets one from `gh auth
-            // token` per invocation; nothing here keeps a credential).
+            // holds no token to tell them apart (the CLI reads its own auth.toml;
+            // nothing here keeps a credential).
             return "取不到（404）：私有图床的 raw 链接需要令牌，App 不持有；"
                  + "也可能是 owner/repo/branch 改过了，或这张图已被删"
         case .http(let status):

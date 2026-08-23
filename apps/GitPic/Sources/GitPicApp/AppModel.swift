@@ -37,8 +37,8 @@ final class AppModel {
     /// early without setting `loadFailed`, so the pane sat on "读取配置中…" with
     /// nothing to retry, and a picker or clipboard upload in the first seconds after
     /// launch reported "找不到 gitpic" for a binary that simply had not been located
-    /// yet. The probe shells out to a login shell and to `gh auth status`, up to 8 s
-    /// each, so that window is wide enough to hit by hand.
+    /// yet. The probe can shell out to a login shell, up to 8 s, so that window is
+    /// wide enough to hit by hand.
     enum ToolState: Sendable { case resolving, ready, missing }
     private(set) var toolState: ToolState = .resolving
 
@@ -87,6 +87,295 @@ final class AppModel {
     var busy = false
     var lastDoctor: DoctorReport?
 
+    // MARK: - Credential
+
+    /// Where the login stands. The type and the report-to-state rule both live in
+    /// `GitPicCore`, where a test can reach them.
+    private(set) var auth: AuthState = .unknown
+
+    /// Repositories the credential can upload to, for the picker.
+    private(set) var repos: [RepoCandidate] = []
+    /// False when the CLI said its listing was truncated — the picker says so rather
+    /// than letting a missing repository read as "you do not have one".
+    private(set) var reposComplete = true
+    /// How many the listing returned that cannot be pushed to.
+    ///
+    /// Filtered out of `repos`, because a target that cannot be written to is not a
+    /// choice — but counted, because with no way left to type a repository by hand,
+    /// "why isn't mine in the list" is the one question that could strand someone.
+    private(set) var skippedRepos = 0
+    private(set) var reposLoading = false
+    private(set) var reposFailure: String?
+
+    /// Branches on the *selected* repository, for the second picker.
+    ///
+    /// A separate listing rather than a field on `RepoCandidate` because `gitpic repos`
+    /// would have to call GitHub once per repository to fill it — a dozen requests to
+    /// answer a question about the one repository the user actually picked.
+    private(set) var branches: [BranchCandidate] = []
+    private(set) var branchesComplete = true
+    private(set) var branchesLoading = false
+    private(set) var branchesFailure: String?
+    /// Which repository `branches` belongs to, so a stale answer for a repository the
+    /// user has already moved away from is discarded instead of shown.
+    private var branchesFor: String?
+    /// Bumped by every `loadBranches`, so a request can tell whether it is still the
+    /// newest one.
+    ///
+    /// The repository spec is not enough on its own: switching A → B → A gives two
+    /// in-flight requests that both match the draft, and whichever finishes first would
+    /// otherwise report "done loading" while the other is still running.
+    private var branchesGeneration = 0
+
+    /// The in-flight login, held so it can be cancelled.
+    ///
+    /// Cancelling the task tears down the `AsyncStream`, whose `onTermination`
+    /// terminates the `gitpic` child — otherwise a login the user walked away from
+    /// keeps polling GitHub until the code expires, fifteen minutes later.
+    private var loginTask: Task<Void, Never>?
+
+    var loginInFlight: Bool { loginTask != nil }
+
+    func refreshAuth() async {
+        guard let runner else {
+            // Never leave `.unknown` standing on a *finished* discovery: the pane
+            // renders it as a spinner, and with no runner there will never be an
+            // answer. While discovery is still running, `attach` is what calls back.
+            if toolState == .missing {
+                auth = .broken(detail: "找不到 gitpic，没法检查登录状态")
+            }
+            return
+        }
+        auth = .checking
+        do {
+            auth = try await runner.authStatus().state
+        } catch let RunFailure.cli(_, error) {
+            auth = error.code == "CONFIG_MISSING"
+                ? .loggedOut(detail: nil)
+                : .broken(detail: "\(error.code)：\(error.message)")
+        } catch {
+            auth = .broken(detail: "\(error)")
+        }
+        if case .loggedIn = auth {
+            await loadRepos()
+            // After the repositories, not concurrently: the branch listing is about
+            // whichever repository the draft names, and on a fresh window that draft is
+            // only readable once `reload` has landed.
+            await loadBranches()
+        }
+    }
+
+    /// Start a device-flow login and follow it to its outcome.
+    ///
+    /// Not `async`: the caller is a button, and this runs for as long as the user takes
+    /// in the browser. The task is stored instead, which is also what makes 取消 and
+    /// closing the window able to stop it.
+    func beginLogin(scope: String? = nil) {
+        guard let runner, loginTask == nil else { return }
+        auth = .checking
+        reposFailure = nil
+        loginTask = Task { @MainActor [weak self] in
+            defer { self?.loginTask = nil }
+            for await event in runner.loginEvents(scope: scope) {
+                guard let self else { return }
+                switch event {
+                case let .code(userCode, url, _):
+                    self.auth = .awaitingCode(userCode: userCode, url: url)
+                    // Opened once, here rather than by the CLI, so 打开浏览器 can offer
+                    // it again without a second process.
+                    NSWorkspace.shared.open(url)
+                case let .done(login):
+                    // Re-read rather than trusting the event: `auth status` is what
+                    // every other surface shows, and one code path deciding what
+                    // "logged in" looks like is one fewer way for the two to disagree.
+                    _ = login
+                    await self.refreshAuth()
+                case let .failed(error):
+                    self.auth = error.code == "CONFIG_MISSING"
+                        ? .loggedOut(detail: error.message)
+                        : .broken(detail: "\(error.code)：\(error.message)")
+                }
+            }
+        }
+    }
+
+    /// Stop a login in progress. The code on screen becomes useless immediately, which
+    /// is why the state goes back rather than staying on a code nobody is polling for.
+    func cancelLogin() {
+        loginTask?.cancel()
+        loginTask = nil
+        auth = .loggedOut(detail: "登录已取消")
+        Task { await refreshAuth() }
+    }
+
+    func logout() async {
+        guard let runner else { return }
+        loginTask?.cancel()
+        loginTask = nil
+        do {
+            _ = try await runner.logout()
+        } catch {
+            // The file is gone or it is not; either way the state below is read back
+            // from the CLI rather than assumed here.
+            Diagnostics.log("logout failed: \(error)")
+        }
+        repos = []
+        reposFailure = nil
+        clearBranches()
+        await refreshAuth()
+    }
+
+    func loadRepos() async {
+        guard let runner else { return }
+        reposLoading = true
+        reposFailure = nil
+        defer { reposLoading = false }
+        do {
+            let report = try await runner.repos()
+            if let list = report.repos {
+                // Only what can actually be uploaded to: the picker is now the only way
+                // to set a target, so offering one that cannot work would be the
+                // "accepted, then silently broken" shape this project refuses.
+                skippedRepos = list.filter { !$0.canPush }.count
+                repos = list.filter(\.canPush)
+                reposComplete = report.complete ?? true
+            } else {
+                repos = []
+                reposFailure = report.error.map { "\($0.code)：\($0.message)" }
+            }
+        } catch let RunFailure.cli(_, error) {
+            repos = []
+            reposFailure = "\(error.code)：\(error.message)"
+        } catch {
+            repos = []
+            reposFailure = "\(error)"
+        }
+    }
+
+    /// Load the branches of whichever repository the draft names.
+    ///
+    /// Driven off the draft rather than off a saved config, because the interesting
+    /// moment is *after* picking a repository and *before* 保存 — that is when someone
+    /// wants to see what else is in there.
+    func loadBranches() async {
+        guard let runner, let draft else { return }
+        let spec = "\(draft.github.owner)/\(draft.github.repo)"
+        guard !draft.github.owner.isEmpty, !draft.github.repo.isEmpty else {
+            clearBranches()
+            return
+        }
+        branchesGeneration += 1
+        let generation = branchesGeneration
+        branchesLoading = true
+        branchesFailure = nil
+        // Only the newest request may report that loading finished. Clearing the flag
+        // unconditionally let an older request — one whose *result* is correctly
+        // discarded below — still say "done" while the current one was mid-flight,
+        // leaving the branch row with neither a spinner nor a list.
+        defer { if generation == branchesGeneration { branchesLoading = false } }
+        do {
+            let report = try await runner.branches(repo: spec)
+            // The user may have picked a different repository while this was in flight.
+            // Landing the old answer would offer branches that belong to someone else's
+            // repository — and the picker writes what it is given.
+            guard generation == branchesGeneration else { return }
+            if let list = report.branches {
+                branches = list
+                branchesComplete = report.complete ?? true
+                branchesFor = spec
+            } else {
+                branches = []
+                branchesFailure = report.error.map { "\($0.code)：\($0.message)" }
+            }
+        } catch let RunFailure.cli(_, error) {
+            guard generation == branchesGeneration else { return }
+            branches = []
+            branchesFailure = "\(error.code)：\(error.message)"
+        } catch {
+            guard generation == branchesGeneration else { return }
+            branches = []
+            branchesFailure = "\(error)"
+        }
+    }
+
+    private func clearBranches() {
+        branches = []
+        branchesComplete = true
+        branchesFailure = nil
+        branchesFor = nil
+        // Invalidates anything in flight. `chooseRepo` calls this precisely because the
+        // old repository's request is still running, and without the bump that request
+        // would land its branches for a repository the user has already left.
+        branchesGeneration += 1
+    }
+
+    /// Put a chosen branch into the draft — not onto disk, same as `chooseRepo`.
+    func chooseBranch(_ branch: BranchCandidate) {
+        guard var next = draft else { return }
+        next.github.branch = branch.name
+        draft = next
+    }
+
+    /// The branch the draft names, if it is one the listing knows.
+    ///
+    /// `nil` covers two states the picker has to render differently from a normal
+    /// selection: a branch that was deleted on GitHub, and a listing not loaded yet.
+    var selectedBranch: BranchCandidate? {
+        guard let draft else { return nil }
+        return branches.first { $0.name == draft.github.branch }
+    }
+
+    /// A repository with no commits: the listing succeeded and returned nothing.
+    ///
+    /// Distinct from "not loaded yet" and from "the listing failed", and it needs saying:
+    /// the branch row silently stops being a picker, and the CLI does explain this case
+    /// (`gitpic branches` says the first upload will create the ref) while the window
+    /// used to say nothing at all.
+    var repositoryHasNoBranches: Bool {
+        branchesMatchDraft && branches.isEmpty && branchesFailure == nil
+    }
+
+    /// Whether `branches` describes the repository the draft currently names.
+    ///
+    /// The picker needs this to avoid offering the previous repository's branches for a
+    /// second while a fresh listing is in flight. It compares the stored spec rather
+    /// than a generation, because the question here is about the *data on hand*, not
+    /// about which request is newest.
+    var branchesMatchDraft: Bool {
+        guard let draft else { return false }
+        return branchesFor == "\(draft.github.owner)/\(draft.github.repo)"
+    }
+
+    /// Put a chosen repository into the draft — not onto disk.
+    ///
+    /// The draft stays the source of truth and 保存 stays the only thing that writes, so
+    /// picking is undoable by 还原 like any other edit. It is now the *only* way the
+    /// window sets a target: the three text fields are gone, and `gitpic config set` is
+    /// what remains for a repository no listing can offer.
+    func chooseRepo(_ repo: RepoCandidate) {
+        guard var next = draft else { return }
+        next.github.owner = repo.owner
+        next.github.repo = repo.name
+        // The default branch comes from GitHub, so picking a repo whose default is
+        // `master` does not silently leave `main` behind for the upload to 404 on. It
+        // is also a value the branch picker below is guaranteed to contain, which keeps
+        // the two pickers consistent the instant the repository changes.
+        next.github.branch = repo.defaultBranch
+        draft = next
+        // The old repository's branches are wrong the moment the repository changes, and
+        // they must not linger as offerable choices while the new listing loads.
+        clearBranches()
+        Task { await loadBranches() }
+    }
+
+    /// The repository the draft currently names, if it is one the picker knows.
+    var selectedRepo: RepoCandidate? {
+        guard let draft else { return nil }
+        return repos.first {
+            $0.owner == draft.github.owner && $0.name == draft.github.repo
+        }
+    }
+
     /// Why the last config read failed, or `nil` if it did not.
     ///
     /// Distinguishes "still loading" from "the last read failed" — the form must not
@@ -121,10 +410,22 @@ final class AppModel {
 
     private init() {}
 
+    /// Discovery finished and `gitpic` is here.
+    ///
+    /// Kicks the two reads that need it, rather than leaving them to whoever notices.
+    /// Both `reload` and `refreshAuth` return early without a runner, and both are
+    /// triggered from somewhere that asks exactly once — the settings window's first
+    /// layout, which `SettingsWindowController.prewarm()` performs *during* discovery.
+    /// So the window came up, asked while `runner` was still nil, got a silent no, and
+    /// nothing ever asked again: an empty repository form and an 账号 section spinning
+    /// on 检查登录状态 forever. The trigger has to be "the runner arrived", not "the
+    /// view appeared".
     func attach(runner: GitpicRunner, tools: ToolPaths) {
         self.runner = runner
         self.tools = tools
         toolState = .ready
+        Task { await self.reload() }
+        Task { await self.refreshAuth() }
     }
 
     /// Discovery finished and `gitpic` is not there — distinct from `.resolving`,
@@ -223,6 +524,13 @@ final class AppModel {
             // read just disproved.
             configFailure = nil
             onConfigChange?()
+            // What the form is now showing, and whether it came from the file or from
+            // an edit the reconcile kept. A form that reads back empty while the file
+            // is fine — which is how the late-runner bug looked — is otherwise
+            // indistinguishable in the log from a genuinely unconfigured machine.
+            let shown = draft?.github ?? cfg.github
+            Diagnostics.log("config read: file=\(cfg.github.owner)/\(cfg.github.repo)"
+                            + " form=\(shown.owner)/\(shown.repo)@\(shown.branch)")
         } catch {
             configFailure = ConfigFailure(error)
             // Logged as well as shown: this is the failure users report as "App 没

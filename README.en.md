@@ -14,24 +14,30 @@
 </p>
 
 The menu-bar app and the command line are two faces of one thing: same version, same
-config, same upload history. Credentials come from the GitHub CLI (`gh`), and **no secret
-is ever stored in the config file**.
+config, same upload history. There is one way to authenticate — `gitpic auth login`
+(browser authorisation) — and **no secret is ever stored in the config file**.
 
 ## GitPic.app (macOS menu bar)
 
 ```bash
-brew install gh && gh auth login        # prerequisite, once
 brew install tarnish233/tap/gitpic      # the app, plus the terminal command
 ```
 
 Use the menu to pick a file, or upload whatever is on the clipboard — the link goes
 straight to the clipboard, and both success and failure are reported as system
 notifications. The settings window has four panes: 图床
-(repository, connectivity test), 上传 (path template, link form, compression), 历史
-(history, with thumbnails and one-click copy), and 关于.
+(account, repository, connectivity test), 上传 (path template, link form, compression),
+历史 (history, with thumbnails and one-click copy), and 关于.
 
-To get started, open the settings window and fill in owner / repo / branch — or run
-`gitpic init` in a terminal.
+**Nothing needs a terminal to get started.** Open the settings window → 图床 → 「使用
+GitHub 登录」: the one-time code appears in the window and the browser opens on its own.
+Once authorised, the dropdown below lists the repositories you can upload to — pick one and
+press 保存 to write it. The list is the only way in, and the branch comes with the
+repository (GitHub's default, not an assumed `main`), so neither a misspelled repository
+name nor a `master` repository configured for `main` is reachable any more.
+
+The terminal route is the same thing, in one command: `gitpic auth login` ends by listing
+the repositories you can upload to. Both share one credential and one config.
 
 > Apple Silicon only, macOS 14+. The app is locally signed and not notarised by Apple —
 > installing with brew clears the quarantine attribute for you. If you install by hand
@@ -80,7 +86,8 @@ gitpic a.png b.png               # several at once
 gitpic paste                     # upload the image on the clipboard
 cat img.png | gitpic --stdin     # extension decided from the bytes
 gitpic list                      # recent uploads (local history)
-gitpic doctor                    # check gh auth and repository permissions
+gitpic auth login                # authorise in the browser
+gitpic doctor                    # check auth and repository permissions
 gitpic completion zsh            # print a completion script
 gitpic skill install             # install the agent skill (below)
 
@@ -96,16 +103,38 @@ gitpic big.jpg --compress --quality 80       # JPEG quality
 ### Config
 
 ```bash
-gitpic init                              # interactive setup
 gitpic config get                        # show everything
 gitpic config set github.repo owner/name # one key, or several KEY VALUE pairs
 gitpic config path                       # where the file is
 gitpic config edit                       # open it in $EDITOR
 ```
 
+The image host is chosen at the end of `gitpic auth login` (in the app: the dropdown on
+the 图床 pane). To change it later, `gitpic config set github.repo owner/name` —
+`gitpic repos` lists the candidates with each one's default branch. **Changing the
+repository does not change `github.branch`**: if the new target's default branch is not
+the one already configured, set `github.branch` in the same breath, or every upload will
+target a ref that does not exist. `gitpic branches` is what shows that:
+
+```bash
+$ gitpic branches --repo tarnish233/GitPic-legacy
+  master
+  tmp-verify-sha
+  note: `main` is configured but not in this list, so every upload will fail on a ref
+        that does not exist — `gitpic config set github.branch <one of the above>`
+```
+
+Uploads go through the Contents API, which **cannot create a branch** — the target ref
+has to exist already. So the legal values for `github.branch` are exactly that list,
+which is why the app's 图床 pane makes the branch a dropdown too. Protected branches are
+labelled but never filtered out: protected does not mean unwritable, and the rules may
+well permit this account.
+
 Config lives at `~/.config/gitpic/config.toml` (honours `$XDG_CONFIG_HOME`), history at
 `~/.local/share/gitpic/history.jsonl` (honours `$XDG_DATA_HOME`). There is no token key
-in the config, which is what makes the file safe to keep in a dotfiles repo:
+in the config, which is what makes the file safe to keep in a dotfiles repo — but
+**`auth.toml` in the same directory is not**: that one holds the token `gitpic auth login`
+stored (see below):
 
 ```toml
 [github]
@@ -137,13 +166,64 @@ the file.
 
 ### Credentials
 
-`gitpic` calls `gh auth token` every time it needs GitHub; the token lives in the system
-keyring. `GITPIC_TOKEN` and a `github.token` config key are both unsupported — upgrading
-from an older version, delete the `token` line and run `gh auth login` once, or you will
-get `CONFIG_INVALID`.
+```bash
+gitpic auth login              # authorise in the browser (GitHub device flow)
+gitpic auth login --scope repo # only needed for a private image host
+gitpic auth status             # whose credential this is
+gitpic auth logout             # remove it
+gitpic repos                   # which repositories this credential can upload to
+gitpic branches                # which branches the configured repository has
+```
 
-> A `gh` OAuth token may be broader than "write files to one image-host repo" needs. Use
-> `gh auth status` to see which account is in play.
+**That is the only way in.** The token lives in `~/.config/gitpic/auth.toml` at mode 0600,
+kept apart from `config.toml` — which `gitpic config get` prints in full and `config edit`
+opens in `$EDITOR`, so it is no place for a secret.
+
+`gitpic auth login` runs GitHub's device flow: it prints a one-time code, you enter it at
+<https://github.com/login/device>, done. No client secret anywhere, and no key for you to
+carry by hand.
+
+The authorisation asks for the **`public_repo`** scope — write access to your **public**
+repositories. That is the narrowest scope that can do gitpic's one job, because GitHub has
+no OAuth scope meaning "this one repository", and it is all that is needed: jsDelivr, which
+`link_kind = "cdn"` points at, serves only public repositories.
+
+A **private** image host needs `gitpic auth login --scope repo`. `repo` is broad — read and
+write on every repository you can reach — which is why it is not the default. Only
+`link_kind = "raw"` links resolve from a private repository anyway.
+
+`gitpic auth login` ends by listing the repositories the credential can upload to and
+saving the one you pick, default branch included — there is no second command to run.
+`gitpic repos` is for looking again later (default branch, private, pushable), and
+`gitpic branches` for the branches of one repository.
+
+Point the flow at your own OAuth App with `GITPIC_CLIENT_ID` or
+`gitpic auth login --client-id <id>`; the scope has `GITPIC_SCOPE` as its equivalent.
+
+> Why not a GitHub App? A GitHub App's permissions are narrower — `Contents: write` on one
+> chosen repository, far more precise than `public_repo`. It lost on the **flow**: a GitHub
+> App's user token can only reach repositories the app has been *installed* on, and the
+> device flow does not perform an installation. Every user would authorise in the terminal
+> and then have to visit a browser again to install the app and select repositories. One
+> login that immediately yields a list to choose from is worth more than a tighter grant
+> half the users never finish.
+
+Three routes are **removed**, not merely discouraged:
+
+- **`gh auth token`.** A second source meant a second identity: on a machine with a `gh`
+  session, which account an upload was attributed to depended on whether a file happened
+  to exist, and every credential failure had two remedies to explain. It also made `gh` a
+  de-facto dependency for the one job gitpic now does itself in a single command.
+- **A pasted token (`--with-token`).** A token that travels by hand ends up in shell
+  history, in a scrollback, in a chat log — and it let an agent ask a user to paste a
+  credential into a conversation. The device flow moves no secret through human hands.
+- **`GITPIC_TOKEN` and a `github.token` config key.** A credential in the environment
+  leaks into process listings and CI logs; one in `config.toml` gets printed by
+  `gitpic config get`. A `token` line still in the file is a `CONFIG_INVALID` error —
+  delete it.
+
+With one source left there is no provenance to report: neither `doctor` nor `auth status`
+carries a `token_source` field any more.
 
 ### Exit codes and `--json`
 
@@ -151,13 +231,20 @@ get `CONFIG_INVALID`.
 · `6` local file not found · `7` permission denied · `8` remote resource not found ·
 `9` rate limited · `10` config file unusable.
 
-`3` means "nothing configured yet" (run `gitpic init`); `10` means "configured, but the
-file is broken" (run `gitpic config edit`). They need different fixes, so they get
-different codes.
+`3` means "nothing configured yet" (run `gitpic auth login`, or
+`gitpic config set github.repo owner/name`); `10` means "configured, but the file is
+broken" (run `gitpic config edit`). They need different fixes, so they get different
+codes.
 
 `--json` returns an envelope carrying `ok` on every subcommand, failures included, with
-three exceptions: interactive `gitpic init` **refuses** it; `gitpic completion <shell>`
-ignores it and prints the shell script; `gitpic config edit` hands stdout to `$EDITOR`.
+three exceptions. `gitpic auth login --json` is a **stream**: one complete JSON object per
+line, each tagged with `event` (`code` carries the one-time code; the last line is always
+`done` or `error`). It has to be — the code must reach the caller minutes before the
+outcome exists, and one envelope can only be written once. That is what lets the app run
+the login inside its settings window, it is the only place "one invocation, one envelope"
+does not hold, and it is why neither a script nor an agent should call it. The other two:
+`gitpic completion <shell>` ignores `--json` and prints the shell script, and
+`gitpic config edit` hands stdout to `$EDITOR`.
 Argument-parsing errors also come back as `{ "ok": false, "error": … }` under `--json`.
 
 ## Agent skill

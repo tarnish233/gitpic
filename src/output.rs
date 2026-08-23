@@ -163,8 +163,8 @@ fn record_write(result: io::Result<()>) {
         // `gitpic skill install` did the same with a numbered target list and an
         // `a=all` default, installing files nobody was shown. So the loss is
         // recorded instead of acted on: `list`/`completion` ignore it and still
-        // exit 0, while `prompt`/`prompt_opt` refuse to read an answer to a
-        // question that was never delivered.
+        // exit 0, while `prompt_opt` refuses to read an answer to a question that
+        // was never delivered.
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => note_stdout_lost(),
         Err(e) => panic!("failed printing to stdout: {e}"),
     }
@@ -177,11 +177,11 @@ fn record_write(result: io::Result<()>) {
 /// reported by the runtime as a panic at exit.
 ///
 /// It has to record the loss too, and for a prompt's own text it is the only place
-/// that can: `Stdout` is a `LineWriter` whatever it points at, and `raw("Branch
-/// [main]: ")` carries no newline, so the `write(2)` that earns the EPIPE happens
-/// at this flush and nowhere else. An empty arm here would let `gitpic init` be
-/// answered by a reader that left after the banner — every write so far succeeded,
-/// so nothing else in this module ever saw a broken pipe.
+/// that can: `Stdout` is a `LineWriter` whatever it points at, and
+/// `raw("image host? [1-3]: ")` carries no newline, so the `write(2)` that earns the
+/// EPIPE happens at this flush and nowhere else. An empty arm here would let the
+/// repository picker be answered by a reader that left after the listing — every write
+/// so far succeeded, so nothing else in this module ever saw a broken pipe.
 pub fn finish() {
     match io::stdout().flush() {
         Ok(()) => {}
@@ -225,6 +225,25 @@ impl Drop for StdoutLostGuard {
 /// goes through here, so the shape and the formatting stay in one place.
 pub fn print_json<T: Serialize>(value: &T) {
     line(&serde_json::to_string_pretty(value).unwrap_or_default());
+}
+
+/// Serialise `value` to exactly one line.
+///
+/// The counterpart to [`print_json`], which pretty-prints — right for a single envelope
+/// somebody may read, and *wrong* for a stream. `auth login --json` emits one object per
+/// line, and pretty-printing turned each of them into seven: a reader splitting on
+/// newlines got `{`, then `  "event": "code",`, and not one parseable object among them.
+///
+/// Split from [`print_json_line`] so the shape is assertable in a test. Serialising the
+/// struct directly, as the first test of this did, proves nothing — the bug was entirely
+/// in which writer the caller reached for.
+pub fn json_line<T: Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_default()
+}
+
+/// Print one JSON object on one line, for the streaming `auth login --json`.
+pub fn print_json_line<T: Serialize>(value: &T) {
+    line(&json_line(value));
 }
 
 /// Print successful upload results according to the mode.
@@ -275,6 +294,17 @@ pub fn print_partial(mode: Mode, results: &[ItemResult], code: &str, message: &s
     }
 }
 
+/// Write an indented `note: <text>` line to stdout.
+///
+/// The one advisory shape in the CLI: something worth saying that is neither a result
+/// nor a failure, and that must never reach the exit status. Here rather than in each
+/// subcommand because two of them had already written their own copy, and a third would
+/// have made `note:` three different colours.
+pub fn note(text: &str) {
+    let label = "note:".if_supports_color(Stream::Stdout, |t| t.yellow().to_string());
+    line(&format!("  {label} {text}"));
+}
+
 /// Write `error: <message>` to stderr, coloured only when stderr is a terminal.
 fn eprint_error_label(message: &str) {
     let label = "error:".if_supports_color(Stream::Stderr, |t| t.red().bold().to_string());
@@ -322,6 +352,32 @@ mod tests {
         .unwrap();
         assert!(json.contains(r#""ok":true"#));
         assert!(!json.contains(r#""error""#));
+    }
+
+    /// The regression this exists for: `auth login --json` is newline-delimited, and
+    /// `print_json` pretty-prints. Every event went out as seven lines, so a reader
+    /// splitting on newlines — which is the whole contract — parsed none of them.
+    ///
+    /// Asserted through `json_line`, the function the printer actually calls. The first
+    /// version of this test serialised the event struct itself with `to_string` and
+    /// passed while the shipping code used `to_string_pretty`.
+    #[test]
+    fn a_streamed_object_is_one_line() {
+        let rendered = json_line(&SuccessEnvelope {
+            ok: true,
+            results: &[],
+        });
+        assert!(!rendered.contains('\n'), "{rendered:?}");
+        assert_eq!(rendered, r#"{"ok":true,"results":[]}"#);
+
+        // And the envelope printer keeps pretty-printing: it is one object per
+        // invocation, and a human reads it.
+        let pretty = serde_json::to_string_pretty(&SuccessEnvelope {
+            ok: true,
+            results: &[],
+        })
+        .unwrap();
+        assert!(pretty.contains('\n'));
     }
 
     #[test]

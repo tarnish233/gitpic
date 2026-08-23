@@ -4,7 +4,213 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 只剩 `gitpic auth login` 一条路 —— `gh` 删掉了
+
+**破坏性变更。** gitpic 不再从任何别的地方读凭据：
+
+```bash
+gitpic auth login     # 浏览器授权（GitHub device flow）
+gitpic auth status    # 这枚凭据是谁的
+gitpic auth logout    # 删掉
+gitpic repos          # 这枚凭据能往哪些仓库上传
+```
+
+token 落在 `~/.config/gitpic/auth.toml`，权限 0600，用的是和 `config.toml` 同一套原子私有写入 ——
+那套逻辑抽成了一个函数共用，不是抄一遍：紧挨着密钥的地方，"从第一个字节之前就是私有的"这条性质不值得
+再推导一次。单独一个文件是故意的：`gitpic config get` 会打印它知道的每个键、`config edit` 会用
+`$EDITOR` 打开文件，两者都碰不到凭据。也因此，`auth.toml` 是 `~/.config/gitpic/` 里唯一不该进 dotfiles
+同步的文件。
+
+**升级方式：跑一次 `gitpic auth login`。** 然后 `gitpic repos` 会列出这枚新凭据能上传的所有仓库 ——
+挑一个，别再手输一个可能根本访问不到的 `owner/repo`。
+
+授权请求的是 **`public_repo`**：公开仓库的写权限，是能干成这件事的最窄 OAuth scope（GitHub 没有"只给
+某一个仓库"这种 scope）。它也够用 —— `link_kind = "cdn"` 指向的 jsDelivr 只服务公开仓库。图床是私有
+仓库要用 `gitpic auth login --scope repo`，`repo` 宽到不适合做默认值；`GITPIC_SCOPE` 可以覆盖它，和
+`GITPIC_CLIENT_ID` 覆盖 app 是一样的机制。
+
+**GitHub App** 是另一个候选，权限本来更窄 —— 可以只给某一个仓库 `Contents: write`。它输在**流程**上，
+不是权限上：GitHub App 的 user token 只能访问 App 被**安装**过的仓库，而 device flow 不会顺带完成安装。
+那意味着每个用户都得先在终端授权、再去浏览器把 App 装到自己账号上并勾选仓库。"登录完立刻有一个列表
+可选"比"更紧的授权但一半人走不完"更值。
+
+#### 删掉一条路，另一条从未发布过
+
+**破坏性的是 `gh auth token`。** 它在 0.14.0 及之前的每一版都能用，所以靠它的机器需要跑一次
+`gitpic auth login`。两个来源就是两个身份：装了 `gh` 的机器上，一次上传算在谁头上取决于某个文件在不在，
+而每个凭据错误都有两种解释要讲。它还让 `gh` 成了事实上的依赖 —— 而这件事 gitpic 现在自己一条命令就
+做完了。
+
+`--with-token` 只存在于通往这里的若干次提交之间，没有任何一个发布版本提供过它，所以不会有谁的配置依赖
+它。但理由值得留下来：
+
+- **粘贴 token（`--with-token`）。** 手工搬运的 token 会留在 shell history、scrollback、聊天记录里，
+  而且它让 AI 助手可以要求用户"把 token 贴进对话"。device flow 不需要任何密钥经过人手。这个 flag 是
+  **被拒绝**而不是被忽略的：悄悄丢掉别人 pipe 进来的 token 是最坏的结果 —— 密钥已经离开钥匙串了，却
+  没有任何东西告诉你它没被用上。
+
+`GITPIC_TOKEN` 和配置里的 `github.token` 仍然不支持，理由和当初删掉它们时一样：环境变量会漏进进程列表
+和 CI 日志，`config.toml` 会被 `config get` 打印出来。文件里还留着 `token` 行的话，会得到一个点名它的
+`CONFIG_INVALID`。
+
+#### 这次一并做的
+
+- **`token_source` 字段删了**（`doctor --json` 里的；`auth status` 从来没有过）。只剩一个来源时，一个
+  取值只可能是 `"gitpic"` 的字段，重复的是产生它的那条命令。`gitpic doctor` 也因此少打印一段。
+- **所有持有 token 的类型都手写了 `Debug`**（`auth::Stored`、`oauth::Granted`），打印成 `<redacted>`。
+  derive 出来的那个会把凭据送进 panic 信息和 `expect` 输出 —— 那是最没人会去翻的地方。
+- **过期是 `AUTH_FAILED`，不是 `CONFIG_MISSING`。** 现在两者指向同一条命令，但把 3 读成"还什么都没配"
+  的 agent，会跑去重配一个从来没出问题的仓库。
+- **`gitpic repos` 是新命令。** 列出这枚凭据能访问的每个仓库，带默认分支、是否私有、能不能写 ——
+  `--json` 给选择器用，纯文本给人看。它存在的理由：手输一个 token 看不见的 `owner/repo`，失败形式是
+  一个光秃秃的 `404`；而且默认分支并不总是 `main`。
+- **`auth login --json` 是唯一一个流式输出的子命令。** 其他地方 `--json` 都是"一次调用恰好一个信封"；
+  这里代码必须比结果早几分钟到达调用方，而一个信封只能写一次。所以是逐行 JSON：一行一个完整对象，
+  每行带 `event` 标签（`code`，然后 `done` 或 `error`），最后一行永远是结果。这正是让 GitPic.app 能在
+  自己窗口里完成登录的东西。AI 助手仍然不该调它 —— 把 stdout 当单个对象解析的读者会在第一行就失败，
+  而那个码只有人能输。
+- **没人看得见的登录，在开始之前就被拒。** `gitpic auth login | true` 会把一次性代码扔进关掉的管道，
+  然后照样轮询 GitHub 整整十五分钟。现在那行标题写在设备码请求**之前**，并且它同时就是探针：stdout
+  被关掉这件事只能靠"往里写一次"发现，所以查得比这更早永远不会触发，查得更晚则代码已经签发出去了。
+- **会过期的 token 在登录当时就报出来**，而不是等八小时后某次上传失败才发现。gitpic 用的 app 关掉了
+  token 过期，所以这条通常不会出现；`GITPIC_CLIENT_ID` 指向一个开着过期的 app 时会。gitpic 不会自动
+  刷新 —— 提示会让你重新登录。（device flow 拿到的 token 刷新其实**不需要** client secret，所以这是
+  一个待补的缺口而不是做不到；目前 `refresh_token` 不落盘。）
+- `GITPIC_CLIENT_ID` / `--client-id` 把流程指向另一个 OAuth app，`GITPIC_SCOPE` / `--scope` 指向另一种
+  授权范围；`--no-browser` 跳过自动打开，而那个打开动作只对 `https://github.com/` 的 URL 生效。
+
+#### GitPic.app：不开终端也能登录、选仓库
+
+图床页多了「账号」区和仓库下拉框，第一次配置不再需要从"打开终端"开始。登录在窗口里完成：一次性码显示
+出来（可复制），浏览器自己打开，GitHub 那边确认后这一页立刻切成已登录。仓库是**选**的，不是填的：
+Owner / Repo / Branch 三个输入框已经没有了，分支跟着仓库来 —— 取 GitHub 上的默认值而不是假定 `main`。
+和以前一样，不按「保存」不落盘。列表里显示不出来的仓库，`gitpic config set github.repo owner/name`
+仍然可以直接给值。
+
+背后三件值得点名的事：
+
+- **登录不走那道串行闸门。** 其他每一次 `gitpic` 调用都在那里排队，好让两次上传不会在分支 ref 上打架，
+  而那道闸门没有超时 —— 所以一次 device flow 登录（阻塞到码失效为止）会占住它十五分钟，把所有上传堵在
+  后面。而登录和谁都不冲突：它写的是 `auth.toml`，没有别的命令碰这个文件。
+- **流式读行复用了原有的 drain。** `ChildProcess` 用一个 `poll` 循环同时读两个管道，正是为了让哪一个都
+  不会被饿死进那个 64 KiB 死锁；再加一个只读 stdout 的循环就是把它请回来。所以行回调是接进那个循环里的。
+- **取消是真的停得住。** 关窗口或按「取消」会终止子进程，而不是留它一直轮询 GitHub 到码过期。
+
+另外，App 里为 `gh` 准备的东西全都跟着删了：`ToolPaths.gh`、
+`locateGH`、`GHStatus`、`GHProbe`、「关于」里的 gh 一行、「图床」里的「凭据来源」一行。`childPATH` 也
+不再往前面拼任何目录了，因为 CLI 认证时不再 spawn 任何东西。
+
+那套 gh 探测存在的理由只有一个：CLI 把"gh 没装"、"gh 没登录"、"gh 挂了"压成同一条 `CONFIG_MISSING`
+并且把 gh 的 stderr 丢掉了，所以 GUI 只能自己再跑一次 `gh auth status` 才能说出点有用的话。只剩一个
+来源就只有一种状态、一个处理办法，而且它已经在 `error.message` 里了 —— 所以 App 现在直接把 CLI 说的话
+显示出来，不再自己推导一遍、然后和 CLI 走偏。
+
 ## [0.14.0] - 2026-08-23
+
+### 新增 `gitpic branches`，分支也变成"选"的
+
+分支原来在 App 里是只读的，取仓库的 `default_branch` —— 绝大多数时候对，但想用一个专门的 `images`
+分支或者 `gh-pages` 时就不对了。现在它是第二个下拉框，背后是一条新子命令：
+
+```bash
+$ gitpic branches                              # 当前配置的仓库
+* main  (configured, protected)
+  images
+
+$ gitpic branches --repo octocat/legacy --json  # 任意仓库
+{ "ok": true, "repo": "octocat/legacy", "configured": "main", "complete": true,
+  "branches": [ { "name": "master", "protected": false } ] }
+```
+
+用列表而不是输入框，理由是这个字段独有的：上传走的 contents API **只往已存在的 ref 里写，不会创建
+分支**，所以 `github.branch` 的合法取值恰好就是这个仓库的分支集合。取值落在集合外，每次上传都是
+`REMOTE_NOT_FOUND` —— 而 GitHub 对"ref 不存在"和"token 看不见这个仓库"回的都是 404，这让打错的分支名
+成为 gitpic 里信息量最低的一种失败。
+
+所以在会发生的时候，纯文本输出会把这件事顶到最前面：
+
+```
+$ gitpic branches --repo tarnish233/GitPic-legacy
+  master
+  tmp-verify-sha
+  note: `main` is configured but not in this list, so every upload will fail on a ref
+        that does not exist — `gitpic config set github.branch <one of the above>`
+```
+
+这正是 `config set github.repo` 留下的那个隐患 —— 现在一条命令就能看见，而不是等一次上传失败。
+
+- **受保护的分支会标出来，但不会被过滤掉。** 受保护不等于写不进去（规则可能允许当前账号），把它从列表里
+  拿掉就是拿掉一个合法选项。它之所以要报，是因为在其他检查都过了之后出现 409/422，它通常就是原因。
+- **没有 commit 的仓库列不出分支，而这不是错误。** 第一次上传会创建那个 ref，所以 `ok` 仍然是 true，
+  人类可读的输出会把这件事说出来。
+- **这里可以用 `--repo`**，和 `doctor` 一样 —— 这两条是"回答关于某个仓库的问题"的只读查询，先看一眼
+  再决定要不要写进配置才有意义。放错位置的上传参数的报错文案里两条都提到了。
+- **App 的分支下拉是跟着草稿走的，不是跟着已保存的文件。** 有意思的时刻恰好是"选好仓库、还没按保存"
+  之间，而那时屏幕上留着的正是上一个仓库的分支 —— 所以一份为已经被切走的仓库返回的列表会被丢掉，而不是
+  拿出来给人选。
+- **图床页去掉了 `App` 那一行。** 它显示的是 OAuth client id，一个紧挨着账号名的常量字符串。
+  `gitpic auth status` 会打印它，那才是二十个字符的不透明值该待的地方；换 app 真正会改变的那件事 ——
+  token 会过期 —— 本来就有自己的一行。
+- **`gitpic branches --json` 遵循 agent 读的那份分支契约**（技能文档 §0c），包括那条规则：`configured`
+  不在 `branches` 里，这本身就是结论，不是权限问题。
+
+### `gitpic init`删掉了：选仓库这件事挪到取凭据的地方
+
+**破坏性变更。** `gitpic init` 已删除。`gitpic auth login` 现在会在最后把这份新凭据能上传的仓库列出
+来，选中的那个直接落盘：
+
+```
+✓ logged in to github.com as octocat
+  stored in: /Users/x/.config/gitpic/auth.toml
+
+which repository should gitpic upload to?
+
+  [1] octocat/GitPic-legacy   (branch master)
+* [2] octocat/picture_of_notes  (branch main)
+  [3] octocat/dotfiles        (branch main, private)
+
+image host? [1-3] [2]:
+
+✓ octocat/picture_of_notes on main — saved to /Users/x/.config/gitpic/config.toml
+```
+
+`init` 的形状已经错了两层。它需要凭据之后就不再是「初始化」—— gitpic 不知道你是谁之前，列表里没有
+任何东西可选 —— 于是这个名字承诺"第一条跑的命令"的子命令，实际上严格是第二条，而两个 README 都还在
+不提顺序地介绍它。同时它自己也没剩什么要问的了：目标改成从列表里选而不是打字之后，`init` 只剩一个
+问题，晚了一条命令才问，而问的那一刻调用方手里正好握着回答它所需要的那份凭据。
+
+**之后想换图床仓库**：`gitpic config set github.repo owner/name`，用 `gitpic repos` 看有哪些可选
+（App 里是图床页的下拉框）。有一个 `init` 以前替你藏着的代价 —— **`config set github.repo` 不会动
+`github.branch`**。默认分支是 `master` 的仓库配上 `main`，每次上传都会撞上一个不存在的 ref；
+`gitpic repos` 会把每个候选的 `default_branch` 一起打出来，真撞上了 `gitpic doctor` 会直接说是分支
+不存在。
+
+`gitpic init` 没有被特判成一条提示。`Cli` 收位置参数当文件名，并且刻意不设
+`args_conflicts_with_subcommands`，所以这个词现在就是被当成文件名：`error: file not found: init`，
+退出码 6 —— 和任何一个打错的子命令一直以来的行为一样。
+
+这次一并做的：
+
+- **`CONFIG_MISSING` 的处理建议不再提它。** `Config::require_target` 和 `doctor` 都把"跑
+  `gitpic init`"作为最常见的首次失败的解法发布出去，不改的话，退出码 3 的建议就会指向一个已经解析不了
+  的子命令 —— 对照着做的 agent 还会因此陷入循环。两处现在都改成 `gitpic repos` 和
+  `gitpic config set github.repo`，这两条在任何情况下都不会是错的建议：`repos` 自己会去取凭据，所以
+  没登录的人会从真正需要凭据的那条命令那里拿到登录提示。有一个集成测试会去读未配置用户实际收到的那条
+  消息，并要求它提到的东西真的能解析。
+- **选择器和列表放在一起**（`commands::repos`），不在 `auth_cmd` 里。哪些仓库才有资格被列出来 ——
+  能不能 push、私有仓库与 jsDelivr 的关系、翻页被截断 —— 是同一套规则，而 agent 读的那份 `--json`
+  列表必须遵守同样的规则。
+- **选错了是重问，不是报错返回。** 选择器跑在凭据已经落盘**之后**，所以为一个手误返回 `USAGE` 会让一次
+  已经完成的浏览器登录以失败收场，而"登录失败"最自然的反应就是再登一次 —— 为了修一个仓库列表而多铸一个
+  token。给三次机会，然后给出兜底命令。不该由用户负责的失败（列表拿不到，比如没网）出于同样的理由也只是
+  一条 note。
+- **`commands::prompt` 跟着那条命令一起删了。** 它把 EOF 当成"同意默认值"，这只对 `init` 那种"保持
+  当前配置"的字段是安全的；剩下的两个提示 —— 选择器和 `skill install` —— 都把 EOF 当成中止，因为两者
+  都要写东西。
+- **没有写权限的仓库被排除，但会报出数量。** 一个推不进去的仓库不是"选项"，而是一个之后才失败的选择。
+  但"我的仓库怎么不在里面"是更难回答的问题，所以数量要打出来。
 
 ### 拖拽上传整体删除，包括菜单栏图标落区
 
@@ -1334,6 +1540,7 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
   自动生成多平台发布包。
 
 [未发布]: https://github.com/tarnish233/gitpic/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.14.0...HEAD
 [0.14.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.0
 [0.13.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.2
 [0.13.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.1

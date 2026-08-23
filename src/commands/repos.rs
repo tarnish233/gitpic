@@ -1,0 +1,299 @@
+//! `gitpic repos` — which repositories this credential could upload to.
+//!
+//! Not quite "what does this user own": the answer is scope-limited, because a
+//! `public_repo` token is not shown private repositories at all. So this is already the
+//! set of *usable* targets — which is why a hand-typed `owner/repo` can be spelled
+//! perfectly and still 404. It is what a picker offers, and what a human can read before
+//! typing anything.
+//!
+//! It is also, in [`choose_target`], the picker itself — the only way a target reaches
+//! `config.toml` interactively now that `gitpic init` is gone.
+
+use super::prompt_opt;
+use crate::config::Config;
+use crate::error::{AppError, Result};
+use crate::github::{GitHub, RepoCandidate};
+use crate::output::Mode;
+use owo_colors::{OwoColorize, Stream};
+use serde::Serialize;
+
+/// Reachable two ways, and the message has to cover both: an account with no
+/// repositories at all, and — far likelier — a token whose scope hides them.
+/// `public_repo` is not shown private repositories, so "empty" and "all private" look
+/// identical from here.
+const NOTHING_TO_OFFER: &str = "no repositories are available to this credential.\n\
+     if your image host is a private repository, log in again with \
+     `gitpic auth login --scope repo` — the default `public_repo` scope cannot see \
+     private repositories at all.";
+
+/// What to do when the list cannot be used: the two routes that take a value directly.
+const SET_IT_BY_HAND: &str = "set the image host with `gitpic config set github.repo \
+     owner/name`, or export GITPIC_REPO=owner/name";
+
+#[derive(Serialize)]
+struct ReposReport<'a> {
+    ok: bool,
+    repos: &'a [RepoCandidate],
+    /// False when a listing hit its page ceiling. Present either way: a caller that
+    /// only ever saw `true` must not have to guess whether a short list is the whole
+    /// list.
+    complete: bool,
+}
+
+pub async fn run(mode: Mode) -> Result<u8> {
+    let token = crate::auth::token()?;
+    let (repos, complete) = GitHub::for_user(&token)?.repo_candidates().await?;
+
+    if mode.is_json() {
+        crate::output::print_json(&ReposReport {
+            ok: true,
+            repos: &repos,
+            complete,
+        });
+        return Ok(0);
+    }
+
+    if repos.is_empty() {
+        // Not an error: an authorised app with no repositories granted is a real and
+        // recoverable state, and the remedy is on GitHub rather than in gitpic.
+        if !matches!(mode, Mode::Quiet) {
+            crate::output::line(NOTHING_TO_OFFER);
+        }
+        return Ok(0);
+    }
+
+    for r in &repos {
+        // `owner/name` first on every line, so the whole output is pasteable into
+        // `gitpic config set github.repo …` with nothing to strip.
+        let spec = r.spec();
+        if matches!(mode, Mode::Quiet) {
+            crate::output::line(&spec);
+            continue;
+        }
+        let mut notes = vec![format!("branch {}", r.default_branch)];
+        if r.private {
+            // Worth saying next to the name: a private repo's `raw` links need a
+            // token the app does not hold, and jsDelivr cannot serve it at all.
+            notes.push("private".to_string());
+        }
+        if !r.can_push {
+            notes.push(
+                "read-only"
+                    .if_supports_color(Stream::Stdout, |t| t.red().to_string())
+                    .to_string(),
+            );
+        }
+        crate::output::line(&format!("{spec}  ({})", notes.join(", ")));
+    }
+    // Same rule as the rows above: `-q` promises one `owner/name` per line, and a
+    // `note:` line in that stream is a repository spec the caller will try to use.
+    if !complete && !matches!(mode, Mode::Quiet) {
+        // Only reachable on an account with more repositories than the page ceiling
+        // allows, so the way out is a value rather than a longer list.
+        crate::output::note(
+            "more repositories exist than were listed; if the one you want is missing, \
+             `gitpic config set github.repo owner/name` takes it directly",
+        );
+    }
+    Ok(0)
+}
+
+// ---------------------------------------------------------------- the picker
+
+/// How many unusable replies to re-ask before giving up.
+///
+/// A typo deserves another try: the alternative is ending a completed browser login
+/// with `USAGE`. An unbounded loop is not the answer either — a stdin that keeps
+/// producing the same unparseable line would spin forever — so the retries are counted.
+const MAX_TRIES: usize = 3;
+
+/// Offer the writable candidates as a numbered list and save the chosen one.
+///
+/// The interactive counterpart to [`run`], and what `gitpic auth login` ends with. It
+/// replaces `gitpic init`, which asked for `owner/name` as typed text and so invited
+/// three failures a list rules out: a misspelling that surfaces as a bare 404, a
+/// repository the credential cannot see, and a branch guessed as `main` when GitHub's
+/// default is `master`.
+///
+/// It lives here rather than in [`crate::commands::auth_cmd`] because the rules about
+/// which repositories may be offered at all — push access, the private/jsDelivr caveat,
+/// a truncated listing — belong to this module, and a second copy of them would drift
+/// from the `--json` listing that agents read.
+///
+/// Returns whether a config was written. Every reason for not writing one is reported
+/// from in here, along with what to do instead, because only this function knows which
+/// reason applied — and none of them is an error: the caller has just completed a
+/// browser login, and a target that could not be offered must not turn that into a
+/// failure the user would answer by logging in again.
+pub(crate) async fn choose_target(token: &str) -> Result<bool> {
+    let (all, complete) = GitHub::for_user(token)?.repo_candidates().await?;
+
+    // Only what can actually be uploaded to. A read-only repository in this list would
+    // be a choice that cannot work — the "accepted, then silently broken" shape this
+    // project refuses everywhere else — but the count is reported rather than swallowed,
+    // because "my repository is missing" is the harder question to answer.
+    let skipped = all.iter().filter(|r| !r.can_push).count();
+    let repos: Vec<RepoCandidate> = all.into_iter().filter(|r| r.can_push).collect();
+    if repos.is_empty() {
+        crate::output::line(NOTHING_TO_OFFER);
+        return Ok(false);
+    }
+
+    let mut cfg = Config::load()?;
+    let current = repos
+        .iter()
+        .position(|r| r.owner == cfg.github.owner && r.name == cfg.github.repo);
+
+    crate::output::line("which repository should gitpic upload to?\n");
+    let width = repos.iter().map(|r| r.spec().len()).max().unwrap_or(0);
+    for (i, r) in repos.iter().enumerate() {
+        let mut notes = vec![format!("branch {}", r.default_branch)];
+        if r.private {
+            // Worth saying next to the name rather than after the choice: jsDelivr
+            // serves only public repositories, so a private one needs `link_kind = raw`.
+            notes.push("private".to_string());
+        }
+        // Marks the one already configured, which is also the default — so a re-login
+        // that only meant to widen a scope costs one keystroke instead of a decision.
+        let marker = if Some(i) == current { "*" } else { " " };
+        crate::output::line(&format!(
+            "{marker} [{}] {:width$}  ({})",
+            i + 1,
+            r.spec(),
+            notes.join(", ")
+        ));
+    }
+    if skipped > 0 {
+        crate::output::line(&format!(
+            "\n  ({skipped} more you cannot push to, not listed)"
+        ));
+    }
+    if !complete {
+        crate::output::line("\n  (more repositories exist than were listed)");
+    }
+    crate::output::line("");
+
+    let default = current.map(|i| (i + 1).to_string()).unwrap_or_default();
+    let range = if repos.len() == 1 {
+        "1".to_string()
+    } else {
+        format!("1-{}", repos.len())
+    };
+    let Some(chosen) = ask(&format!("image host? [{range}]"), &default, repos.len())? else {
+        crate::output::line("");
+        crate::output::note(SET_IT_BY_HAND);
+        return Ok(false);
+    };
+    let repo = &repos[chosen];
+
+    cfg.github.owner = repo.owner.clone();
+    cfg.github.repo = repo.name.clone();
+    // GitHub's answer, not a guess. Typing this was how a repository whose default is
+    // `master` ended up configured for `main`, with every upload then 404ing on a ref
+    // that does not exist.
+    cfg.github.branch = repo.default_branch.clone();
+    // Checked before the write, never after: a value this file cannot hold must not
+    // reach disk under a "✓ saved", because every later command loads the file first
+    // and would then fail with `CONFIG_INVALID` — the next login included.
+    cfg.validate_input()?;
+    let path = cfg.save()?;
+
+    let tick = "\u{2713}".if_supports_color(Stream::Stdout, |t| t.green().to_string());
+    crate::output::line(&format!(
+        "\n{tick} {} on {} — saved to {}",
+        repo.spec(),
+        cfg.github.branch,
+        path.display()
+    ));
+    if repo.private && cfg.upload.link_kind == "cdn" {
+        crate::output::note(
+            "jsDelivr serves only public repositories. For a private image host, run \
+             `gitpic config set upload.link_kind raw`.",
+        );
+    }
+    Ok(true)
+}
+
+/// Read one choice, re-asking a mistyped reply rather than failing the caller over it.
+///
+/// `None` means the question went unanswered: EOF, or [`MAX_TRIES`] unusable replies.
+/// EOF is an abort and not a default — this writes a config file, and a closed stdin is
+/// not a choice. Same rule as `skill install`.
+fn ask(label: &str, default: &str, count: usize) -> Result<Option<usize>> {
+    for _ in 0..MAX_TRIES {
+        // Substitutes `default` for an empty line itself, so Enter keeps the repository
+        // already configured and only a *typed* answer can change it.
+        let Some(reply) = prompt_opt(label, default)? else {
+            return Ok(None);
+        };
+        match parse_choice(reply.trim(), count) {
+            Ok(i) => return Ok(Some(i)),
+            // Printed rather than returned: the reply is the user's to fix, and the
+            // caller has a credential on disk that this must not jeopardise.
+            Err(e) => crate::output::line(&format!("  {}", e.message)),
+        }
+    }
+    Ok(None)
+}
+
+/// Read one 1-based choice.
+///
+/// Split out so the off-by-one and the out-of-range message are testable without a
+/// terminal — the two mistakes a numbered prompt actually makes.
+fn parse_choice(reply: &str, count: usize) -> Result<usize> {
+    let n: usize = reply
+        .parse()
+        .map_err(|_| AppError::usage(format!("not a number: {reply:?}")))?;
+    if n == 0 || n > count {
+        return Err(AppError::usage(format!(
+            "pick a number between 1 and {count}, not {n}"
+        )));
+    }
+    Ok(n - 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ErrorCode;
+
+    #[test]
+    fn a_choice_is_one_based() {
+        assert_eq!(parse_choice("1", 3).unwrap(), 0);
+        assert_eq!(parse_choice("3", 3).unwrap(), 2);
+    }
+
+    #[test]
+    fn zero_and_past_the_end_are_refused_by_name() {
+        // `0` is the off-by-one a 1-based list invites, and it would index the wrong
+        // repository rather than fail if it were let through as `n - 1`.
+        for reply in ["0", "4", "99"] {
+            let err = parse_choice(reply, 3).expect_err("must fail");
+            assert_eq!(err.code, ErrorCode::Usage);
+            assert!(err.message.contains("1 and 3"), "{}", err.message);
+        }
+    }
+
+    #[test]
+    fn a_non_number_says_what_it_got() {
+        // Typing a repo name is the mistake this prompt invites, since that is what
+        // `gitpic init` used to ask for. The message has to show what was typed.
+        let err = parse_choice("owner/pics", 3).expect_err("must fail");
+        assert_eq!(err.code, ErrorCode::Usage);
+        assert!(err.message.contains("owner/pics"), "{}", err.message);
+    }
+
+    /// The picker runs after a credential is already on disk, so a reply the user could
+    /// simply retype must not come back as an error.
+    ///
+    /// `stdout_lost` is the only way to reach `ask` from a test without hanging on the
+    /// harness's own stdin, and it exercises the distinction that matters: a question
+    /// that was never *shown* still fails, because "asked and not answered"
+    /// (`Ok(None)`) and "could not ask" (`Err`) are not the same state.
+    #[test]
+    fn a_question_that_could_not_be_shown_still_fails() {
+        let _serialised = crate::output::stdout_lost_test_guard(true);
+        let err = ask("image host? [1-2]", "1", 2).expect_err("an unshown prompt must fail");
+        assert_eq!(err.code, ErrorCode::General, "{}", err.message);
+    }
+}

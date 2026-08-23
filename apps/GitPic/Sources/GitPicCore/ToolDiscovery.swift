@@ -1,39 +1,39 @@
 import Foundation
 
-/// Where the two binaries we depend on actually live.
+/// Where the `gitpic` binary actually lives.
 ///
 /// This type exists because of one measured fact: a Finder-launched `.app` gets
-/// `PATH=/usr/bin:/bin:/usr/sbin:/sbin` and nothing else. `gh` is not on it, and
-/// `src/auth.rs:49` looks `gh` up by bare name with no absolute-path fallback and
-/// no config key to override — so without explicit discovery every upload from a
-/// Finder-launched GUI fails with `CONFIG_MISSING`.
+/// `PATH=/usr/bin:/bin:/usr/sbin:/sbin` and nothing else, so nothing on a
+/// Homebrew or nix prefix can be found by name. `gitpic` ships inside the bundle
+/// and is therefore located by path, not by PATH — but the probe below still
+/// exists for `swift run` during development, where there is no bundle.
 ///
 /// Measuring this requires launching via Finder (`tell application "Finder" to
 /// open …`). Launching with `open(1)` propagates the caller's environment and
 /// shows a full PATH, which is a false negative.
+///
+/// It used to carry a `gh` location too. The CLI took its credential from
+/// `gh auth token`, so a Finder-launched GUI had to find `gh` and put it on the
+/// child's PATH or every upload failed with `CONFIG_MISSING`. `gitpic` now holds
+/// its own credential (`gitpic auth login`) and spawns nothing to get it, so
+/// there is no second tool to locate.
 public struct ToolPaths: Sendable, Equatable {
     public let gitpic: URL
-    /// `nil` means gh was not found; the GUI must route the user to install it
-    /// rather than let the upload fail with a collapsed error.
-    public let gh: URL?
 
-    /// PATH to hand the `gitpic` child so its own `Command::new("gh")` resolves.
-    public var childPATH: String {
-        let base = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-        guard let gh else { return base.joined(separator: ":") }
-        return ([gh.deletingLastPathComponent().path] + base).joined(separator: ":")
-    }
+    /// The PATH handed to the `gitpic` child.
+    ///
+    /// Set explicitly rather than inherited so the child's environment is the same
+    /// however the app was launched — a Finder launch and a `swift run` from a
+    /// terminal otherwise hand it two very different PATHs. The minimal Finder set is
+    /// enough: what `gitpic` may spawn is a platform opener (`/usr/bin/open`), and
+    /// only during `auth login`, which the app never invokes.
+    ///
+    /// `static`, because it no longer depends on anything discovery found. It was an
+    /// instance member while it had gh's directory to prepend.
+    public static let childPATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
 public enum ToolDiscovery {
-    /// Ordered candidates, cheapest first. The login-shell probe is last because
-    /// it costs a process spawn and shell startup.
-    static let ghCandidates = [
-        "/opt/homebrew/bin/gh",   // Apple Silicon Homebrew
-        "/usr/local/bin/gh",      // Intel Homebrew
-        "/run/current-system/sw/bin/gh",  // nix-darwin
-    ]
-
     /// `gitpic` ships inside the bundle, so it is never searched for on PATH.
     /// Falls back to a PATH lookup only for `swift run` during development,
     /// where there is no bundle.
@@ -49,15 +49,13 @@ public enum ToolDiscovery {
         return loginShellLookup("gitpic")
     }
 
-    public static func locateGH() -> URL? {
-        for p in ghCandidates where FileManager.default.isExecutableFile(atPath: p) {
-            return URL(fileURLWithPath: p)
-        }
-        return loginShellLookup("gh")
-    }
-
     /// Ask the user's login shell where a tool is. A login shell sources the
     /// user's profile, so this covers nix, asdf, and custom prefixes that no
+    /// Every measurement quoted here was taken while this probe was locating `gh`,
+    /// the second tool the app used to need. The tool name is a parameter and the
+    /// parse is unchanged, so the evidence still applies — it is left as recorded
+    /// rather than rewritten to name a tool it was never run against.
+    ///
     /// hardcoded list would catch. Verified to return `/opt/homebrew/bin/gh`
     /// even from a Finder-launched process whose own PATH lacks it.
     static func loginShellLookup(_ tool: String) -> URL? {
@@ -98,30 +96,29 @@ public enum ToolDiscovery {
     /// The blob is never trimmed and taken as one path. `-l` means the profile
     /// has already spoken on stdout — nvm/conda/rbenv init chatter, a motd,
     /// `fortune`, a stray `echo` in `.zprofile` — so joining it all tested
-    /// `"Using node v20.11.0\n/opt/homebrew/bin/gh"` as a filename, failed
-    /// `isExecutableFile`, and reported gh as missing. A noise line from
+    /// `"Using node v20.11.0\n/opt/homebrew/bin/gitpic"` as a filename, failed
+    /// `isExecutableFile`, and reported the tool as missing. A noise line from
     /// `command -v` must not be taken as the tool path; that is what this parse
     /// is for, on the machines the probe exists for: nix, asdf, a custom prefix,
-    /// anything `ghCandidates` does not list.
+    /// anything the hardcoded candidates do not list.
     ///
     /// Lines are read last-first, since `command -v` answers after the profile
     /// has finished talking, but position is never why a line is accepted. Each
-    /// candidate proves itself, in the same spirit as `GHProbe.account` below
-    /// anchoring on a full phrase rather than a bare word:
+    /// candidate proves itself, rather than being trusted for its position:
     ///
     /// - Its last component must be `tool`. `command -v` appends `/<tool>` to the
     ///   PATH entry it found, so a real answer always matches, while a noise line
     ///   naming some *other* real executable — a motd quoting `/bin/sh`, or a
     ///   stdout cut short when the timeout killed the shell — cannot come back as
-    ///   `gh` and then be spawned.
+    ///   the tool and then be spawned.
     /// - It must be absolute, or it would be resolved against this process's
     ///   working directory, which for a Finder-launched `.app` is `/`.
     /// - It must be an executable file, which is the actual proof.
     ///
     /// Passing all three means a real executable of that name exists at that
     /// path, so the answer holds however the shell exited. The non-paths
-    /// `command -v` also prints — `gh` for a function, `alias gh='…'` for an
-    /// alias — fail, which is correct: neither can be spawned as a child.
+    /// `command -v` also prints — the bare name for a function, `alias x='…'` for
+    /// an alias — fail, which is correct: neither can be spawned as a child.
     static func commandVPath(in stdout: String, tool: String) -> URL? {
         for line in stdout.split(whereSeparator: \.isNewline).reversed() {
             let candidate = line.trimmingCharacters(in: .whitespaces)
@@ -136,72 +133,6 @@ public enum ToolDiscovery {
 
     public static func resolve(bundleResourceURL: URL?) -> ToolPaths? {
         guard let gitpic = locateGitpic(bundleResourceURL: bundleResourceURL) else { return nil }
-        return ToolPaths(gitpic: gitpic, gh: locateGH())
+        return ToolPaths(gitpic: gitpic)
     }
-}
-
-/// Why `gitpic` could not get a credential — the distinction the CLI throws away.
-///
-/// `src/auth.rs` maps "gh missing", "gh not logged in", and "gh exited non-zero"
-/// all to `CONFIG_MISSING` with one message, and discards gh's stderr
-/// (`Stdio::null()`). First-run guidance needs the first two told apart, so the
-/// GUI runs `gh auth status` itself, where stderr survives.
-public enum GHStatus: Sendable, Equatable {
-    case notInstalled
-    case notLoggedIn(detail: String)
-    case ready(account: String?)
-    case failed(detail: String)
-}
-
-public enum GHProbe {
-    public static func status(gh: URL?) -> GHStatus {
-        guard let gh else { return .notInstalled }
-        let out: ProcessOutcome
-        do {
-            out = try ChildProcess.run(
-                executable: gh,
-                args: ["auth", "status", "--hostname", "github.com"],
-                timeout: 8)
-        } catch {
-            return .notInstalled
-        }
-        if out.timedOut {
-            return .failed(detail: "gh auth status timed out")
-        }
-        let text = [out.stdout, out.stderr].compactMap { String(data: $0, encoding: .utf8) }
-            .joined()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if out.status == 0 {
-            return .ready(account: Self.account(in: text))
-        }
-        // gh says "not logged in" / "not logged into any hosts" on stderr.
-        let lowered = text.lowercased()
-        if lowered.contains("not logged in") || lowered.contains("no accounts") {
-            return .notLoggedIn(detail: text)
-        }
-        return .failed(detail: text.isEmpty ? "gh auth status exited \(out.status)" : text)
-    }
-
-    /// Pulls the account out of gh's prose. Best-effort by design: this is a
-    /// display nicety, never a correctness input.
-    ///
-    /// Anchored on gh's full phrasing — "Logged in to github.com account <login>"
-    /// — rather than on the word "account" alone. Searching for the bare word
-    /// matches any sentence containing it and returns whatever follows, which
-    /// yields a plausible-looking but fabricated login.
-    static func account(in text: String) -> String? {
-        for line in text.split(whereSeparator: \.isNewline) {
-            guard line.contains("Logged in to"),
-                  let r = line.range(of: "account ") else { continue }
-            let token = line[r.upperBound...]
-                .prefix(while: { !$0.isWhitespace })
-                .trimmingCharacters(in: .whitespaces)
-            if let t = token.nilIfEmpty { return t }
-        }
-        return nil
-    }
-}
-
-extension String {
-    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

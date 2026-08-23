@@ -65,13 +65,9 @@ struct AboutPane: View {
                     Text(model.tools?.gitpic.path ?? "未找到")
                         .font(.caption).textSelection(.enabled)
                 }
-                LabeledContent("gh") {
-                    Text(model.tools?.gh?.path ?? "未找到")
-                        .font(.caption).textSelection(.enabled)
-                }
             }
             Section("项目") {
-                Text("CLI 与 App 同仓库、同版本发布，凭据只经过 GitHub CLI，配置文件里不存任何密钥。")
+                Text("CLI 与 App 同仓库、同版本发布，凭据由 `gitpic auth login` 存在单独的 auth.toml 里，配置文件里不存任何密钥。")
                     .font(.caption).foregroundStyle(.secondary)
                 Link("github.com/tarnish233/gitpic",
                      destination: URL(string: "https://github.com/tarnish233/gitpic")!)

@@ -19,7 +19,7 @@
   "interface": {
     "displayName": "Gitpic",
     "shortDescription": "Upload images to a GitHub image host and get a Markdown link.",
-    "longDescription": "gitpic uploads a local or clipboard image to a GitHub repository used as an image host and returns a Markdown link. Requires the gitpic CLI and GitHub CLI authenticated with gh auth login.",
+    "longDescription": "gitpic uploads a local or clipboard image to a GitHub repository used as an image host and returns a Markdown link. Requires the gitpic CLI, authenticated with gitpic auth login.",
     "developerName": "tarnish233",
     "category": "Productivity",
     "capabilities": [

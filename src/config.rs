@@ -301,54 +301,9 @@ impl Config {
     }
 
     fn save_to(&self, path: &Path) -> Result<PathBuf> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| AppError::general(format!("mkdir: {e}")))?;
-            // The directory is created 0755 by `create_dir_all`; tighten it so the
-            // config cannot be found by listing, not just by reading.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-            }
-        }
         let text = toml::to_string_pretty(self)
             .map_err(|e| AppError::general(format!("serialize: {e}")))?;
-
-        let temp_path = temporary_path(path);
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-
-        let write_result = (|| -> std::io::Result<()> {
-            let mut file = options.open(&temp_path)?;
-            file.write_all(text.as_bytes())?;
-            file.flush()?;
-            file.sync_all()?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                file.set_permissions(fs::Permissions::from_mode(0o600))?;
-            }
-            drop(file);
-
-            // Replaces an existing destination on Unix and on Windows
-            // (`MoveFileExW(MOVEFILE_REPLACE_EXISTING)`). Unlinking first on
-            // Windows left a window with no `config.toml`; `Config::load`
-            // treats that as defaults.
-            fs::rename(&temp_path, path)
-        })();
-
-        if let Err(error) = write_result {
-            let _ = fs::remove_file(&temp_path);
-            return Err(AppError::general(format!("write config: {error}")));
-        }
-
+        write_private_atomic(path, &text, "config")?;
         Ok(path.to_path_buf())
     }
 
@@ -421,42 +376,81 @@ impl Config {
 
     /// Ensure the upload target is configured.
     ///
-    /// Named for what it checks: credentials are resolved separately by
-    /// `crate::auth`, which may have to run `gh`.
+    /// Named for what it checks: the credential is resolved separately by
+    /// `crate::auth`, which reads its own file.
     pub fn require_target(&self) -> Result<()> {
         if self.github.owner.is_empty() || self.github.repo.is_empty() {
+            // Never "log in", even though `gitpic auth login` is where the picker
+            // lives: this fires just as often for someone already logged in who
+            // skipped it, and telling them to re-authorise would mint a second token
+            // to fix a config file. `repos` is the honest first step either way — it
+            // resolves the credential itself, so an unauthenticated user gets the
+            // login instruction from the command that actually needs one.
             return Err(AppError::config_missing(
-                "missing target repo (set GITPIC_REPO=owner/name or run `gitpic init`)",
+                "missing target repo: `gitpic repos` lists your options and \
+                 `gitpic config set github.repo owner/name` sets one \
+                 (GITPIC_REPO=owner/name works too)",
             ));
         }
         Ok(())
     }
+}
 
-    /// [`Config::require_target`] asked of the configuration a *later* command
-    /// will resolve — this file plus the environment.
-    ///
-    /// For a writer, the file on its own is the wrong thing to judge. `upload`
-    /// applies the environment before it calls `require_target`, so `GITPIC_OWNER=me`
-    /// with `repo = "pics"` is a working setup; `init` checking only what it is
-    /// about to write refused it, contradicting the very case its repo-prompt
-    /// default was written to support. Reading is unaffected: nothing here is
-    /// stored, so a variable never gets baked into the file.
-    pub(crate) fn require_effective_target(&self) -> Result<()> {
-        self.require_effective_target_with(|key| std::env::var(key).ok())
+/// Write `text` to `path` privately and atomically: a 0700 parent, a 0600
+/// same-directory temp file, then a rename over the destination.
+///
+/// Shared by `config.toml` and by the credential file [`crate::auth`] writes, which
+/// is why it is one function rather than two copies of it. The config file is merely
+/// private; `auth.toml` holds a GitHub token, so "0600 from before the first byte is
+/// in it" and "never observable half-written" are properties that must not be
+/// re-derived per call site.
+pub(crate) fn write_private_atomic(path: &Path, text: &str, what: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| AppError::general(format!("mkdir: {e}")))?;
+        // The directory is created 0755 by `create_dir_all`; tighten it so the
+        // file cannot be found by listing, not just by reading.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
     }
 
-    /// Same split as [`Config::apply_env_with`], for the same reason: the rule is
-    /// testable without mutating the environment out from under a parallel test.
-    fn require_effective_target_with(&self, get: impl Fn(&str) -> Option<String>) -> Result<()> {
-        let mut effective = self.clone();
-        // A variable this rejects is deliberately not fatal here. `init` is the way
-        // *out* of a broken setup and must stay able to write a good file while
-        // `GITPIC_LINK` is a typo; whatever the environment did contribute is still
-        // in `effective`, and the command that resolves it for real is the one that
-        // reports the rest, with a message naming the field.
-        let _ = effective.apply_env_with(get);
-        effective.require_target()
+    let temp_path = temporary_path(path);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = options.open(&temp_path)?;
+        file.write_all(text.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        drop(file);
+
+        // Replaces an existing destination on Unix and on Windows
+        // (`MoveFileExW(MOVEFILE_REPLACE_EXISTING)`). Unlinking first on
+        // Windows left a window with no `config.toml`; `Config::load`
+        // treats that as defaults.
+        fs::rename(&temp_path, path)
+    })();
+
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(AppError::general(format!("write {what}: {error}")));
+    }
+
+    Ok(())
 }
 
 fn temporary_path(path: &Path) -> PathBuf {
@@ -685,66 +679,6 @@ mod tests {
             .apply_env_with(env_of(&[("GITPIC_REPO", " a/b/c ")]))
             .expect_err("must be rejected");
         assert_eq!(err.code, ErrorCode::Usage);
-    }
-
-    #[test]
-    fn a_target_the_environment_completes_is_usable() {
-        // Regression: `init` judged the file it was about to write, and refused a
-        // bare `pics` answer under GITPIC_OWNER — the case its own repo-prompt
-        // default was written for, and one `upload` accepts because it applies the
-        // environment before `require_target`.
-        let mut cfg = Config::default();
-        cfg.set_repo_spec("pics").unwrap();
-        assert_eq!(
-            cfg.require_target().unwrap_err().code,
-            ErrorCode::ConfigMissing,
-            "the file alone is half-configured"
-        );
-        cfg.require_effective_target_with(env_of(&[("GITPIC_OWNER", "me")]))
-            .expect("the environment supplies the owner");
-        // Nothing was stored, so `init` cannot bake a variable into the file.
-        assert_eq!(cfg.github.owner, "");
-    }
-
-    #[test]
-    fn a_half_configured_target_is_still_refused_with_an_empty_environment() {
-        // The check `init` needs on `owner/` and on a bare name with no owner
-        // anywhere: unusable is unusable, whichever half is missing.
-        for spec in ["owner/", "pics"] {
-            let mut cfg = Config::default();
-            cfg.set_repo_spec(spec).unwrap();
-            assert_eq!(
-                cfg.require_effective_target_with(env_of(&[]))
-                    .unwrap_err()
-                    .code,
-                ErrorCode::ConfigMissing,
-                "for {spec:?}"
-            );
-        }
-        let mut cfg = Config::default();
-        cfg.set_repo_spec("owner/pics").unwrap();
-        cfg.require_effective_target_with(env_of(&[]))
-            .expect("a complete target needs no environment");
-    }
-
-    #[test]
-    fn a_broken_variable_does_not_block_a_writer_from_saving_a_good_file() {
-        // `init` is the way out of a bad setup. GITPIC_LINK=raw2 is a usage error
-        // wherever the environment is really applied, but it must not turn into
-        // "a target repo is required" and leave the user with no way to write one.
-        let mut cfg = Config::default();
-        cfg.set_repo_spec("owner/pics").unwrap();
-        cfg.require_effective_target_with(env_of(&[("GITPIC_LINK", "raw2")]))
-            .expect("a broken variable is the next command's report, not init's");
-        // Same for the variable that would have supplied the missing half: it is
-        // applied before the validation that rejects it, so the target still counts.
-        let mut cfg = Config::default();
-        cfg.set_repo_spec("pics").unwrap();
-        cfg.require_effective_target_with(env_of(&[
-            ("GITPIC_OWNER", "me"),
-            ("GITPIC_LINK", "raw2"),
-        ]))
-        .expect("the owner still arrived");
     }
 
     #[test]

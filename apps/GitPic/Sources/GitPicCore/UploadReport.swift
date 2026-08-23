@@ -67,13 +67,24 @@ public enum UploadPresentation {
     /// `results.isEmpty` with `ok: true` is not treated as success: nothing was
     /// uploaded, so there is nothing to copy, and copying an empty string would
     /// replace whatever the user had on the clipboard with nothing.
+    /// The one-line banner for a run that produced no links at all.
+    ///
+    /// Shared with `GitPicApp.reportFailure` so the two cannot drift. It carries
+    /// `message` and not just `code` on purpose: for `CONFIG_MISSING` the message
+    /// *is* the remedy ("run `gitpic auth login`"), and a banner reading only
+    /// "CONFIG_MISSING：" tells the user nothing they can act on. That is exactly what
+    /// the GUI's old `gh` re-probe existed to paper over, and there is no re-probe to
+    /// fall back on now.
+    public static func failureSummary(_ failure: ErrorBody?) -> String {
+        failure.map { "\($0.code)：\($0.message)" } ?? "上传没有返回任何结果"
+    }
+
     public static func report(results: [ItemResult],
                               failure: ErrorBody?,
                               clipboard: ClipboardOutcome,
                               form: LinkForm) -> UploadReport {
         guard !results.isEmpty else {
-            return .failed(summary: failure.map { "\($0.code)：\($0.message)" }
-                                    ?? "上传没有返回任何结果")
+            return .failed(summary: failureSummary(failure))
         }
         // Partial success is a first-class outcome of this CLI and must not be
         // flattened into either "ok" or "failed": the links that did land are real.

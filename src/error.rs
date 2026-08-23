@@ -27,7 +27,7 @@ pub enum ErrorCode {
     /// the config file exists but cannot be used (bad syntax, unknown key)
     ///
     /// Distinct from `ConfigMissing`: that one means "nothing is configured yet"
-    /// and its remedy is `gitpic init` / `gh auth login`, which would be the
+    /// and its remedy is `gitpic auth login` / `gitpic config set`, which would be the
     /// wrong advice — and for an agent, a loop — when the real problem is a typo
     /// in a file that is already there. The remedy here is to edit that file, so
     /// the message carries its path.

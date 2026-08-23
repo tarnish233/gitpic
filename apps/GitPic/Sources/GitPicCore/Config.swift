@@ -62,7 +62,7 @@ public enum ConfigFailure: Sendable, Equatable {
     /// rename fixes. Every other code — a `gitpic` that would not spawn, output
     /// that was not an envelope — is about something other than the file, and
     /// renaming it would destroy a working config to fix nothing.
-    public var isFileUnusable: Bool { code == "CONFIG_INVALID" }
+    public var isFileUnusable: Bool { code.flatMap(GitpicErrorCode.init(wire:)) == .configInvalid }
 
     public var headline: String {
         isFileUnusable ? "配置文件无法解析" : "读取配置失败"
