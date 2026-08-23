@@ -369,11 +369,32 @@ fn read_files(files: &[std::path::PathBuf]) -> Result<Vec<InputImage>> {
         if bytes.is_empty() {
             return Err(AppError::usage(format!("{} is empty", f.display())));
         }
-        let name = f
+        let original = f
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("image.png")
             .to_string();
+        // Through `display_name`, like every other input path. This one took the
+        // filename verbatim, so the rule `display_name`'s doc states — "the stem is the
+        // user's, the extension is the content's" — held for stdin, for the clipboard,
+        // and for a file *only when `--name` was given*. `cp photo.jpg photo.png &&
+        // gitpic photo.png` published JPEG bytes at a `.png` path, which GitHub raw and
+        // jsDelivr both serve as `image/png`, while the same file with `--name photo`
+        // published `.jpg`: same bytes, same intent, opposite content type, decided by
+        // whether a flag happened to be passed.
+        //
+        // `ExtFallback::File` puts the sniffed extension first and the original second,
+        // so a format nothing can sniff — an SVG — still keeps the extension it arrived
+        // with, and a non-UTF-8 filename no longer publishes JPEG bytes as
+        // `image.png`. `None` for `explicit`: `--name` is applied afterwards by
+        // `apply_explicit_name`, which is also the only path that can refuse it.
+        let name = display_name(
+            None,
+            &bytes,
+            ExtFallback::File {
+                original: &original,
+            },
+        )?;
         out.push(InputImage { name, bytes });
     }
     Ok(out)
@@ -535,6 +556,50 @@ fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: a file upload took the filename verbatim, so the extension was the
+    /// one the file claimed rather than the one its bytes are.
+    #[test]
+    fn a_file_is_named_for_what_its_bytes_are_not_what_it_claims() {
+        // A one-pixel PNG, and the same bytes under a lying name.
+        let png = {
+            let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]));
+            let mut out = Vec::new();
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                .expect("encode");
+            out
+        };
+        let dir = std::env::temp_dir().join(format!("gitpic-sniff-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let lying = dir.join("photo.jpg");
+        std::fs::write(&lying, &png).expect("write");
+
+        let read = read_files(std::slice::from_ref(&lying)).expect("reads");
+        assert_eq!(
+            read[0].name, "photo.png",
+            "PNG bytes must not be published at a .jpg path"
+        );
+
+        // The consequence worth pinning, because it is what a user notices: a real
+        // JPEG named `.jpeg` now renders `.jpg`, since that is the extension the
+        // sniffer reports for the format. New uploads of such a file therefore land at
+        // a different remote path than before and will not dedup against the copy
+        // already there — one extra blob, once, per file.
+        let jpeg = dir.join("holiday.jpeg");
+        std::fs::write(&jpeg, jpeg_bytes()).expect("write");
+        let read = read_files(&[jpeg]).expect("reads");
+        assert_eq!(read[0].name, "holiday.jpg");
+
+        // The other half of the rule: a format nothing can sniff keeps the extension it
+        // arrived with, rather than becoming an error or a guess.
+        let svg = dir.join("logo.svg");
+        std::fs::write(&svg, b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>").expect("write");
+        let read = read_files(&[svg]).expect("reads");
+        assert_eq!(read[0].name, "logo.svg");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use clap::Parser;
 
     fn parse(args: &[&str]) -> Cli {
