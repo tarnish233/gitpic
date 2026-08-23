@@ -111,7 +111,12 @@ not settle it — read `error.message` too:
 `detail` carries the same text as `error.message` either way.
 
 The two GitHub checks are probed independently — and only when `config_ok` is true, so
-read `config_ok` first. If
+read `config_ok` first. When they did not run at all, `token_valid` and `repo_writable`
+are **`null`**, not `false`: that is the state of a machine that has logged in but not yet
+chosen a repository, and `false` there was a claim about a credential nothing had looked
+at — `gitpic auth status --json` on that same machine reports it working. `null` is not
+`true`, so requiring `true` above is unaffected; what changes is that you must not read
+`token_valid: null` as a reason to send the user to log in again. If
 `token_valid` is false **but `repo_writable` is true** and `error.code` is
 `NETWORK`, the credential is fine and GitHub's `/user` endpoint — which uploads
 never call — is simply unreachable. Retry; do not send the user to
@@ -124,6 +129,15 @@ set. It is the usual explanation when an upload is nevertheless refused with
 `PERMISSION_DENIED` or a 422 after every preflight check passed — if that
 happens, say so rather than retrying. A 409 ref conflict is `NETWORK` (5):
 retry once, then report.
+
+`detail` also carries caveats that are not failures, joined by `; ` when there is more
+than one. Two are worth acting on: a **private** repository with `upload.link_kind = "cdn"`
+means every upload succeeds and every link 404s, since jsDelivr serves only public
+repositories — the fix is `gitpic config set upload.link_kind raw`. And `link_kind = "cdn"`
+with a `github.branch` containing `/` is not a caveat but a hard `USAGE` failure, because
+jsDelivr cannot tell that branch apart from the file path: `doctor` now reports it with the
+same code and message the upload itself would, rather than reporting a healthy setup for a
+configuration in which no upload can run.
 
 There is one credential source, so the report carries no `token_source` field: a
 credential either works (`token_valid: true`) or the user has not run `gitpic auth login`.

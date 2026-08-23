@@ -99,9 +99,9 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
 
     cfg.require_target()?;
 
-    let kind = u.link.unwrap_or_else(|| {
-        link::parse_link_kind_strict(&cfg.upload.link_kind).unwrap_or(crate::cli::LinkKind::Cdn)
-    });
+    let kind = u
+        .link
+        .unwrap_or_else(|| link::effective_link_kind(&cfg.upload.link_kind));
     // Deliberately ahead of `auth::token` and every PUT: nothing may be committed
     // for a link this cannot produce.
     reject_dead_cdn_link(kind, &cfg.github.branch)?;
@@ -280,7 +280,7 @@ fn classify(failure: Option<AppError>, uploaded: usize) -> Report {
 ///
 /// Split out of `run` so it can be tested at all — `run` past this point needs a
 /// token and the network.
-fn reject_dead_cdn_link(kind: LinkKind, branch: &str) -> Result<()> {
+pub(crate) fn reject_dead_cdn_link(kind: LinkKind, branch: &str) -> Result<()> {
     if link::cdn_branch_is_ambiguous(kind, branch) {
         return Err(AppError::usage(format!(
             "branch {branch:?} contains '/', which jsDelivr cannot tell apart from the \

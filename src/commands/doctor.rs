@@ -10,10 +10,24 @@ use serde::Serialize;
 struct DoctorReport {
     ok: bool,
     config_ok: bool,
-    token_valid: bool,
+    /// `null` when nothing was checked, which is not the same claim as `false`.
+    ///
+    /// The probes are gated on `config_ok`, but only two of the three need a target —
+    /// so on a machine that has logged in and not yet chosen a repository, `/user` was
+    /// never called and `token_valid: false` was reported for a credential nobody had
+    /// looked at. `gitpic auth status` on that same machine says the credential is
+    /// fine, and the remedy a reader derives from `✗ token valid` is "log in again",
+    /// which is exactly what `config.rs` goes out of its way to avoid suggesting —
+    /// it mints a second token to fix a config file.
+    ///
+    /// `false` still means a credential that was resolved and rejected, or one that
+    /// could not be resolved at all. Agents keyed on `require token_valid == true` are
+    /// unaffected: `null` is not `true`.
+    token_valid: Option<bool>,
     /// Repo push permission **and** the target branch existing. Both are needed:
     /// a push-capable token still cannot write to a ref that is not there.
-    repo_writable: bool,
+    /// `null` for the same reason as [`DoctorReport::token_valid`].
+    repo_writable: Option<bool>,
     /// Whether GitHub reports the target branch protected. `true` does not mean an
     /// upload will fail — the rules may permit this account — but it is the usual
     /// explanation when one does after every other check passed.
@@ -76,25 +90,53 @@ struct Probed {
     /// `/user`: `Ok(login)` when the credential is accepted. `None` when the probe
     /// never ran — no credential, or nothing configured to probe against.
     user: Option<Result<String>>,
-    /// `/repos/{owner}/{repo}`: `Ok(push_or_admin)`. `None` as above.
-    repo: Option<Result<bool>>,
+    /// `/repos/{owner}/{repo}`. `None` as above.
+    repo: Option<Result<RepoFacts>>,
     /// `/repos/{owner}/{repo}/branches/{branch}`. `None` as above.
     branch: Option<Result<Branch>>,
     /// A failure that prevented probing at all: no credential, or no client.
     setup_err: Option<AppError>,
+    /// Whether `upload.link_kind` is `cdn`, i.e. whether jsDelivr has to be able to
+    /// serve what is uploaded for the emitted link to work.
+    cdn: bool,
+    /// The upload path's own pre-flight refusal, if the configuration would trip it.
+    ///
+    /// `doctor` never read `cfg.upload.*` at all, and `upload.rs` refuses `cdn` plus a
+    /// branch containing `/` as `USAGE` *before* the credential is resolved and before
+    /// any request. So a repository whose default branch is `release/v1` — which the
+    /// `repos` picker writes verbatim, and which `Config::validate` has no reason to
+    /// reject — reported `✓ config present / ✓ token valid / ✓ repo writable`, exit 0,
+    /// while every single upload exited 2 having sent nothing. That is the inversion
+    /// this module exists to prevent.
+    dead_cdn: Option<AppError>,
+}
+
+/// What the repository probe found.
+///
+/// Two facts rather than one bool: `private` decides whether a `cdn` link can ever
+/// resolve, and it arrives on the same response as the permissions.
+#[derive(Debug, Clone, Copy)]
+struct RepoFacts {
+    pushable: bool,
+    private: bool,
 }
 
 /// Reduce gathered facts to the report body and the process exit code.
 fn summarize(p: Probed) -> (DoctorReport, u8) {
-    let mut token_valid = false;
-    let mut push_ok = false;
+    // `None` until a probe answers: see `DoctorReport::token_valid`.
+    let mut token_valid: Option<bool> = None;
+    let mut push_ok: Option<bool> = None;
+    let mut private = false;
     let mut login = None;
     // Code and message travel together, in the type that already pairs them.
     // Holding them in two loose `Option`s is what let the synthesised
     // PERMISSION_DENIED below end up with a code and no message at all.
+    // Asked before `failure` takes ownership below.
+    let credential_unresolved = p.setup_err.is_some();
     let mut failure: Option<AppError> = p.setup_err;
-    // Worth reporting but not a failure, so it must not reach the exit status.
-    let mut caveat: Option<String> = None;
+    // Worth reporting but not failures, so they must not reach the exit status. A list
+    // because there are now two, and a run can be in both states at once.
+    let mut caveats: Vec<String> = Vec::new();
 
     // Synthesised up front so a missing branch can compete with the probe errors
     // on equal footing: it is a definite, actionable answer, not a "could not
@@ -106,6 +148,15 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
     let mut protected = false;
     let mut branch_present = false;
 
+    // A credential that could not be resolved at all is a definite `false`, wherever
+    // that was discovered: `setup_err` *is* an answer about the credential, and nothing
+    // more needs asking. What stays `None` is the other case — a credential that was
+    // resolved fine and then never used, because there was no target to use it against.
+    if credential_unresolved {
+        token_valid = Some(false);
+        push_ok = Some(false);
+    }
+
     if !p.config_ok {
         // An unconfigured target outranks everything else: it is the first thing
         // the user has to fix, and its remedy is the one they can act on.
@@ -116,7 +167,7 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
     } else {
         let user_err = match &p.user {
             Some(Ok(name)) => {
-                token_valid = true;
+                token_valid = Some(true);
                 login = Some(name.clone());
                 None
             }
@@ -124,8 +175,9 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
             None => None,
         };
         let repo_err = match &p.repo {
-            Some(Ok(allowed)) => {
-                push_ok = *allowed;
+            Some(Ok(facts)) => {
+                push_ok = Some(facts.pushable);
+                private = facts.private;
                 None
             }
             Some(Err(e)) => Some(e),
@@ -141,14 +193,37 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
             Some(Err(e)) => Some(e),
             None => None,
         };
+        if p.user.is_some() && token_valid.is_none() {
+            token_valid = Some(false);
+        }
+        if p.repo.is_some() && push_ok.is_none() {
+            push_ok = Some(false);
+        }
         let worst = more_actionable(more_actionable(user_err, repo_err), branch_err);
-        if let Some(e) = worst {
+        // The upload path's pre-flight refusal outranks every probe: it stops the
+        // upload before the network is touched at all, so whatever a probe found is
+        // downstream of a run that cannot start.
+        if let Some(e) = &p.dead_cdn {
             failure = Some(AppError::new(e.code, e.message.clone()));
-        } else if protected {
+        } else if let Some(e) = worst {
+            failure = Some(AppError::new(e.code, e.message.clone()));
+        }
+        // Caveats are independent of the failure and of each other, so they are
+        // collected rather than chosen between.
+        if private && p.cdn {
+            // Not a failure: the upload really does succeed. It is the *link* that is
+            // dead, which is worse than an error in one way — nothing reports it.
+            caveats.push(
+                "the repository is private and `upload.link_kind` is \"cdn\", so jsDelivr \
+                 cannot serve these links; `gitpic config set upload.link_kind raw`"
+                    .into(),
+            );
+        }
+        if protected {
             // Not a failure: the rules may well permit this account. Worth saying,
             // because it is the usual reason an upload 409/422s after every check
             // above came back clean.
-            caveat = Some(
+            caveats.push(
                 "target branch is protected; an upload may still be refused by its rules".into(),
             );
         }
@@ -157,9 +232,15 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
     // Repo-level push permission is not the same claim as "the ref an upload
     // targets can be written". A push-capable token against a branch that does not
     // exist still fails the Contents API, so both have to hold.
-    let repo_writable = push_ok && branch_present;
+    // `None` propagates: "may it push" is unanswerable when nobody asked.
+    let repo_writable = push_ok.map(|allowed| allowed && branch_present);
 
-    let ok = p.config_ok && token_valid && repo_writable;
+    // A dead `cdn` link is counted here, or `ok: true` could stand beside a failure and
+    // the one-value invariant below would not hold.
+    let ok = p.config_ok
+        && token_valid == Some(true)
+        && repo_writable == Some(true)
+        && p.dead_cdn.is_none();
 
     // One value decides all three of `ok`, the exit status and `error`, so a report
     // can no longer claim one thing and exit another. The fallback covers the run
@@ -177,7 +258,10 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
     let exit = failure.as_ref().map_or(0, |e| e.code.exit_code());
     // `detail` keeps its meaning — the one human-readable note — which is the
     // failure's message whenever there is one, and the caveat otherwise.
-    let detail = failure.as_ref().map(|e| e.message.clone()).or(caveat);
+    let detail = failure
+        .as_ref()
+        .map(|e| e.message.clone())
+        .or_else(|| (!caveats.is_empty()).then(|| caveats.join("; ")));
     let error = failure.map(|e| ErrorBody::new(e.code.as_str(), &e.message));
 
     (
@@ -229,9 +313,10 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
                     let (who, info, br) =
                         tokio::join!(gh.whoami(), gh.repo_info(), gh.branch_info());
                     user = Some(who);
-                    repo = Some(
-                        info.map(|i| i.permissions.map(|p| p.push || p.admin).unwrap_or(false)),
-                    );
+                    repo = Some(info.map(|i| RepoFacts {
+                        pushable: i.permissions.map(|p| p.push || p.admin).unwrap_or(false),
+                        private: i.private,
+                    }));
                     branch = Some(br.map(|b| match b {
                         Some(b) => Branch::Present {
                             protected: b.protected,
@@ -244,12 +329,18 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
         }
     }
 
+    // Read here rather than in `summarize`, which is deliberately free of `Config`:
+    // this is the same judgement the upload path makes before it does anything, asked
+    // of the same two values.
+    let kind = crate::link::effective_link_kind(&cfg.upload.link_kind);
     let (report, exit) = summarize(Probed {
         config_ok,
         user,
         repo,
         branch,
         setup_err,
+        cdn: matches!(kind, crate::cli::LinkKind::Cdn),
+        dead_cdn: crate::commands::upload::reject_dead_cdn_link(kind, &cfg.github.branch).err(),
     });
 
     if mode.is_json() {
@@ -261,7 +352,7 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
         ));
         crate::output::line(&format!(
             "{} token valid{}",
-            crate::output::mark(report.token_valid),
+            crate::output::mark_maybe(report.token_valid),
             report
                 .login
                 .as_ref()
@@ -270,7 +361,7 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
         ));
         crate::output::line(&format!(
             "{} repo writable{}",
-            crate::output::mark(report.repo_writable),
+            crate::output::mark_maybe(report.repo_writable),
             if report.branch_protected {
                 " (branch protected)"
             } else {
@@ -357,9 +448,16 @@ mod tests {
         Probed {
             config_ok: true,
             user: Some(user),
-            repo: Some(repo),
+            // Takes the push permission alone, which is what every test here is
+            // about; the private-plus-cdn pair has its own test below.
+            repo: Some(repo.map(|pushable| RepoFacts {
+                pushable,
+                private: false,
+            })),
             branch: Some(Ok(Branch::Present { protected: false })),
             setup_err: None,
+            cdn: false,
+            dead_cdn: None,
         }
     }
 
@@ -370,9 +468,12 @@ mod tests {
         // split, `repo_writable` came back false and was indistinguishable from a
         // dead credential.
         let (r, exit) = summarize(probed(Err(AppError::network("503")), Ok(true)));
-        assert!(r.repo_writable, "the repo answered, so say so");
         assert!(
-            !r.token_valid,
+            r.repo_writable == Some(true),
+            "the repo answered, so say so"
+        );
+        assert!(
+            r.token_valid != Some(true),
             "/user did not answer, so do not claim it did"
         );
         assert!(!r.ok);
@@ -382,7 +483,9 @@ mod tests {
     #[test]
     fn a_healthy_run_is_ok_and_exits_zero() {
         let (r, exit) = summarize(probed(Ok("tarnish233".into()), Ok(true)));
-        assert!(r.ok && r.config_ok && r.token_valid && r.repo_writable);
+        assert!(
+            r.ok && r.config_ok && r.token_valid == Some(true) && r.repo_writable == Some(true)
+        );
         assert_eq!(r.login.as_deref(), Some("tarnish233"));
         assert_eq!(exit, 0);
         assert!(r.detail.is_none(), "nothing to note on a clean run");
@@ -396,7 +499,7 @@ mod tests {
             Err(AppError::network("503")),
             Err(AppError::auth("bad credentials")),
         ));
-        assert!(!r.token_valid && !r.repo_writable);
+        assert!(r.token_valid != Some(true) && r.repo_writable != Some(true));
         assert_eq!(exit, ErrorCode::AuthFailed.exit_code());
     }
 
@@ -407,7 +510,7 @@ mod tests {
         // carry neither `error` nor `detail`, which left the exit status as the only
         // thing that said why `repo_writable` was false.
         let (r, exit) = summarize(probed(Ok("someone".into()), Ok(false)));
-        assert!(r.token_valid && !r.repo_writable && !r.ok);
+        assert!(r.token_valid == Some(true) && r.repo_writable != Some(true) && !r.ok);
         assert_eq!(exit, ErrorCode::PermissionDenied.exit_code());
         assert_eq!(
             r.error.as_ref().map(|e| e.code.as_str()),
@@ -471,6 +574,8 @@ mod tests {
                     repo: None,
                     branch: None,
                     setup_err: Some(AppError::config_missing("no credential")),
+                    cdn: false,
+                    dead_cdn: None,
                 },
                 Some(ErrorCode::ConfigMissing),
             ),
@@ -504,6 +609,98 @@ mod tests {
     }
 
     #[test]
+    fn a_configuration_no_upload_can_run_is_not_a_clean_bill_of_health() {
+        // `doctor` never read `cfg.upload.*`, so `cdn` plus a branch containing `/` —
+        // which `gitpic repos` writes verbatim for a repository whose default branch is
+        // `release/v1`, and which `Config::validate` has no reason to refuse — reported
+        // ✓ ✓ ✓ and exit 0 while every upload exited 2 having sent nothing.
+        let (r, exit) = summarize(Probed {
+            cdn: true,
+            dead_cdn: Some(AppError::usage("branch contains '/'")),
+            ..probed(Ok("me".into()), Ok(true))
+        });
+        assert!(!r.ok, "an upload that cannot start is not a healthy setup");
+        assert_eq!(exit, ErrorCode::Usage.exit_code());
+        assert_eq!(
+            r.error.as_ref().map(|e| e.code.as_str()),
+            Some("USAGE"),
+            "and it reports the same code the upload path would"
+        );
+        // The probes still answered, and the report still says so — the dead link is a
+        // separate fault, not a reason to withhold what was learned.
+        assert_eq!(r.token_valid, Some(true));
+        assert_eq!(r.repo_writable, Some(true));
+    }
+
+    #[test]
+    fn a_private_host_serving_cdn_links_is_a_caveat_and_not_a_failure() {
+        // Every upload succeeds and every jsDelivr link 404s, because jsDelivr serves
+        // only public repositories. `RepoInfo` dropped `private`, so `doctor` could not
+        // see it on a response it already fetched.
+        let (r, exit) = summarize(Probed {
+            cdn: true,
+            repo: Some(Ok(RepoFacts {
+                pushable: true,
+                private: true,
+            })),
+            ..probed(Ok("me".into()), Ok(true))
+        });
+        // A caveat, because the upload really does work — it is the link that is dead,
+        // which is worse in one way: nothing else reports it at all.
+        assert!(r.ok, "the upload is not refused, so this is not a failure");
+        assert_eq!(exit, 0);
+        let detail = r.detail.unwrap_or_default();
+        assert!(detail.contains("jsDelivr"), "{detail}");
+        assert!(detail.contains("link_kind raw"), "{detail}");
+        // Same repository on `raw` links has nothing to warn about.
+        let (clean, _) = summarize(Probed {
+            cdn: false,
+            repo: Some(Ok(RepoFacts {
+                pushable: true,
+                private: true,
+            })),
+            ..probed(Ok("me".into()), Ok(true))
+        });
+        assert_eq!(clean.detail, None);
+    }
+
+    #[test]
+    fn a_credential_nobody_checked_is_null_rather_than_false() {
+        // The first-run state: `gitpic auth login` done, `gitpic repos` not yet. The
+        // probes are gated on `config_ok` but only two of the three need a target, so
+        // `/user` was never called — and `token_valid: false` was reported for a
+        // credential nobody had looked at, while `auth status` on the same machine said
+        // it was fine. The remedy a reader takes from ✗ is "log in again", which mints a
+        // second token to fix a config file.
+        let (r, exit) = summarize(Probed {
+            config_ok: false,
+            user: None,
+            repo: None,
+            branch: None,
+            setup_err: None,
+            cdn: true,
+            dead_cdn: None,
+        });
+        assert_eq!(r.token_valid, None, "nothing was checked, so say nothing");
+        assert_eq!(r.repo_writable, None);
+        // Still a failure, and still the one the user can act on.
+        assert!(!r.ok);
+        assert_eq!(exit, ErrorCode::ConfigMissing.exit_code());
+        // A credential that could not be *resolved* is a different claim: that is a
+        // definite answer, and it stays `false` the way every consumer expects.
+        let (unresolved, _) = summarize(Probed {
+            config_ok: false,
+            user: None,
+            repo: None,
+            branch: None,
+            setup_err: Some(AppError::config_missing("no GitHub credential")),
+            cdn: true,
+            dead_cdn: None,
+        });
+        assert_eq!(unresolved.token_valid, Some(false));
+    }
+
+    #[test]
     fn an_unconfigured_target_outranks_a_missing_credential() {
         // Neither probe ran, and the report still has to be a complete one so an
         // agent can read it, and the detail names the fix the user can act on.
@@ -513,8 +710,12 @@ mod tests {
             repo: None,
             branch: None,
             setup_err: Some(AppError::config_missing("no GitHub credential")),
+            cdn: false,
+            dead_cdn: None,
         });
-        assert!(!r.config_ok && !r.token_valid && !r.repo_writable && !r.ok);
+        assert!(
+            !r.config_ok && r.token_valid != Some(true) && r.repo_writable != Some(true) && !r.ok
+        );
         assert_eq!(exit, ErrorCode::ConfigMissing.exit_code());
         assert!(
             r.detail
@@ -536,8 +737,10 @@ mod tests {
             repo: None,
             branch: None,
             setup_err: Some(AppError::config_missing("run `gitpic auth login`")),
+            cdn: false,
+            dead_cdn: None,
         });
-        assert!(r.config_ok && !r.token_valid);
+        assert!(r.config_ok && r.token_valid != Some(true));
         assert_eq!(exit, ErrorCode::ConfigMissing.exit_code());
         assert_eq!(r.detail.as_deref(), Some("run `gitpic auth login`"));
     }
@@ -551,12 +754,20 @@ mod tests {
         let (r, exit) = summarize(Probed {
             config_ok: true,
             user: Some(Ok("me".into())),
-            repo: Some(Ok(true)),
+            repo: Some(Ok(RepoFacts {
+                pushable: true,
+                private: false,
+            })),
             branch: Some(Ok(Branch::Missing)),
             setup_err: None,
+            cdn: false,
+            dead_cdn: None,
         });
-        assert!(!r.repo_writable, "a missing branch is not writable");
-        assert!(r.token_valid, "the credential itself is fine");
+        assert!(
+            r.repo_writable != Some(true),
+            "a missing branch is not writable"
+        );
+        assert!(r.token_valid == Some(true), "the credential itself is fine");
         assert!(!r.ok);
         assert_eq!(exit, ErrorCode::RemoteNotFound.exit_code());
         assert!(
@@ -573,9 +784,14 @@ mod tests {
         let (_, exit) = summarize(Probed {
             config_ok: true,
             user: Some(Err(AppError::network("503"))),
-            repo: Some(Ok(true)),
+            repo: Some(Ok(RepoFacts {
+                pushable: true,
+                private: false,
+            })),
             branch: Some(Ok(Branch::Missing)),
             setup_err: None,
+            cdn: false,
+            dead_cdn: None,
         });
         assert_eq!(exit, ErrorCode::RemoteNotFound.exit_code());
     }
@@ -588,11 +804,16 @@ mod tests {
         let (r, exit) = summarize(Probed {
             config_ok: true,
             user: Some(Ok("me".into())),
-            repo: Some(Ok(true)),
+            repo: Some(Ok(RepoFacts {
+                pushable: true,
+                private: false,
+            })),
             branch: Some(Ok(Branch::Present { protected: true })),
             setup_err: None,
+            cdn: false,
+            dead_cdn: None,
         });
-        assert!(r.ok && r.repo_writable, "still a healthy run");
+        assert!(r.ok && r.repo_writable == Some(true), "still a healthy run");
         assert_eq!(exit, 0);
         assert!(r.branch_protected);
         assert!(

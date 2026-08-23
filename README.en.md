@@ -289,6 +289,12 @@ carries the same shape of `error` object as every other subcommand, so "branch d
 exist" (8) and "no write permission" (7) are distinguishable from stdout alone, without
 relying on the exit code — pipe into `jq` and the exit code becomes `jq`'s own.
 
+`token_valid` and `repo_writable` have three values: `true`, `false`, and `null` for
+**not checked**. The two GitHub probes only run when `config_ok` is true, so on a machine
+that has run `gitpic auth login` but not yet chosen a repository they are `null` — they
+used to be `false`, which was a verdict on a credential nothing had looked at, while
+`gitpic auth status` on the same machine reported it working.
+
 ## Changelog
 
 See [CHANGELOG.md](./CHANGELOG.md); the Chinese version is

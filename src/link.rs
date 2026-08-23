@@ -125,6 +125,18 @@ pub fn parse_link_kind(s: &str) -> LinkKind {
     }
 }
 
+/// The link kind an upload will actually use.
+///
+/// [`parse_link_kind_strict`] plus the fallback the upload path applies, in one place
+/// now that `doctor` has to reach the same verdict about the same config value. The
+/// fallback is unreachable in practice — `Config::validate` refuses anything the strict
+/// parser rejects before it can be loaded — and exists so neither caller has to invent
+/// one of its own, which is how the two would come to disagree about a file neither
+/// should ever see.
+pub fn effective_link_kind(configured: &str) -> LinkKind {
+    parse_link_kind_strict(configured).unwrap_or(LinkKind::Cdn)
+}
+
 /// Parse a link kind, rejecting anything unrecognized.
 ///
 /// The previous reader defaulted anything it did not recognise to CDN, so
