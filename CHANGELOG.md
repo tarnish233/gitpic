@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-08-23
+
+### The stdin failure told you to do the thing you had just done
+
+0.14.0 made a stem-only `--name` over unidentifiable stdin bytes a `USAGE` error —
+correctly, since publishing them at a guessed `.png` is a lie about the content —
+but it reused the message written for the case where no `--name` was given at all:
+*"cannot tell what kind of image this is from the bytes; pass --name to set the
+filename"*. Read that after passing `--name shot` and the only move it suggests is
+the one that just failed.
+
+Which is exactly the loop an agent walks into, because the rule everywhere else in
+`SKILL.md` is that `--name` supplies the stem and the bytes supply the extension —
+"never rely on `--name` to set the extension". Unidentifiable bytes are the one
+place that rule inverts: there is nothing else to take an extension from, so
+`--name` has to carry one.
+
+So both halves are fixed. The message now names what is missing (`--name "shot"
+carries no extension and these bytes are not an image gitpic can identify …
+e.g. --name shot.bin`), and the shipped skill states the exception in §3 and beside
+the rule it contradicts, with the advice an agent needs: do not strip the extension
+when retrying. The skill travels inside the binary (`include_str!`), so this is the
+release that delivers it.
+
+Also in the skill, since it is the contract agents call under: `config set --json`
+carries `changes` (one `{key, value}` per key, as stored) and keeps the top-level
+`key`/`value` only for a single pair.
+
 ## [0.14.0] - 2026-08-23
 
 ### Drag-and-drop upload is gone, menu-bar icon included
@@ -1780,7 +1808,8 @@ partial-success semantics for multi-image uploads.
 - GitHub Actions CI (fmt / clippy / build / test on Linux, macOS, Windows) and a
   tag-triggered multi-platform release workflow.
 
-[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/tarnish233/gitpic/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.1
 [0.14.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.0
 [0.13.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.2
 [0.13.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.1

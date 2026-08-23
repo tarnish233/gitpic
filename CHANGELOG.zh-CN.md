@@ -4,6 +4,27 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.14.1] - 2026-08-23
+
+### stdin 认不出格式时，报错在让人重做刚做过的事
+
+0.14.0 把「字节认不出 + `--name` 只有词干」判成 `USAGE` —— 这是对的，把它按猜出来的
+`.png` 发上去就等于对内容撒谎 —— 但沿用了「完全没给 `--name`」那一版的措辞：
+*「cannot tell what kind of image this is from the bytes; pass --name to set the
+filename」*。已经传了 `--name shot` 的人读到这句，唯一能想到的下一步正是刚刚失败的那步。
+
+agent 会稳定踩进这个循环，因为 `SKILL.md` 其他地方的规则是「`--name` 给词干，字节给扩展名」，
+还专门写了「不要靠 `--name` 设扩展名」。而认不出格式的字节恰好是这条规则反过来的唯一场景：
+没有别的地方能拿到扩展名，只能由 `--name` 带。
+
+两头都修了。报错现在说清缺的是什么（`--name "shot" carries no extension and these bytes
+are not an image gitpic can identify … e.g. --name shot.bin`），随二进制发布的 skill 则在
+§3 和那条会冲突的规则旁边都写明了这个例外，并给了 agent 真正需要的一句：重试时不要把扩展名
+去掉。skill 是 `include_str!` 编进二进制的，所以要靠这一版才送得出去。
+
+skill 里另外补上：`config set --json` 带 `changes`（每个键一条 `{key, value}`，值是落盘后的），
+只有单对时才保留顶层的 `key`/`value`。
+
 ## [0.14.0] - 2026-08-23
 
 ### 拖拽上传整体删除，包括菜单栏图标落区
@@ -1333,7 +1354,8 @@ app 之前有三个上传入口，没有一个是拖拽 —— 唯一为此设�
 - GitHub Actions 在 Linux、macOS 和 Windows 上执行构建与测试，推送版本 tag 后
   自动生成多平台发布包。
 
-[未发布]: https://github.com/tarnish233/gitpic/compare/v0.14.0...HEAD
+[未发布]: https://github.com/tarnish233/gitpic/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.1
 [0.14.0]: https://github.com/tarnish233/gitpic/releases/tag/v0.14.0
 [0.13.2]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.2
 [0.13.1]: https://github.com/tarnish233/gitpic/releases/tag/v0.13.1
