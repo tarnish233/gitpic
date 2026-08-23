@@ -53,6 +53,12 @@ public actor GitpicRunner {
     /// without that.
     private nonisolated let gate = DispatchQueue(label: "dev.gitpic.app.spawn")
 
+    /// The login's own queue, off `gate` — see `loginEvents` for why that matters.
+    /// Serial too, so a second login cannot start while one is still waiting on a
+    /// browser: two pending device codes for one account is a state with no sensible
+    /// UI, and the second would invalidate nothing but the user's attention.
+    private nonisolated static let loginQueue = DispatchQueue(label: "dev.gitpic.app.login")
+
     public init(tools: ToolPaths) { self.tools = tools }
 
     public var toolPaths: ToolPaths { tools }
@@ -137,7 +143,7 @@ public actor GitpicRunner {
         return try await withCheckedThrowingContinuation { cont in
             gate.async {
                 var env = ProcessInfo.processInfo.environment
-                env["PATH"] = tools.childPATH
+                env["PATH"] = ToolPaths.childPATH
                 do {
                     let out = try ChildProcess.run(
                         executable: tools.gitpic, args: args, environment: env)
@@ -154,8 +160,7 @@ public actor GitpicRunner {
 ///
 /// Draining only stdout and then waiting deadlocks as soon as the child fills
 /// the 64 KiB stderr buffer — reachable here because `--verbose` and the
-/// clipboard-copy warning both go to stderr. `GHProbe` uses the same helper
-/// so a hung `gh auth status` cannot freeze the menu extra.
+/// clipboard-copy warning both go to stderr.
 ///
 /// With a `timeout`, the total wall clock is bounded for real: the drain gives up
 /// on its own deadline instead of waiting for EOF, which is not the same event as
@@ -167,11 +172,23 @@ enum ChildProcess {
     /// comes.
     private static let pollSliceMS: Int32 = 100
 
+    /// - Parameters:
+    ///   - onSpawn: called once, on the calling thread, with the live process. The only
+    ///     way to reach a child that outlives its caller's interest — a device-flow
+    ///     login blocks for as long as the code stays valid, and the window that
+    ///     started it can be closed first.
+    ///   - onStdoutLine: called for each complete newline-terminated line as it
+    ///     arrives, before the child exits. Threaded into the existing drain rather
+    ///     than given a reader of its own, because the single `poll` across both pipes
+    ///     is what rules out the 64 KiB deadlock the type comment names — a second
+    ///     loop reading only stdout would reintroduce it.
     static func run(
         executable: URL,
         args: [String],
         environment: [String: String]? = nil,
-        timeout: TimeInterval? = nil
+        timeout: TimeInterval? = nil,
+        onSpawn: ((Process) -> Void)? = nil,
+        onStdoutLine: ((String) -> Void)? = nil
     ) throws -> ProcessOutcome {
         let p = Process()
         p.executableURL = executable
@@ -189,6 +206,7 @@ enum ChildProcess {
         do { try p.run() } catch {
             throw RunFailure.spawnFailed(error.localizedDescription)
         }
+        onSpawn?(p)
 
         // Latched, because the drain has to ask repeatedly but the semaphore
         // carries the answer only once: a bare `wait(timeout: .now())` per pass
@@ -201,7 +219,8 @@ enum ChildProcess {
         }
 
         let deadline = timeout.map { DispatchTime.now() + $0 }
-        let (out, err) = drain(so, se, until: deadline, childExited: childExited)
+        let (out, err) = drain(so, se, until: deadline, childExited: childExited,
+                               onStdoutLine: onStdoutLine)
 
         // Both pipes closing is not the child exiting — a process can close its
         // output and keep running — so settle exit separately, and inside the
@@ -263,7 +282,8 @@ enum ChildProcess {
     private static func drain(
         _ stdout: Pipe, _ stderr: Pipe,
         until deadline: DispatchTime?,
-        childExited: () -> Bool
+        childExited: () -> Bool,
+        onStdoutLine: ((String) -> Void)? = nil
     ) -> (Data, Data) {
         var fds = [stdout.fileHandleForReading.fileDescriptor,
                    stderr.fileHandleForReading.fileDescriptor]
@@ -272,6 +292,22 @@ enum ChildProcess {
         // one blocked read is the exact hang this loop exists to rule out. Only
         // our read ends are touched, so the child's writes stay blocking.
         for fd in fds { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK) }
+
+        // How much of stdout has already been handed to `onStdoutLine`. A line is
+        // emitted the moment its newline arrives, so a caller sees it while the child
+        // is still running — which is the entire point of streaming. A trailing
+        // fragment with no newline is never emitted: half a JSON object is worse than
+        // nothing, and the complete one arrives with the next read.
+        var emittedUpTo = 0
+        func emitCompleteLines() {
+            guard let onStdoutLine else { return }
+            let data = collected[0]
+            while let newline = data[emittedUpTo...].firstIndex(of: 0x0A) {
+                let line = data[emittedUpTo..<newline]
+                emittedUpTo = newline + 1
+                if let text = String(data: line, encoding: .utf8) { onStdoutLine(text) }
+            }
+        }
 
         var buf = [UInt8](repeating: 0, count: 1 << 16)
         while fds.contains(where: { $0 >= 0 }) {
@@ -302,9 +338,104 @@ enum ChildProcess {
                     }
                 }
             }
+            if moved { emitCompleteLines() }
             if !moved, ready == 0, childExited() { break }
         }
         return (collected[0], collected[1])
+    }
+}
+
+// MARK: - Credential
+
+extension GitpicRunner {
+    /// Which credential the CLI would use, if any.
+    ///
+    /// Not logged in is `ok: false` with a `CONFIG_MISSING` error and exit 3, which is
+    /// data here rather than a failure — `runJSON` decodes it because every field but
+    /// `ok` is optional. A window that treated it as a fault would have nothing to
+    /// show on the one screen whose job is to offer a login.
+    public func authStatus() async throws -> AuthStatusReport {
+        try await runJSON(["auth", "status", "--json"], as: AuthStatusReport.self)
+    }
+
+    /// Every repository the credential could upload to.
+    public func repos() async throws -> ReposReport {
+        try await runJSON(["repos", "--json"], as: ReposReport.self)
+    }
+
+    /// Every branch on one repository.
+    ///
+    /// Takes the repository explicitly rather than reading the saved config, because the
+    /// picker has to list branches for a repository the user has *selected* and not yet
+    /// saved — the whole point of choosing one is seeing its branches before 保存.
+    public func branches(repo: String) async throws -> BranchesReport {
+        try await runJSON(["branches", "--repo", repo, "--json"], as: BranchesReport.self)
+    }
+
+    /// Remove the stored credential. Idempotent: nothing stored is `removed: false`,
+    /// not an error.
+    @discardableResult
+    public func logout() async throws -> LogoutReport {
+        try await runJSON(["auth", "logout", "--json"], as: LogoutReport.self)
+    }
+
+    /// Run one device-flow login, reporting each step as it happens.
+    ///
+    /// **Deliberately not on `gate`.** Every other invocation is serialised there so
+    /// two of them cannot race on the branch ref, and the gate has no timeout — so a
+    /// login, which blocks for as long as the one-time code stays valid, would hold it
+    /// for fifteen minutes and wedge every upload behind it. A login races with
+    /// nothing: it writes `auth.toml`, which no other command writes.
+    ///
+    /// Cancelling the consuming task terminates the child, so closing the window or
+    /// pressing 取消 stops the polling instead of leaving it to run to expiry.
+    ///
+    /// The stream always ends with `.done` or `.failed`, including when the child dies
+    /// without saying anything — a UI waiting on an outcome must not be left waiting.
+    public nonisolated func loginEvents(scope: String? = nil) -> AsyncStream<LoginEvent> {
+        let tools = self.tools
+        // `--no-browser`: the CLI's opener would work, but the window wants the URL in
+        // hand so it can offer 打开浏览器 again after the first attempt, and an app
+        // bundle spawning `open` is one process more than it needs.
+        let args: [String] = {
+            var a = ["auth", "login", "--json", "--no-browser"]
+            if let scope, !scope.trimmingCharacters(in: .whitespaces).isEmpty {
+                a += ["--scope", scope]
+            }
+            return a
+        }()
+        return AsyncStream { continuation in
+            let child = LoginChild()
+            continuation.onTermination = { _ in child.terminate() }
+            Self.loginQueue.async {
+                var env = ProcessInfo.processInfo.environment
+                env["PATH"] = ToolPaths.childPATH
+                do {
+                    let out = try ChildProcess.run(
+                        executable: tools.gitpic,
+                        args: args,
+                        environment: env,
+                        onSpawn: { child.hold($0) },
+                        onStdoutLine: { line in
+                            guard let event = LoginStream.event(from: line) else { return }
+                            if case .code = event {} else { child.noteOutcome() }
+                            continuation.yield(event)
+                        })
+                    if !child.sawOutcome && !child.wasCancelled {
+                        // Exited without an outcome line: killed, crashed, or printing
+                        // something this version does not understand. `rawText`
+                        // includes stderr, which is where a panic would be.
+                        continuation.yield(.failed(ErrorBody(
+                            code: "GENERAL",
+                            message: "登录进程退出（\(out.status)）但没有给出结果：\(Self.rawText(out).prefix(200))")))
+                    }
+                } catch {
+                    continuation.yield(.failed(ErrorBody(
+                        code: "GENERAL", message: "登录进程起不来：\(error)")))
+                }
+                continuation.finish()
+            }
+        }
     }
 }
 

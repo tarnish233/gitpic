@@ -5,7 +5,7 @@ description: >-
   Markdown link. Use when the user wants to "upload an image", "turn this image
   into a link", "host an image", "get a markdown link for a screenshot",
   "把图片上传图床", or "生成图片 markdown 链接". Requires the `gitpic` CLI installed
-  plus GitHub CLI authenticated with `gh auth login` (install gitpic via
+  and authenticated with `gitpic auth login` (install gitpic via
   `brew install tarnish233/tap/gitpic_cli`).
 ---
 
@@ -36,9 +36,24 @@ install it one of these ways, then verify with `gitpic --version`:
   cargo install --git https://github.com/tarnish233/gitpic
   ```
 
-Also require `command -v gh` and a successful `gh auth status`. `gitpic` obtains
-credentials only from `gh auth token`; if needed, ask the user to run
-`gh auth login`. Never ask the user to paste a token into the conversation.
+Authentication comes from `gitpic auth login` and nowhere else. There is no `gh`
+fallback, no `GITPIC_TOKEN`, and no way to pass a token on a command line — so do not
+probe for `gh`, do not suggest installing it, and do not ask the user for a token.
+`gitpic doctor --json` answers the only question that matters.
+
+When there is no credential, **hand the user the command and stop**:
+
+```
+gitpic auth login
+```
+
+You cannot run it for them. It prints a one-time code they have to type at
+<https://github.com/login/device> and then waits for a browser, so running it yourself
+would block on a code only they can enter, and it refuses `--json` outright.
+
+Once they say they are done, confirm with `gitpic auth status --json` — `ok` and
+`token_valid` say whether the credential works, and the report also carries `login`,
+`client_id`, `expires_at` and the credential's `path`. Then re-run the preflight.
 
 ## 0. Preflight
 
@@ -53,26 +68,52 @@ Parse stdout JSON. An unhealthy report carries an `error` object in the same
 same code. **Read `error.code`, not the exit status** — piping the output to a
 parser (`gitpic doctor --json | jq`) replaces the exit status with the parser's own,
 and some harnesses never surface it at all. `error` is present on exactly the
-reports where `ok` is false.
+reports where `ok` is false. The report also carries `login` (the account `/user`
+confirmed, absent when that probe did not succeed) and `detail`, the same text as
+`error.message`.
 
 Require `config_ok`, `token_valid`, and `repo_writable` to be `true`. If `config_ok`
-is false, tell the user to either run `gitpic init` or set `GITPIC_REPO=owner/name`
-(and optionally `GITPIC_BRANCH`, `GITPIC_LINK=cdn|raw`), then stop. If `token_valid`
-is false and `repo_writable` is also false, tell the user to run `gh auth login` —
-gitpic takes its credential only from `gh auth token` — then stop.
+is false, run `gitpic repos --json` (§0b) and offer the user the repositories it lists —
+`gitpic config set github.repo owner/name github.branch <that repo's default_branch>`
+writes the choice (§0c lists the branches if the user wants one that is not the default), and `GITPIC_REPO=owner/name` (plus `GITPIC_BRANCH`,
+`GITPIC_LINK=cdn|raw`) sets it for one run. Then stop. Set the branch from the listing
+rather than leaving it: a repository whose default is `master` configured for `main`
+fails every upload on a ref that is not there. If `token_valid`
+is false and `repo_writable` is also false, hand the user `gitpic auth login` and stop.
+
+`repo_writable: false` with `token_valid: true` has one cause worth naming on its own:
+the credential's **scope**. `gitpic auth login` asks for `public_repo`, which cannot write
+to a private repository — and GitHub answers `404`, not `403`, for a repository a token
+cannot see, so this arrives as `REMOTE_NOT_FOUND` rather than as a permission error.
+
+Run `gitpic repos --json` to tell the two apart: if the configured `owner/repo` is not in
+the list, the credential cannot reach it. For a private image host the user needs
+`gitpic auth login --scope repo` — hand them that command, and note that only
+`GITPIC_LINK=raw` links work from a private repository (jsDelivr serves public ones only).
+If the repo *is* in the list with `can_push: false`, the account lacks write access and
+another login will not help.
 
 `repo_writable` means **both** that the token may push to the repository **and**
-that the target branch exists. When it is false, read `error.code` to tell the two
-apart: `REMOTE_NOT_FOUND` (8) means the branch is missing — the user should create
-it or change `github.branch` — while `PERMISSION_DENIED` (7) means the token lacks
-Contents read/write on the repository. `error.message` says which, and `detail`
-carries the same text.
+that the target branch exists. When it is false, `error.code` narrows it down but does
+not settle it — read `error.message` too:
 
-The three checks are probed independently, so read them together before acting. If
+- `PERMISSION_DENIED` (7): the repository answered, and GitHub reports no push or admin
+  permission. The app's access to that repository, or its Contents read/write
+  permission, is what needs fixing.
+- `REMOTE_NOT_FOUND` (8): **two** causes, told apart by the message. `target branch does
+  not exist on the remote` means the repository is fine and only the ref is absent —
+  create it or change `github.branch`. A message quoting GitHub's own 404 (`GitHub
+  repository, branch, or remote path not found`) means the repository is invisible to the
+  app, which is the install/authorise case above; creating a branch will not help.
+
+`detail` carries the same text as `error.message` either way.
+
+The two GitHub checks are probed independently — and only when `config_ok` is true, so
+read `config_ok` first. If
 `token_valid` is false **but `repo_writable` is true** and `error.code` is
 `NETWORK`, the credential is fine and GitHub's `/user` endpoint — which uploads
 never call — is simply unreachable. Retry; do not send the user to
-`gh auth login`, which cannot fix it. Treat `token_valid: false` as a credential
+another login, which cannot fix it. Treat `token_valid: false` as a credential
 problem only when `repo_writable` is also false.
 
 `branch_protected: true` is a caveat, not a failure: the branch has protection
@@ -82,8 +123,69 @@ set. It is the usual explanation when an upload is nevertheless refused with
 happens, say so rather than retrying. A 409 ref conflict is `NETWORK` (5):
 retry once, then report.
 
-The report's compatibility field `token_source` is `"gh"` when a credential was
-obtained and `null` otherwise. `gitpic init` never accepts a token interactively.
+There is one credential source, so the report carries no `token_source` field: a
+credential either works (`token_valid: true`) or the user has not run `gitpic auth login`.
+No subcommand accepts a token, and there is no `gitpic init` — the repository is chosen at
+the end of `gitpic auth login`, which only a human can run.
+
+## 0b. Which repository (only when the target is wrong or unset)
+
+```bash
+gitpic repos --json
+```
+
+```json
+{ "ok": true, "complete": true, "repos": [
+  { "owner": "octocat", "name": "img", "private": false,
+    "default_branch": "main", "can_push": true } ] }
+```
+
+Every repository the credential can reach, alphabetical. Use it to answer "which repo
+should this go to" instead of guessing an `owner/repo`, and to explain a
+`REMOTE_NOT_FOUND` that a hand-typed target caused.
+
+- `can_push: false` means the account cannot write there — offer it, do not silently drop
+  it, but say so.
+- `private: true` repositories only work with `GITPIC_LINK=raw`, and only when the login
+  used `--scope repo`.
+- `complete: false` means the listing hit its page ceiling, so a repository the user names
+  may exist without appearing. Say that rather than reporting it as absent.
+- `default_branch` is what `github.branch` should be — do not assume `main`.
+
+Set the target with `gitpic config set github.repo owner/name --json` (add
+`github.branch <default_branch>` in the same call when it is not `main`).
+
+## 0c. Which branch (only when the branch is wrong, or the user asks for another)
+
+```bash
+gitpic branches --json                        # the configured repository
+gitpic branches --repo owner/name --json      # any repository
+```
+
+```json
+{ "ok": true, "repo": "octocat/img", "configured": "main", "complete": true,
+  "branches": [ { "name": "main", "protected": true },
+                { "name": "images", "protected": false } ] }
+```
+
+Uploads go through the Contents API, which **cannot create a branch**. So the legal values
+for `github.branch` are exactly the names in `branches`, and a value outside that list
+fails every upload with `REMOTE_NOT_FOUND` — GitHub answers 404 for a missing ref, the same
+as for a repository it cannot see, which is why guessing a branch name produces the least
+informative failure gitpic has.
+
+- `configured` is the branch an upload would use right now, resolved by the CLI (so it
+  reflects `GITPIC_BRANCH`). When it is **not** in `branches`, that is the whole finding:
+  say so and offer the listed names. Do not report it as a permissions problem.
+- `protected: true` does **not** mean unwritable — the rules may permit this account. Never
+  filter a protected branch out of what you offer. It is worth naming only when an upload
+  has already failed with `PERMISSION_DENIED` or a 422 after every check passed.
+- An empty `branches` with `ok: true` is a repository with no commits. The first upload
+  creates the ref, so this is not an error and needs no fix.
+- `complete: false` means the page ceiling was hit; a branch the user names may exist
+  without appearing.
+
+Change it with `gitpic config set github.branch <name> --json`.
 
 ## 1. Upload a local image
 
@@ -150,12 +252,12 @@ gitpic list --json                                            # recent uploads (
 |------|---------------------|---------------------------------------------------|
 | 1    | GENERAL             | unexpected failure — report `error.message`        |
 | 2    | USAGE               | fix the invocation                                |
-| 3    | CONFIG_MISSING      | run `gh auth login` or configure the target repo   |
-| 4    | AUTH_FAILED         | credential invalid/expired — `gh auth login`      |
+| 3    | CONFIG_MISSING      | hand the user `gitpic auth login`, or configure the target repo |
+| 4    | AUTH_FAILED         | credential invalid/expired — hand the user `gitpic auth login` |
 | 5    | NETWORK             | retry once, then report (includes a 409 ref conflict) |
 | 6    | NOT_FOUND           | check the local input file path                   |
 | 7    | PERMISSION_DENIED   | check token Contents permission/repo access       |
-| 8    | REMOTE_NOT_FOUND    | check GitHub repository, branch, and remote path  |
+| 8    | REMOTE_NOT_FOUND    | check GitHub repository, branch, and remote path — `gitpic branches --json` (§0c) separates "the branch is not there" from "the repo is not there", which the 404 itself does not |
 | 9    | RATE_LIMITED        | wait or ask the user before retrying later        |
 | 10   | CONFIG_INVALID      | the config file is broken — tell the user to run `gitpic config edit`; `error.message` names the file plus the rejected key or the parser's complaint, but not a line number |
 
@@ -163,9 +265,13 @@ Error JSON: `{ "ok": false, "error": { "code": "AUTH_FAILED", "message": "…" }
 `gitpic doctor` carries the same `error` object alongside its report fields, so the
 code is always on stdout — never depend on the exit status alone.
 
-Do not confuse 3 with 10: `CONFIG_MISSING` means nothing is configured yet, so
-`gitpic init` is the fix. `CONFIG_INVALID` means the file exists but has bad syntax
-or an unknown key — running `init` would not fix it, and retrying will loop.
+Do not confuse 3 with 10. `CONFIG_MISSING` covers two "nothing is set up yet" states
+and `error.message` says which: `missing target repo` is yours to fix with
+`gitpic config set github.repo` or `GITPIC_REPO=owner/name`, while `no GitHub credential`
+is fixed only by handing the user `gitpic auth login` — setting a repository there
+reconfigures a target that was never the problem. `CONFIG_INVALID` means the file exists
+but has bad syntax or an unknown key — neither of those commands fixes it, and retrying
+will loop.
 
 ## Partial success (multiple images)
 
@@ -200,10 +306,13 @@ instead — `results` is never present and empty.
   extension. `gitpic config set` accepts `KEY VALUE` pairs in one invocation
   (`gitpic config set github.owner me github.repo pics --json`) and writes once.
 - `--json` produces an `ok`-bearing envelope on stdout for every subcommand,
-  failures included, with three exceptions — none of which an agent should call:
-  `gitpic init` **rejects** `--json` (it is interactive; use `GITPIC_REPO` or
-  `gitpic config set` instead), `gitpic completion <shell>` ignores it and prints
-  the raw shell script, and `gitpic config edit` ignores it and hands stdout to
+  failures included, with three exceptions — none of which an agent should call.
+  `gitpic auth login --json` is the one command whose `--json` is a **stream**: one
+  complete JSON object per line, each tagged with `event`, the last line always `done` or
+  `error`. Parsing its stdout as a single object fails on the first line, and only a
+  human can type the one-time code anyway — hand the bare `gitpic auth login` to the user
+  and then read `gitpic auth status --json`. `gitpic completion <shell>` ignores `--json`
+  and prints the raw shell script, and `gitpic config edit` ignores it and hands stdout to
   `$EDITOR` (defaulting to `vi`), whose terminal output is not JSON.
 - Only access the clipboard when the user explicitly requests it.
 - Use absolute file paths.

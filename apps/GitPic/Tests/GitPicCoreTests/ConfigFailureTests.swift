@@ -105,8 +105,9 @@ struct ConfigFailureTests {
             .spawnFailed("no such file or directory"),
             .undecodable(status: 139, raw: "Segmentation fault"),
             // A real code, and still not a file problem: `CONFIG_MISSING` means
-            // nothing is configured yet, which the editable form already handles.
-            .cli(status: 3, error: ErrorBody(code: "CONFIG_MISSING", message: "run `gitpic init`")),
+            // nothing is configured yet, which the repository picker already handles.
+            .cli(status: 3, error: ErrorBody(code: "CONFIG_MISSING",
+                                             message: "no GitHub credential: run `gitpic auth login`")),
         ]
         for error in others {
             let failure = ConfigFailure(error)

@@ -38,8 +38,8 @@ impl Sandbox {
         self.spawn(args, None, &[])
     }
 
-    /// Same, with `input` written to the child's stdin — needed for `init`, which
-    /// is a conversation and cannot be driven any other way.
+    /// Same, with `input` written to the child's stdin — the only way to drive a
+    /// command that reads it, and the only way to prove one does not.
     fn run_with_stdin(&self, args: &[&str], input: &str) -> (String, String, i32) {
         self.spawn(args, Some(input), &[])
     }
@@ -77,9 +77,9 @@ impl Sandbox {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         // Applied after the removals, never instead of them: a test that needs one
-        // variable — `GITPIC_OWNER`, for the `init` case that only makes sense with
-        // it — gets that one and still inherits the isolation for the rest, which is
-        // what keeps every other test repeatable on a machine that exports them.
+        // variable — a stripped `PATH`, an agent home — gets that one and still
+        // inherits the isolation for the rest, which is what keeps every other test
+        // repeatable on a machine that exports the `GITPIC_*` ones.
         for (key, value) in env {
             cmd.env(key, value);
         }
@@ -268,8 +268,6 @@ fn a_json_error_is_a_json_envelope_on_stdout() {
             vec!["config", "set", "github.owner", "me", "leftover", "--json"],
             2,
         ),
-        // `init` is interactive and refuses --json rather than pretending.
-        (vec!["init", "--json"], 2),
     ] {
         let label = args.join(" ");
         let (stdout, _stderr, code) = sb.run(&args);
@@ -304,28 +302,305 @@ fn removed_config_token_is_rejected_without_leaking_its_value() {
     );
 }
 
+/// No path in the crate spawns `gh`.
+///
+/// The behavioural test below cannot catch the fallback being restored: it depends on
+/// the machine having an *authenticated* `gh`, and a CI runner ships one that is not
+/// logged in, so it would pass identically either way. This does not — the fallback
+/// cannot come back without a spawn. Same shape as `output.rs`'s
+/// `no_module_writes_to_stdout_outside_this_one`, and for the same reason: some rules
+/// are about the source, not about an invocation.
 #[test]
-fn gitpic_token_is_ignored_and_gh_is_required() {
-    let sb = Sandbox::new("gh-only");
-    let empty_path = sb.dir.join("empty-path");
-    std::fs::create_dir_all(&empty_path).unwrap();
+fn nothing_in_the_crate_spawns_gh() {
+    fn walk(dir: &Path, found: &mut Vec<String>) {
+        let entries = std::fs::read_dir(dir).expect("the crate's own source is readable");
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, found);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).expect("readable");
+                for (i, line) in text.lines().enumerate() {
+                    // The spawn, not the word: `gh` appears legitimately in prose that
+                    // explains why the fallback was removed.
+                    if line.contains("Command::new(\"gh\")") {
+                        found.push(format!("{}:{}", path.display(), i + 1));
+                    }
+                }
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut found,
+    );
+    assert!(
+        found.is_empty(),
+        "the credential has one source; these spawn `gh`: {found:?}"
+    );
+}
+
+/// `gitpic auth login` is the only way in: neither the environment nor `gh` can
+/// supply a credential.
+///
+/// **`PATH` is deliberately left intact.** On a developer machine `gh` really is
+/// installed and logged in, so this run would have authenticated before the
+/// fallback was removed — and would then have gone on to probe GitHub. That it now
+/// reports no credential is the removal, observed. It also keeps the file's
+/// no-network rule: with nothing to authenticate as, no request is built.
+#[test]
+fn neither_gh_nor_the_environment_can_supply_a_credential() {
+    let sb = Sandbox::new("one-source");
     let out = Command::new(env!("CARGO_BIN_EXE_gitpic"))
         .args(["doctor", "--json"])
         .env("XDG_CONFIG_HOME", sb.dir.join("cfg"))
         .env("XDG_DATA_HOME", sb.dir.join("data"))
-        .env("PATH", &empty_path)
         .env("GITPIC_TOKEN", "ghp_legacy_value_must_not_be_used")
         .output()
         .expect("the binary runs");
     assert_eq!(out.status.code(), Some(3));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.contains("ghp_legacy_value_must_not_be_used"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stdout.contains("ghp_legacy") && !stderr.contains("ghp_legacy"),
+        "the ignored variable was echoed:\n{stdout}\n{stderr}"
+    );
     let body = parse(&stdout, "doctor --json");
-    assert_eq!(body.get("token_source"), Some(&serde_json::Value::Null));
     assert_eq!(
         body.get("token_valid").and_then(|v| v.as_bool()),
         Some(false)
     );
+    // Provenance is gone with the second source; a field whose value could only
+    // ever be "gitpic" would restate what the command already is.
+    assert_eq!(body.get("token_source"), None, "{stdout}");
+    let message = body
+        .pointer("/error/message")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(message.contains("gitpic auth login"), "{message}");
+    assert!(
+        !message.contains("gh auth"),
+        "gh is gone; sending the user to install it is a dead end: {message}"
+    );
+}
+
+/// A stored token reaches no output stream, on the one command that reads the file
+/// without needing a network.
+///
+/// An unconfigured target is what keeps this off the network: `doctor` settles on
+/// `CONFIG_MISSING` before it would probe GitHub, having read the credential file on
+/// the way there.
+#[test]
+fn a_stored_credential_is_never_echoed() {
+    let sb = Sandbox::new("auth-hygiene");
+    std::fs::write(sb.dir.join("cfg/gitpic/config.toml"), "").expect("write config");
+    std::fs::write(
+        sb.dir.join("cfg/gitpic/auth.toml"),
+        "token = \"ghu_stored_must_not_be_printed\"\nlogin = \"octocat\"\n",
+    )
+    .expect("write credential");
+
+    let (stdout, stderr, code) = sb.run(&["doctor", "--json"]);
+    assert_eq!(code, 3, "an unconfigured target is still CONFIG_MISSING");
+    assert!(
+        !stdout.contains("ghu_stored") && !stderr.contains("ghu_stored"),
+        "doctor leaked the stored token:\n{stdout}\n{stderr}"
+    );
+    // This is the whole reason the test stays offline, so assert it rather than leave
+    // it to the blank config above: with a target configured, a run holding a
+    // credential probes api.github.com, and this file promises it never does.
+    let body = parse(&stdout, "doctor --json");
+    assert_eq!(
+        body.get("config_ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "a configured target here would send the stored token to GitHub"
+    );
+}
+
+#[test]
+fn auth_status_without_a_credential_names_the_only_way_in() {
+    let sb = Sandbox::new("auth-status-none");
+    // Nothing stored, so resolution fails before a request is ever built — nothing
+    // here touches the network. `PATH` is untouched: `gh` being installed and logged
+    // in must make no difference any more.
+    let (stdout, _, code) = sb.run(&["auth", "status", "--json"]);
+    assert_eq!(code, 3);
+    let body = parse(&stdout, "auth status --json");
+    assert_eq!(
+        body.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("CONFIG_MISSING")
+    );
+    let message = body
+        .pointer("/error/message")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(message.contains("gitpic auth login"), "{message}");
+    assert!(!message.contains("gh auth"), "{message}");
+}
+
+/// `--with-token` is refused at the CLI boundary.
+///
+/// Leaving it parseable would be the "accepted, then silently dropped" shape this
+/// project closes everywhere else, and here it is worse than usual: quietly discarding
+/// a token someone piped in means the secret has already left its keychain with nothing
+/// to say it went nowhere.
+///
+/// There is no test for `auth login --json` itself in this file, and deliberately so:
+/// it now *streams* rather than refusing, which means running it reaches github.com —
+/// and every test here promises not to. The stream's shape is pinned in
+/// `commands::auth_cmd`'s own tests, where it is pure serialisation.
+#[test]
+fn the_removed_credential_flag_is_refused() {
+    let sb = Sandbox::new("auth-removed-flags");
+    let args = ["auth", "login", "--with-token", "--json"];
+    let (stdout, _, code) = sb.run_with_stdin(&args, "ghp_should_never_be_read");
+    assert_eq!(code, 2);
+    assert!(
+        !stdout.contains("ghp_should_never_be_read"),
+        "stdin was echoed:\n{stdout}"
+    );
+    let body = parse(&stdout, "auth login --json");
+    assert_eq!(
+        body.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("USAGE")
+    );
+}
+
+#[test]
+fn auth_logout_is_idempotent_and_a_logout_really_logs_out() {
+    let sb = Sandbox::new("auth-logout");
+
+    // Nothing stored: not an error, because "there is no credential" is the state
+    // the caller asked for.
+    let (stdout, _, code) = sb.run(&["auth", "logout", "--json"]);
+    assert_eq!(code, 0);
+    let body = parse(&stdout, "auth logout --json");
+    assert_eq!(body.get("removed").and_then(|v| v.as_bool()), Some(false));
+
+    // With one stored, it goes away for real.
+    let auth = sb.dir.join("cfg/gitpic/auth.toml");
+    std::fs::write(&auth, "token = \"ghu_x\"\n").expect("write credential");
+    let (stdout, _, code) = sb.run(&["auth", "logout", "--json"]);
+    assert_eq!(code, 0);
+    let body = parse(&stdout, "auth logout --json");
+    assert_eq!(body.get("removed").and_then(|v| v.as_bool()), Some(true));
+    assert!(!auth.exists(), "the credential file must be gone");
+
+    // And with no second source behind it, the next run has no credential at all —
+    // which is what makes `logout` mean what it says.
+    let (stdout, _, code) = sb.run(&["auth", "status", "--json"]);
+    assert_eq!(code, 3, "{stdout}");
+}
+
+/// `gitpic init` is gone, and nothing may still be sending people to it.
+///
+/// Two halves, because either one passes on its own while the other is broken. That the
+/// subcommand no longer parses is the easy half. The hard half is that its name was
+/// baked into the `CONFIG_MISSING` messages `doctor` and `Config::require_target`
+/// publish *as the remedy* — so removing the command without them turns the advice for
+/// the single most common first-run failure into a subcommand clap rejects with USAGE.
+///
+/// So the same test that proves the command is gone also reads the message an
+/// unconfigured user actually receives, and requires it to name something that exists.
+/// That is the half worth having: an agent following code 3's published remedy would
+/// otherwise be handed a subcommand that no longer resolves.
+/// It stays off the network by leaving the sandbox with neither a target nor a
+/// credential: `doctor` skips all three probes when the target is missing.
+#[test]
+fn the_removed_setup_command_is_gone_from_the_cli_and_from_its_own_remedies() {
+    let sb = Sandbox::new("no-init");
+
+    // `NOT_FOUND`, not `USAGE`: `Cli` takes positional filenames and deliberately does
+    // not set `args_conflicts_with_subcommands`, so a word that is no longer a
+    // subcommand is read as a file to upload. That is how every mistyped subcommand
+    // already behaves (`gitpic doctr` says the same), and pinning it here is the honest
+    // record of what someone with the old habit now sees.
+    let cfg_file = sb.dir.join("cfg/gitpic/config.toml");
+    let before = std::fs::read_to_string(&cfg_file).expect("the sandbox config exists");
+    let (stdout, _stderr, code) = sb.run(&["init", "--json"]);
+    assert_eq!(
+        code, 6,
+        "`init` is a filename now, and there is no such file\n{stdout}"
+    );
+    let v = parse(&stdout, "init --json");
+    assert_eq!(
+        v.pointer("/error/code").and_then(|c| c.as_str()),
+        Some("NOT_FOUND"),
+        "{v}"
+    );
+    // The part that would be a real bug: it must not still be *configuring* anything.
+    assert_eq!(
+        std::fs::read_to_string(&cfg_file).expect("config still readable"),
+        before,
+        "`init` must no longer be able to write a config"
+    );
+
+    // Nothing configured, so `require_target` fails and `doctor` reports it without
+    // probing.
+    std::fs::write(sb.dir.join("cfg/gitpic/config.toml"), "[github]\n").expect("empty config");
+    let (stdout, _stderr, code) = sb.run(&["doctor", "--json"]);
+    assert_eq!(
+        code, 3,
+        "an unconfigured target is CONFIG_MISSING\n{stdout}"
+    );
+    let v = parse(&stdout, "doctor --json");
+    let detail = v
+        .get("detail")
+        .and_then(|d| d.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !detail.contains("gitpic init"),
+        "the remedy names a command that no longer parses: {detail}"
+    );
+    assert!(
+        detail.contains("gitpic config set github.repo"),
+        "the remedy has to name a way to set a target: {detail}"
+    );
+}
+
+/// No prompt is ever answered from a pipe — the rule, checked end to end.
+///
+/// This used to drive `init`, which took typed answers and could be fed a stdin it
+/// should not read from. `init` is gone and its list now lives inside `auth login`,
+/// which cannot be reached without a browser; the remaining drivable prompt is
+/// `skill install`'s, and it turns out to give the *stronger*
+/// guarantee — it refuses a non-terminal stdin outright rather than reading it and then
+/// deciding. That is what is pinned here, because it is the property that makes the
+/// hazard unreachable: `skill install`'s prompt defaults to `a=all`, so a question
+/// nobody saw would install files into every detected agent directory.
+///
+/// The narrower rule — a prompt whose *text* was thrown away is never answered — has no
+/// integration vehicle left and is covered by `commands::tests`, which drives it through
+/// the same `stdout_lost` flag a real broken pipe sets.
+#[test]
+fn no_prompt_is_answered_from_a_pipe() {
+    let sb = Sandbox::new("pipe-prompt");
+    let agent_home = sb.dir.join("claude");
+    let installed = agent_home.join("skills/gitpic/SKILL.md");
+    std::fs::create_dir_all(agent_home.join("skills")).expect("mkdir agent home");
+    let env: &[(&str, &str)] = &[("CLAUDE_CONFIG_DIR", agent_home.to_str().expect("utf-8"))];
+
+    // A piped answer, which is exactly what must not be read. `Sandbox::run_with_stdin`
+    // gives the child a pipe, so `stdin().is_terminal()` is false.
+    let (stdout, stderr, code) = sb.run_with_stdin_env(&["skill", "install"], "1\n", env);
+    assert_eq!(code, 2, "a pipe is not consent\n{stdout}\n{stderr}");
+    assert!(
+        !installed.is_file(),
+        "nothing may be installed from an answer nobody could have given"
+    );
+    // And it says which explicit forms do work, rather than only refusing.
+    let said = format!("{stdout}{stderr}");
+    assert!(said.contains("--yes"), "{said}");
+    assert!(said.contains("--dir"), "{said}");
+
+    // The same run with the choice made explicitly installs, which is what proves the
+    // refusal above is about the *prompt* and not about a broken sandbox.
+    let (stdout, stderr, code) =
+        sb.run_with_stdin_env(&["skill", "install", "--agent", "claude", "-y"], "", env);
+    assert_eq!(code, 0, "an explicit target installs\n{stdout}\n{stderr}");
+    assert!(installed.is_file(), "and it lands inside the sandbox");
 }
 
 #[test]
@@ -431,63 +706,6 @@ fn a_closed_reader_does_not_zero_an_error_exit() {
 /// needs a shell with `PIPESTATUS`.
 #[cfg(unix)]
 #[test]
-fn a_closed_reader_never_answers_its_own_prompts() {
-    let sb = Sandbox::new("pipe-prompt");
-    let cfg_file = sb.dir.join("cfg/gitpic/config.toml");
-    // The sandbox ships a config; `init` writing one is the failure being watched
-    // for, so there must be nothing there to begin with.
-    std::fs::remove_file(&cfg_file).expect("start with nothing configured");
-
-    // The same answers down a stdout nobody closed. Load-bearing, not decoration:
-    // without it, "exit 1 and no file" is what *any* failure looks like, and the
-    // test below would pass just as happily on a broken sandbox or a rejected
-    // answer. This proves the only thing the run below changes is the reader.
-    let (stdout, stderr, code) = sb.run_with_stdin(&["init"], "someone/pics\nmain\ncdn\n");
-    assert_eq!(
-        code, 0,
-        "these are answers that save a config\n{stdout}\n{stderr}"
-    );
-    assert!(cfg_file.is_file(), "and they save it here");
-    std::fs::remove_file(&cfg_file).expect("back to nothing configured");
-
-    // `true` closes the read end immediately, and the EPIPE is a real one: `Stdout`
-    // is a `LineWriter`, so the banner's `writeln!` reaches the pipe at once, and
-    // the prompt text — which carries no newline — reaches it at `output::finish()`.
-    // `PIPESTATUS[1]` is gitpic's own status; `[0]` is printf's and `[2]` is true's.
-    let script = format!(
-        "printf 'someone/pics\\nmain\\ncdn\\n' | '{}' init | true >/dev/null; \
-         exit ${{PIPESTATUS[1]}}",
-        env!("CARGO_BIN_EXE_gitpic")
-    );
-    let out = Command::new("bash")
-        .arg("-c")
-        .arg(&script)
-        .env("XDG_CONFIG_HOME", sb.dir.join("cfg"))
-        .env("XDG_DATA_HOME", sb.dir.join("data"))
-        .env_remove("GITPIC_REPO")
-        .env_remove("GITPIC_OWNER")
-        .env_remove("GITPIC_BRANCH")
-        .env_remove("GITPIC_LINK")
-        .output()
-        .expect("bash runs");
-    let code = out.status.code().unwrap_or(-1);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(
-        code, 1,
-        "an undeliverable question must fail the run, got {code}\n{stderr}"
-    );
-    // Named so the 1 cannot come from somewhere else and still look like a pass.
-    assert!(
-        stderr.contains("stdout is closed"),
-        "the refusal must be about the question nobody saw: {stderr}"
-    );
-    assert!(
-        !cfg_file.exists(),
-        "answers to questions that were never delivered must not become a config"
-    );
-}
-
-#[test]
 fn name_with_two_files_is_usage_not_a_silent_drop() {
     // `--name` used to be accepted on a multi-file upload and then ignored.
     let sb = Sandbox::new("name-two");
@@ -518,7 +736,8 @@ fn name_with_two_files_is_usage_not_a_silent_drop() {
 /// credential was so much as asked for; 3 would say the guard is gone or this
 /// config was never read.
 ///
-/// `PATH` is emptied so `gh` is unreachable: it keeps the 3 a deterministic local
+/// `PATH` is emptied to keep the child from finding anything at all: it keeps the 3
+/// a deterministic local
 /// failure, and it means a future regression here fails the test instead of
 /// attempting a live upload to someone else's repository.
 #[test]
@@ -537,9 +756,11 @@ fn a_cdn_link_that_would_404_is_refused_before_any_credential() {
     let shot_arg = shot.to_str().expect("utf-8 path");
     let empty_path = sb.dir.join("empty-path");
     std::fs::create_dir_all(&empty_path).expect("mkdir empty-path");
-    let no_gh: &[(&str, &str)] = &[("PATH", empty_path.to_str().expect("utf-8 path"))];
+    // What makes the exit 3 deterministic is that the sandbox has no `auth.toml`,
+    // not this: there is no longer any tool on `PATH` that could supply a credential.
+    let no_path: &[(&str, &str)] = &[("PATH", empty_path.to_str().expect("utf-8 path"))];
 
-    let (stdout, _, code) = sb.run_with_env(&[shot_arg, "--json"], no_gh);
+    let (stdout, _, code) = sb.run_with_env(&[shot_arg, "--json"], no_path);
     assert_eq!(
         code, 2,
         "a dead cdn link is a usage refusal, not a credential problem: {stdout}"
@@ -564,7 +785,7 @@ fn a_cdn_link_that_would_404_is_refused_before_any_credential() {
     // The same run with the one value the guard looks at changed. Reaching
     // CONFIG_MISSING proves the config above was loaded and every check before
     // `auth::token()` passed — so the 2 above came from the guard and nowhere else.
-    let (stdout, _, code) = sb.run_with_env(&[shot_arg, "--link", "raw", "--json"], no_gh);
+    let (stdout, _, code) = sb.run_with_env(&[shot_arg, "--link", "raw", "--json"], no_path);
     assert_eq!(
         code, 3,
         "raw links are unambiguous, so this one runs on to the credential: {stdout}"
@@ -584,7 +805,8 @@ fn a_cdn_link_that_would_404_is_refused_before_any_credential() {
 /// `auth::token()` and reports `CONFIG_MISSING` — exit 3 — which the safe
 /// `--path` half below shows happening for real.
 ///
-/// `PATH` is emptied so `gh` is unreachable: it keeps the 3 a deterministic local
+/// `PATH` is emptied to keep the child from finding anything at all: it keeps the 3
+/// a deterministic local
 /// failure, and it means a future regression here fails the test instead of
 /// attempting a live upload to someone else's repository.
 #[test]
@@ -595,10 +817,14 @@ fn an_escaping_path_template_is_refused_before_any_credential() {
     let shot_arg = shot.to_str().expect("utf-8 path");
     let empty_path = sb.dir.join("empty-path");
     std::fs::create_dir_all(&empty_path).expect("mkdir empty-path");
-    let no_gh: &[(&str, &str)] = &[("PATH", empty_path.to_str().expect("utf-8 path"))];
+    // What makes the exit 3 deterministic is that the sandbox has no `auth.toml`,
+    // not this: there is no longer any tool on `PATH` that could supply a credential.
+    let no_path: &[(&str, &str)] = &[("PATH", empty_path.to_str().expect("utf-8 path"))];
 
-    let (stdout, _, code) =
-        sb.run_with_env(&[shot_arg, "--path", "../x/{name}.{ext}", "--json"], no_gh);
+    let (stdout, _, code) = sb.run_with_env(
+        &[shot_arg, "--path", "../x/{name}.{ext}", "--json"],
+        no_path,
+    );
     assert_eq!(
         code, 2,
         "an escaping --path is a usage refusal, not a credential problem: {stdout}"
@@ -623,7 +849,7 @@ fn an_escaping_path_template_is_refused_before_any_credential() {
     // `auth::token()` passed — so the 2 above came from the guard and nowhere else.
     let (stdout, _, code) = sb.run_with_env(
         &[shot_arg, "--path", "images/{name}.{ext}", "--json"],
-        no_gh,
+        no_path,
     );
     assert_eq!(code, 3, "a safe --path runs on to the credential: {stdout}");
     assert_eq!(
@@ -634,122 +860,11 @@ fn an_escaping_path_template_is_refused_before_any_credential() {
     );
 }
 
-/// `init` writes the config file, so it is the one entry point whose validation
-/// gap persisted across runs. Needs the real binary: the prompts read stdin.
-#[test]
-fn init_never_leaves_a_config_it_would_refuse_to_load() {
-    let sb = Sandbox::new("init");
-    let cfg_file = sb.dir.join("cfg/gitpic/config.toml");
-    let before = std::fs::read_to_string(&cfg_file).expect("the sandbox config exists");
-
-    // `me x/pics` parses as a spec — `set_repo_spec` only splits and trims — but
-    // `me x` cannot go into a URL path segment. Answering this used to print
-    // "✓ saved config" and then make every later command fail CONFIG_INVALID,
-    // `init` included, because `init` loads the file before prompting.
-    let (stdout, stderr, code) = sb.run_with_stdin(&["init"], "me x/pics\nmain\ncdn\n");
-    assert_eq!(code, 2, "must be a usage error\n{stdout}\n{stderr}");
-    assert!(
-        !stdout.contains("saved config"),
-        "must not claim success: {stdout}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&cfg_file).expect("config still readable"),
-        before,
-        "a rejected answer must not touch the file on disk"
-    );
-
-    // `owner/` parses as a spec (`set_repo_spec` splits on the first `/`) but
-    // leaves an empty repo. That used to print "✓ saved config" for a file the
-    // next upload then refused with CONFIG_MISSING.
-    let (stdout, stderr, code) = sb.run_with_stdin(&["init"], "owner/\nmain\ncdn\n");
-    assert_eq!(
-        code, 2,
-        "empty repo half must be a usage error\n{stdout}\n{stderr}"
-    );
-    assert!(
-        !stdout.contains("saved config"),
-        "must not claim success: {stdout}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&cfg_file).expect("config still readable"),
-        before,
-        "a rejected answer must not touch the file on disk"
-    );
-
-    // And the config is still loadable, so `init` can be re-run to fix the answer.
-    let (_, _, code) = sb.run(&["config", "get"]);
-    assert_eq!(code, 0, "the existing config must still load");
-
-    let (stdout, stderr, code) = sb.run_with_stdin(&["init"], "someone/pics\nmain\nraw\n");
-    assert_eq!(code, 0, "a good answer must still save\n{stdout}\n{stderr}");
-    assert!(stdout.contains("saved config"), "{stdout}");
-    let (value, _, _) = sb.run(&["config", "get", "upload.link_kind"]);
-    assert_eq!(value.trim(), "raw");
-}
-
-/// The other side of the rule above: what `init` must judge is the configuration
-/// the *next* command resolves — this file plus the environment — not the file on
-/// its own.
-///
-/// `GITPIC_OWNER=me gitpic init` answering a bare `pics` is a setup `upload`
-/// accepts, because `upload` applies the environment before it checks the target.
-/// `init` judging only the file it was about to write refused it as a usage error,
-/// contradicting its own repo prompt, whose default was written for exactly that
-/// case: the only way to configure a repo under an environment owner was to stop
-/// using `init`.
-///
-/// Both halves are asserted, because either one alone permits a wrong fix. Reading
-/// the variable must not turn into *storing* it — a file carrying `owner = "me"`
-/// would outlive the variable that justified it — and it must not turn into
-/// accepting a bare name from anyone, which is the `CONFIG_MISSING` on the next
-/// upload that this whole check exists to prevent.
-#[test]
-fn init_validates_the_target_the_next_command_will_resolve() {
-    let sb = Sandbox::new("init-env");
-    let cfg_file = sb.dir.join("cfg/gitpic/config.toml");
-    // The sandbox config already carries an owner, which would complete the answer
-    // by itself and hide both halves of this.
-    std::fs::remove_file(&cfg_file).expect("start with nothing configured");
-
-    let (stdout, stderr, code) =
-        sb.run_with_stdin_env(&["init"], "pics\nmain\ncdn\n", &[("GITPIC_OWNER", "me")]);
-    assert_eq!(
-        code, 0,
-        "the environment completes this target, so it must save\n{stdout}\n{stderr}"
-    );
-    assert!(stdout.contains("saved config"), "{stdout}");
-    let saved = std::fs::read_to_string(&cfg_file).expect("the config was written");
-    assert!(
-        saved.contains("repo = \"pics\""),
-        "the answer belongs in the file: {saved}"
-    );
-    assert!(
-        saved.contains("owner = \"\""),
-        "the variable is read to judge the answer and never written — baking it in \
-         would leave `owner = \"me\"` behind after it is unset: {saved}"
-    );
-
-    std::fs::remove_file(&cfg_file).expect("back to nothing configured");
-    let (stdout, stderr, code) = sb.run_with_stdin(&["init"], "pics\nmain\ncdn\n");
-    assert_eq!(
-        code, 2,
-        "with nothing to complete it, a bare repo name is still a usage error\n{stdout}\n{stderr}"
-    );
-    assert!(
-        !stdout.contains("saved config"),
-        "must not claim success: {stdout}"
-    );
-    assert!(
-        !cfg_file.exists(),
-        "a rejected answer must leave nothing on disk"
-    );
-}
-
 /// `doctor` was the only subcommand whose failure reason lived solely in the
 /// process exit status — a channel `gitpic doctor --json | jq` silently replaces
 /// with jq's own 0, and that some agent harnesses never surface. Needs the real
 /// binary because the field is added where `summarize`'s result is serialized.
-/// Runs with an empty `PATH` so `gh` is unreachable and no network is touched.
+/// Runs with an empty `PATH` and no stored credential, so no network is touched.
 #[test]
 fn an_unhealthy_doctor_report_carries_its_code_on_stdout() {
     let sb = Sandbox::new("doctor-error");
@@ -795,4 +910,152 @@ fn the_binary_under_test_is_the_one_we_built() {
         "expected {}, got {stdout:?}",
         env!("CARGO_PKG_VERSION")
     );
+}
+
+/// `gitpic branches` refuses in the right order, and says which thing is missing.
+///
+/// Both halves are `CONFIG_MISSING`, and an agent that cannot tell them apart from the
+/// code alone acts on the wrong one: "no target" is fixed by `config set github.repo`,
+/// "no credential" only by handing `gitpic auth login` to a human. So the message is the
+/// contract here, not the code.
+///
+/// Offline by construction, which is the point — the target check runs before the
+/// credential is resolved and the credential before any request, so neither path this
+/// test takes reaches GitHub.
+#[test]
+fn branches_names_whichever_prerequisite_is_missing() {
+    let sb = Sandbox::new("branches");
+
+    // The sandbox has a target and no `auth.toml`.
+    let (stdout, _stderr, code) = sb.run(&["branches", "--json"]);
+    assert_eq!(code, 3, "no credential is CONFIG_MISSING\n{stdout}");
+    let v = parse(&stdout, "branches --json");
+    assert_eq!(
+        v.pointer("/error/code").and_then(|c| c.as_str()),
+        Some("CONFIG_MISSING"),
+        "{v}"
+    );
+    let message = v
+        .pointer("/error/message")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default();
+    assert!(
+        message.contains("gitpic auth login"),
+        "a missing credential has exactly one remedy: {message}"
+    );
+
+    // With no target either, the target is what gets named — it is checked first
+    // because a branch listing is *about* a repository, so "which one" has to be
+    // answered before "may I read it".
+    std::fs::write(sb.dir.join("cfg/gitpic/config.toml"), "[github]\n").expect("empty config");
+    let (stdout, _stderr, code) = sb.run(&["branches", "--json"]);
+    assert_eq!(code, 3, "no target is CONFIG_MISSING too\n{stdout}");
+    let v = parse(&stdout, "branches --json (no target)");
+    let message = v
+        .pointer("/error/message")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default();
+    assert!(
+        message.contains("missing target repo"),
+        "the target must be named ahead of the credential: {message}"
+    );
+    assert!(
+        message.contains("gitpic config set github.repo"),
+        "and the remedy has to be a command that exists: {message}"
+    );
+}
+
+/// The two read-only lookups take `--repo`; nothing else does.
+///
+/// `--repo` is declared per-subcommand rather than globally, so "which commands accept
+/// it" is a list that can silently go stale. Both of these answer a question *about* a
+/// repository, which is what makes looking before saving the value worth supporting.
+#[test]
+fn the_repository_lookups_accept_a_target_and_the_others_refuse_one() {
+    let sb = Sandbox::new("repo-flag");
+    // Accepted. Neither reaches the network here: the sandbox has no credential, so both
+    // stop at `CONFIG_MISSING` — which still proves clap took the flag.
+    for args in [
+        vec!["doctor", "--repo", "octocat/pics", "--json"],
+        vec!["branches", "--repo", "octocat/pics", "--json"],
+    ] {
+        let label = args.join(" ");
+        let (stdout, _stderr, code) = sb.run(&args);
+        assert_ne!(code, 2, "`{label}` must not be a usage error\n{stdout}");
+    }
+    // Refused, and the message says where the flag does work rather than only "not
+    // here" — without that last clause this was a two-step dead end.
+    let (stdout, stderr, code) = sb.run(&["--repo", "octocat/pics", "list"]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    let said = format!("{stdout}{stderr}");
+    assert!(said.contains("branches"), "{said}");
+}
+
+/// `-q` output has to stay parseable, which means no advisory lines in it.
+///
+/// The regression: `gitpic branches -q` printed its branch names and then
+/// `  note: \`main\` is configured but not in this list…` on the same stream, so
+/// `gitpic branches -q | while read b` handed the caller a sentence as a branch name.
+/// `gitpic repos -q` had the identical shape for a truncated listing.
+///
+/// Checked by reading the sources rather than by provoking each note, because two of the
+/// three need a state this test cannot reach offline (a >1000-repo account, a repository
+/// whose configured branch is absent). What the scan pins is the rule.
+///
+/// Scoped to functions that *take* a `mode`, which is the whole set that can honour one:
+/// `repos::choose_target` is the interactive picker, has no `mode` parameter, and its
+/// notes are part of a conversation rather than of a listing.
+#[test]
+fn a_quiet_listing_prints_only_the_thing_it_lists() {
+    for file in ["src/commands/repos.rs", "src/commands/branches.rs"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+        let text = std::fs::read_to_string(&path).expect("readable source");
+        let mut takes_mode = false;
+        let mut guarded = false;
+        let mut checked_a_function = false;
+        let mut offenders = Vec::new();
+        for (i, line) in text.lines().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with("//") {
+                continue;
+            }
+            // A signature at column 0 starts a new function, and only one that was
+            // handed a `mode` can be asked to consult it.
+            if line.starts_with("pub ") && line.contains("fn ") {
+                takes_mode = line.contains("mode: Mode");
+                guarded = false;
+                checked_a_function |= takes_mode;
+            }
+            if code.contains("Mode::Quiet") {
+                guarded = true;
+            }
+            if takes_mode && !guarded && code.contains("output::note(") {
+                offenders.push(format!("{file}:{}: {}", i + 1, code));
+            }
+        }
+        assert!(
+            checked_a_function,
+            "{file}: the scan found no `mode`-taking function, so it checked nothing — \
+             the signature it matches on must have changed"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these write an advisory line into `-q` output, where the caller reads every \
+             line as a value:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    // And one end-to-end check of the half that is reachable: no credential, so `-q`
+    // must print nothing at all rather than prose on stdout.
+    let sb = Sandbox::new("quiet-listing");
+    for args in [vec!["repos", "-q"], vec!["branches", "-q"]] {
+        let label = args.join(" ");
+        let (stdout, _stderr, code) = sb.run(&args);
+        assert_eq!(code, 3, "`{label}` needs a credential\n{stdout}");
+        assert!(
+            stdout.is_empty(),
+            "`{label}` must keep stdout clean on failure, got {stdout:?}"
+        );
+    }
 }

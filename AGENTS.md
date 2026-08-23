@@ -5,10 +5,11 @@
 - `main.rs` — entry point, subcommand dispatch, exit codes.
 - `cli.rs` — clap argument/subcommand definitions.
 - `config.rs` — config model + XDG path resolution (`~/.config/gitpic/config.toml`).
-- `auth.rs` — obtains credentials exclusively from `gh auth token`; no secret is held in `Config`.
+- `auth.rs` — the credential: reads/writes the 0600 `auth.toml` that `gitpic auth login` produces, and is the only source there is. No secret is held in `Config`.
+- `oauth.rs` — GitHub device flow: the wire protocol behind `gitpic auth login`.
 - `github.rs` — GitHub Contents API client (upload, dedup, health checks).
 - `naming.rs`, `link.rs`, `imageproc.rs`, `output.rs`, `error.rs` — path/hash, URL/markdown, compression, human/JSON output, error types.
-- `commands/` — one module per action (`upload`, `init`, `doctor`, `list`, `config_cmd`, `completion`, `skill`).
+- `commands/` — one module per action (`upload`, `auth_cmd`, `repos`, `branches`, `doctor`, `list`, `config_cmd`, `completion`, `skill`).
 
 Docs: `README.md` (中文, default), `README.en.md`, `skills/gitpic/SKILL.md` (agent
 usage), `CHANGELOG.zh-CN.md` (中文, Release source), and `CHANGELOG.md` (English). Keep
@@ -128,4 +129,4 @@ XDG directories and never reaches the network.
 Follow Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`. PRs need a clear description, linked issues, and green CI (fmt, clippy, test on Linux/macOS/Windows). Releases are cut by pushing a `vX.Y.Z` tag, which builds the four platform binaries **and** GitPic.app and publishes them in one Release. The tag must equal `v` plus `Cargo.toml`'s version — the release workflow asserts it. The `app-v*` tags are historical, from when the app versioned separately; do not create new ones.
 
 ## Security & Configuration Tips
-Never commit tokens. Credentials come exclusively from `gh auth token`, so nothing secret is written to `~/.config/gitpic/config.toml`. `GITPIC_TOKEN` and the removed `github.token` key are not accepted; CI must authenticate GitHub CLI before invoking gitpic.
+Never commit tokens. The credential comes from `gitpic auth login` and nowhere else: a 0600 `~/.config/gitpic/auth.toml`, written through the same atomic-private helper as the config, so nothing secret reaches `~/.config/gitpic/config.toml` and neither `gitpic config get` nor `config edit` can show a token. `auth.toml` is the one file in that directory that must never go into dotfiles sync. `gh auth token`, `--with-token`, `GITPIC_TOKEN` and the `github.token` key have all been removed — do not reintroduce a second source; each of them meant either a second identity or a secret travelling by hand, and `github.token` is still reported as `CONFIG_INVALID`. **`gitpic auth login` is interactive and cannot run unattended**, so CI that uploads needs a machine that has logged in once, and an agent must hand the command to the user rather than run it. `Debug` is hand-written on every type that holds a token (`auth::Stored`, `oauth::Granted`) so a panic or an `expect` cannot print one.

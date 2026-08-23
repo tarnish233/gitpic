@@ -93,6 +93,64 @@ pub struct RepoPermissions {
     pub admin: bool,
 }
 
+/// One repository the credential could upload to, as `gitpic repos` reports it.
+///
+/// Separate from [`RepoInfo`], which answers "may I write to *this* one" for the
+/// configured target. This answers "which ones are there at all", which is what a
+/// picker needs and what a hand-typed `owner/repo` gets wrong.
+///
+/// The set is scope-limited rather than complete: with `public_repo` GitHub does not
+/// return private repositories, so what a caller sees is already narrowed to what the
+/// token could actually use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RepoCandidate {
+    pub owner: String,
+    pub name: String,
+    pub private: bool,
+    /// What `github.branch` should be set to for this repo. GitHub reports it, so a
+    /// picker never has to guess `main` for a repo whose default is `master`.
+    pub default_branch: String,
+    /// Whether the credential may write.
+    ///
+    /// Reported rather than filtered here, so the *caller* decides. Both callers
+    /// exclude the false ones — a target that cannot be written to is not a choice —
+    /// and both say how many they dropped, because "my repo is missing from the list"
+    /// is the harder question to answer.
+    pub can_push: bool,
+}
+
+impl RepoCandidate {
+    /// `owner/name`: the label, and exactly what `github.repo` accepts.
+    pub fn spec(&self) -> String {
+        format!("{}/{}", self.owner, self.name)
+    }
+}
+
+/// How many pages of 100 the repository listing will walk before giving up.
+///
+/// A ceiling rather than an unbounded loop, because this is the only paginated request
+/// gitpic makes and a response that never shortens would otherwise spin. Ten pages is
+/// 1000 repositories; a caller that hits it is told, rather than handed a quietly
+/// truncated list.
+const MAX_PAGES: u32 = 10;
+const PER_PAGE: u32 = 100;
+
+#[derive(Deserialize)]
+struct RepoRow {
+    name: String,
+    #[serde(default)]
+    private: bool,
+    #[serde(default)]
+    default_branch: Option<String>,
+    owner: OwnerRow,
+    #[serde(default)]
+    permissions: Option<RepoPermissions>,
+}
+#[derive(Deserialize)]
+struct OwnerRow {
+    login: String,
+}
+
 /// The target branch, as GitHub describes it.
 #[derive(Deserialize)]
 pub struct BranchInfo {
@@ -107,6 +165,17 @@ pub struct BranchInfo {
 impl GitHub {
     pub fn new(token: &str, owner: &str, repo: &str, branch: &str) -> Result<Self> {
         Self::with_api(API, token, owner, repo, branch)
+    }
+
+    /// A client for the endpoints that are not about one repository — `/user`.
+    ///
+    /// `owner`, `repo` and `branch` stay empty because nothing reachable through
+    /// it interpolates them: [`GitHub::whoami`] is the only caller and it hits
+    /// `/user`. That is exactly what `gitpic auth login` and `auth status` need —
+    /// "is this token accepted, and by whom" — before, or entirely without, an
+    /// upload target being configured.
+    pub fn for_user(token: &str) -> Result<Self> {
+        Self::with_api(API, token, "", "", "")
     }
 
     /// Construct a client against an explicit API base.
@@ -292,6 +361,98 @@ impl GitHub {
         Ok(user.login)
     }
 
+    /// Every repository the credential can reach.
+    ///
+    /// `affiliation` is spelled out rather than left to GitHub's default so the list
+    /// cannot silently change shape under us: repositories the user owns, collaborates
+    /// on, or reaches through an organisation. That is the same set a person browsing
+    /// their own repositories would expect to pick from.
+    ///
+    /// Returns `(candidates, complete)`. `complete` is false when the walk hit
+    /// [`MAX_PAGES`], so a caller can say "showing the first N" instead of presenting a
+    /// truncated list as the whole set.
+    pub async fn repo_candidates(&self) -> Result<(Vec<RepoCandidate>, bool)> {
+        let mut complete = true;
+        let mut candidates = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let url = format!(
+                "{}/user/repos?per_page={PER_PAGE}&page={page}\
+                 &affiliation=owner,collaborator,organization_member&sort=full_name",
+                self.api
+            );
+            let rows: Vec<RepoRow> = self
+                .send_json(self.req(reqwest::Method::GET, url), "repositories")
+                .await?;
+            let count = rows.len();
+            candidates.extend(rows.into_iter().map(|r| RepoCandidate {
+                owner: r.owner.login,
+                name: r.name,
+                private: r.private,
+                // GitHub omits it only for an empty repository, where an upload
+                // creates the ref anyway; `main` is what `Config::default` uses.
+                default_branch: r.default_branch.unwrap_or_else(|| "main".to_string()),
+                can_push: r.permissions.map(|p| p.push || p.admin).unwrap_or(false),
+            }));
+            // A short page is the last page. Checked before the ceiling so a listing
+            // that happens to end exactly on a boundary is not called truncated.
+            if count < PER_PAGE as usize {
+                break;
+            }
+            if page == MAX_PAGES {
+                complete = false;
+            }
+        }
+
+        // `sort=full_name` orders each page, but the walk concatenates them and a
+        // repository can arrive under two affiliations — which in a dropdown reads as a
+        // bug. Sorting locally makes the dedup adjacent and the order independent of
+        // how GitHub chose to paginate.
+        candidates.sort_by(|a, b| (&a.owner, &a.name).cmp(&(&b.owner, &b.name)));
+        candidates.dedup_by(|a, b| a.owner == b.owner && a.name == b.name);
+        Ok((candidates, complete))
+    }
+
+    /// Every branch on the configured repository.
+    ///
+    /// The counterpart to [`Self::repo_candidates`], and it exists for the same reason:
+    /// an upload's target branch cannot be invented. The Contents API writes into an
+    /// existing ref and will not create one, so the set of values `github.branch` may
+    /// legally hold is exactly this list — which makes a picker the only shape that
+    /// cannot be wrong, and a typed branch name a 404 that reads like a missing repo.
+    ///
+    /// Returns `(names, complete)` on the same terms as `repo_candidates`.
+    pub async fn branch_candidates(&self) -> Result<(Vec<BranchCandidate>, bool)> {
+        let mut complete = true;
+        let mut branches: Vec<BranchCandidate> = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let url = format!(
+                "{}/branches?per_page={PER_PAGE}&page={page}",
+                self.repo_base()
+            );
+            let rows: Vec<BranchRow> = self
+                .send_json(self.req(reqwest::Method::GET, url), "branches")
+                .await?;
+            let count = rows.len();
+            branches.extend(rows.into_iter().map(|r| BranchCandidate {
+                name: r.name,
+                protected: r.protected,
+            }));
+            // A short page is the last page, checked before the ceiling so a listing
+            // that ends exactly on a boundary is not called truncated.
+            if count < PER_PAGE as usize {
+                break;
+            }
+            if page == MAX_PAGES {
+                complete = false;
+            }
+        }
+        // GitHub returns branches in its own order, which for a repository with a dozen
+        // of them reads as unsorted in a dropdown. The default branch is not hoisted
+        // here: which one that is belongs to the caller's config, not to this listing.
+        branches.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok((branches, complete))
+    }
+
     /// Fetch repo info (permissions).
     pub async fn repo_info(&self) -> Result<RepoInfo> {
         self.send_json(self.req(reqwest::Method::GET, self.repo_base()), "repo")
@@ -319,6 +480,26 @@ impl GitHub {
             Err(e) => Err(e),
         }
     }
+}
+
+/// One row of `GET /repos/{owner}/{repo}/branches`.
+#[derive(Deserialize)]
+struct BranchRow {
+    name: String,
+    #[serde(default)]
+    protected: bool,
+}
+
+/// One branch an upload could target.
+#[derive(Debug, Clone, Serialize)]
+pub struct BranchCandidate {
+    pub name: String,
+    /// Reported, not filtered on: protection does not by itself mean "cannot write" —
+    /// the rules may well permit this account — so hiding a protected branch would
+    /// remove a legitimate choice. It is the usual explanation when an upload fails
+    /// with 409/422 after every permission check passed, which is worth saying next to
+    /// the name rather than after the choice.
+    pub protected: bool,
 }
 
 /// GitHub's Contents API reports a Git blob SHA-1, not a plain file SHA-1.

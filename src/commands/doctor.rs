@@ -19,9 +19,6 @@ struct DoctorReport {
     /// upload will fail — the rules may permit this account — but it is the usual
     /// explanation when one does after every other check passed.
     branch_protected: bool,
-    /// Always `gh` when a credential was obtained, otherwise `null`. Kept in the
-    /// JSON contract for compatibility with earlier releases.
-    token_source: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     login: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,7 +74,6 @@ enum Branch {
 /// and still covers the part that had the bug.
 struct Probed {
     config_ok: bool,
-    source: Option<&'static str>,
     /// `/user`: `Ok(login)` when the credential is accepted. `None` when the probe
     /// never ran — no credential, or nothing configured to probe against.
     user: Option<Result<String>>,
@@ -115,7 +111,8 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
         // An unconfigured target outranks everything else: it is the first thing
         // the user has to fix, and its remedy is the one they can act on.
         failure = Some(AppError::config_missing(
-            "run `gitpic init` or set GITPIC_REPO=owner/name",
+            "no image host configured: `gitpic repos` lists your options and \
+             `gitpic config set github.repo owner/name` sets one",
         ));
     } else {
         let user_err = match &p.user {
@@ -191,7 +188,6 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
             token_valid,
             repo_writable,
             branch_protected: protected,
-            token_source: p.source,
             login,
             detail,
             error,
@@ -203,13 +199,13 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
 pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
     let config_ok = cfg.require_target().is_ok();
 
-    // Resolved before the target check so the source is reported even when the
-    // repo is unconfigured — that is what tells you whether `gh` is being used.
+    // Resolved before the target check, so a missing credential is reported even
+    // when the repo is unconfigured too: both are things the user has to fix, and
+    // `summarize` decides which one to lead with.
     let (token, mut setup_err) = match crate::auth::token() {
         Ok(token) => (Some(token), None),
         Err(e) => (None, Some(e)),
     };
-    let source = token.as_ref().map(|_| "gh");
 
     let mut user = None;
     let mut repo = None;
@@ -251,7 +247,6 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
 
     let (report, exit) = summarize(Probed {
         config_ok,
-        source,
         user,
         repo,
         branch,
@@ -274,17 +269,13 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
         };
         crate::output::line(&format!("{} config present", mark(report.config_ok)));
         crate::output::line(&format!(
-            "{} token valid{}{}",
+            "{} token valid{}",
             mark(report.token_valid),
             report
                 .login
                 .as_ref()
                 .map(|l| format!(" ({l})"))
                 .unwrap_or_default(),
-            report
-                .token_source
-                .map(|s| format!(" via {s}"))
-                .unwrap_or_default()
         ));
         crate::output::line(&format!(
             "{} repo writable{}",
@@ -372,7 +363,6 @@ mod tests {
     fn probed(user: Result<String>, repo: Result<bool>) -> Probed {
         Probed {
             config_ok: true,
-            source: Some("gh"),
             user: Some(user),
             repo: Some(repo),
             branch: Some(Ok(Branch::Present { protected: false })),
@@ -394,7 +384,6 @@ mod tests {
         );
         assert!(!r.ok);
         assert_eq!(exit, ErrorCode::Network.exit_code(), "retryable");
-        assert_eq!(r.token_source, Some("gh"));
     }
 
     #[test]
@@ -485,7 +474,6 @@ mod tests {
                 "nothing configured",
                 Probed {
                     config_ok: false,
-                    source: None,
                     user: None,
                     repo: None,
                     branch: None,
@@ -524,11 +512,10 @@ mod tests {
 
     #[test]
     fn an_unconfigured_target_outranks_a_missing_credential() {
-        // Neither probe ran. The report still carries `token_source: null` so an
+        // Neither probe ran, and the report still has to be a complete one so an
         // agent can read it, and the detail names the fix the user can act on.
         let (r, exit) = summarize(Probed {
             config_ok: false,
-            source: None,
             user: None,
             repo: None,
             branch: None,
@@ -536,12 +523,11 @@ mod tests {
         });
         assert!(!r.config_ok && !r.token_valid && !r.repo_writable && !r.ok);
         assert_eq!(exit, ErrorCode::ConfigMissing.exit_code());
-        assert_eq!(r.token_source, None);
         assert!(
             r.detail
                 .as_deref()
                 .unwrap_or_default()
-                .contains("gitpic init"),
+                .contains("gitpic config set github.repo"),
             "{:?}",
             r.detail
         );
@@ -553,15 +539,14 @@ mod tests {
         // overwrite the credential error's wording.
         let (r, exit) = summarize(Probed {
             config_ok: true,
-            source: None,
             user: None,
             repo: None,
             branch: None,
-            setup_err: Some(AppError::config_missing("run `gh auth login`")),
+            setup_err: Some(AppError::config_missing("run `gitpic auth login`")),
         });
         assert!(r.config_ok && !r.token_valid);
         assert_eq!(exit, ErrorCode::ConfigMissing.exit_code());
-        assert_eq!(r.detail.as_deref(), Some("run `gh auth login`"));
+        assert_eq!(r.detail.as_deref(), Some("run `gitpic auth login`"));
     }
 
     #[test]
@@ -572,7 +557,6 @@ mod tests {
         // sent the user looking in the wrong place.
         let (r, exit) = summarize(Probed {
             config_ok: true,
-            source: Some("gh"),
             user: Some(Ok("me".into())),
             repo: Some(Ok(true)),
             branch: Some(Ok(Branch::Missing)),
@@ -595,7 +579,6 @@ mod tests {
         // that a third probe can produce one.
         let (_, exit) = summarize(Probed {
             config_ok: true,
-            source: Some("gh"),
             user: Some(Err(AppError::network("503"))),
             repo: Some(Ok(true)),
             branch: Some(Ok(Branch::Missing)),
@@ -611,7 +594,6 @@ mod tests {
         // upload 409/422s after every check above came back clean.
         let (r, exit) = summarize(Probed {
             config_ok: true,
-            source: Some("gh"),
             user: Some(Ok("me".into())),
             repo: Some(Ok(true)),
             branch: Some(Ok(Branch::Present { protected: true })),

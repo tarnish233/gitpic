@@ -4,7 +4,8 @@
 # The embedded CLI is not a convenience. A Finder-launched .app gets
 # PATH=/usr/bin:/bin:/usr/sbin:/sbin, so a bare `gitpic` lookup fails; shipping
 # the binary inside the bundle and calling it by absolute path is what makes the
-# GUI work at all. (`gh` is found separately at runtime — see ToolDiscovery.)
+# GUI work at all. It is the only tool the app needs: the CLI holds its own
+# credential, so there is nothing else to find on PATH at runtime.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

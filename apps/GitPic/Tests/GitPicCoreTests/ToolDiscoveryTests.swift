@@ -4,10 +4,10 @@ import Foundation
 
 /// Tests for the login-shell probe's parsing decision.
 ///
-/// Separate from the "Tool discovery" suite in `EnvelopeTests.swift`, which
-/// covers `childPATH`, `GHProbe`, and the spawn timeout.
+/// Separate from the "Tool discovery" suite in `EnvelopeTests.swift`, which covers
+/// `childPATH` and the spawn timeout.
 ///
-/// `sh` stands in for `gh` throughout, because `/bin/sh` exists and is
+/// `sh` stands in for the tool being located, because `/bin/sh` exists and is
 /// executable on every macOS: the `isExecutableFile` half of the check is really
 /// being exercised, not passing for want of a file to reject.
 @Suite("Login-shell tool discovery")

@@ -16,7 +16,7 @@ enum Fixture {
     }
     """
 
-    /// `gitpic doctor --json` with gh reachable → exit 0
+    /// `gitpic doctor --json` with a stored credential → exit 0
     static let doctorHealthy = """
     {
       "ok": true,
@@ -24,14 +24,13 @@ enum Fixture {
       "token_valid": true,
       "repo_writable": true,
       "branch_protected": false,
-      "token_source": "gh",
       "login": "tarnish233"
     }
     """
 
-    /// The same binary under a Finder-launch PATH, where `gh` is unreachable →
-    /// exit 3. This is the failure ToolDiscovery exists to prevent, so keeping it
-    /// as a fixture keeps the GUI's handling of it honest.
+    /// The same binary before anyone has run `gitpic auth login` → exit 3. It is
+    /// the one credential failure there is, so keeping it as a fixture keeps the
+    /// GUI's handling of it honest.
     static let doctorNoCredential = """
     {
       "ok": false,
@@ -39,11 +38,10 @@ enum Fixture {
       "token_valid": false,
       "repo_writable": false,
       "branch_protected": false,
-      "token_source": null,
-      "detail": "no GitHub credential: install GitHub CLI and run `gh auth login`",
+      "detail": "no GitHub credential: run `gitpic auth login`",
       "error": {
         "code": "CONFIG_MISSING",
-        "message": "no GitHub credential: install GitHub CLI and run `gh auth login`"
+        "message": "no GitHub credential: run `gitpic auth login`"
       }
     }
     """
@@ -179,7 +177,6 @@ struct DoctorTests {
         #expect(r.ok)
         #expect(r.tokenValid == true)
         #expect(r.repoWritable == true)
-        #expect(r.tokenSource == "gh")
         #expect(r.login == "tarnish233")
         #expect(r.error == nil)   // error is present exactly when ok is false
     }
@@ -188,12 +185,14 @@ struct DoctorTests {
     func noCredential() throws {
         let r: DoctorReport = try decode(Fixture.doctorNoCredential)
         #expect(!r.ok)
-        #expect(r.tokenSource == nil)
         #expect(r.tokenValid == false)
         #expect(r.error?.code == "CONFIG_MISSING")
         #expect(r.login == nil)
-        // This is the code the GUI must re-diagnose instead of echoing.
-        #expect(GitpicErrorCode(wire: r.error!.code)?.needsToolDiagnosis == true)
+        // The message is what the GUI shows, so it has to name the one command that
+        // fixes this and nothing the app no longer depends on.
+        let message = r.error!.message
+        #expect(message.contains("gitpic auth login"))
+        #expect(!message.contains("gh auth"))
     }
 }
 
@@ -224,44 +223,32 @@ struct ErrorCodeTests {
         #expect(GitpicErrorCode(wire: "TEAPOT") == nil)
     }
 
-    @Test("only CONFIG_MISSING needs the gh re-probe")
-    func diagnosisScope() {
-        let needing = GitpicErrorCode.allCases.filter(\.needsToolDiagnosis)
-        #expect(needing == [.configMissing])
-    }
 }
 
 @Suite("Tool discovery")
 struct ToolDiscoveryTests {
-    @Test("childPATH prepends gh's directory to the minimal Finder PATH")
+    @Test("the child gets the minimal Finder PATH, explicitly rather than inherited")
     func childPATH() {
-        let t = ToolPaths(gitpic: URL(fileURLWithPath: "/x/gitpic"),
-                          gh: URL(fileURLWithPath: "/opt/homebrew/bin/gh"))
-        #expect(t.childPATH == "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+        // It used to prepend gh's directory, because the CLI spawned `gh` to get a
+        // credential. It holds its own now, so the minimal set is the whole answer.
+        #expect(ToolPaths.childPATH == "/usr/bin:/bin:/usr/sbin:/sbin")
     }
 
-    @Test("with no gh, childPATH is still valid rather than containing an empty entry")
-    func childPATHNoGH() {
-        let t = ToolPaths(gitpic: URL(fileURLWithPath: "/x/gitpic"), gh: nil)
-        #expect(t.childPATH == "/usr/bin:/bin:/usr/sbin:/sbin")
-        #expect(!t.childPATH.contains("::"))
-    }
-
-    @Test("gh account is parsed out of gh's prose, and absence is not an error")
-    func accountParsing() {
-        #expect(GHProbe.account(in: "✓ Logged in to github.com account tarnish233 (keyring)")
-                == "tarnish233")
-        // Multi-line, the shape gh actually prints.
-        #expect(GHProbe.account(in: "github.com\n  ✓ Logged in to github.com account octocat (keyring)\n  - Active account: true")
-                == "octocat")
-        // Prose merely containing the word must not yield a fabricated login.
-        #expect(GHProbe.account(in: "no mention of an account here") == nil)
-        #expect(GHProbe.account(in: "You are not logged into any GitHub hosts") == nil)
-    }
-
-    @Test("a missing gh binary reports notInstalled rather than throwing")
-    func missingGH() {
-        #expect(GHProbe.status(gh: nil) == .notInstalled)
+    /// The banner for a run that produced no links has to carry the *message*.
+    ///
+    /// `CONFIG_MISSING` is why: the message is the entire remedy, and the GUI has no
+    /// re-probe left to reconstruct one with. A future edit that trims this back to
+    /// the code alone would leave the user with "CONFIG_MISSING：" and no next step —
+    /// and nothing pinned that while the string lived in the executable target.
+    @Test("a credential failure's banner carries the remedy, not just the code")
+    func failureSummaryCarriesTheRemedy() {
+        let body = ErrorBody(code: "CONFIG_MISSING",
+                             message: "no GitHub credential: run `gitpic auth login`")
+        let summary = UploadPresentation.failureSummary(body)
+        #expect(summary.contains("CONFIG_MISSING"))
+        #expect(summary.contains("gitpic auth login"))
+        // No failure at all still says something, rather than an empty banner.
+        #expect(UploadPresentation.failureSummary(nil) == "上传没有返回任何结果")
     }
 
     @Test("a hung child is killed rather than blocking forever")

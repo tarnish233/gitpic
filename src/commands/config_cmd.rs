@@ -214,13 +214,15 @@ fn set_key(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
         _ => return Err(AppError::usage(format!("unknown key: {key}"))),
     }
     // Syntax is parsed above; all semantic rules are centralized in Config so
-    // file, environment, `config set`, `init` and `--repo` cannot drift apart.
+    // file, environment, `config set`, the login picker and `--repo` cannot drift
+    // apart.
     //
-    // `require_target` is deliberately not one of them. `init` asks for the whole
-    // target in one answer, so a half-answer is a typo it can reject; here one key
-    // is set at a time, and `config set github.repo pics` before the owner is the
-    // normal first step on a fresh machine. Refusing that would answer a write with
-    // `CONFIG_MISSING`, whose remedy is "run `gitpic init`" — a loop for an agent.
+    // `require_target` is deliberately not one of them. The picker sets the whole
+    // target from one choice, so it cannot leave a half; here one key is set at a
+    // time, and `config set github.repo pics` before the owner is the normal first
+    // step on a fresh machine. Refusing that would answer a write with
+    // `CONFIG_MISSING`, whose remedy points straight back at `config set` — a loop
+    // for an agent.
     // A half-configured target is a state — `doctor` reports it, and `check_segment`
     // permits either half to be empty for exactly this reason — not an unusable
     // file. `config edit` stays unchecked for a stronger reason still: every

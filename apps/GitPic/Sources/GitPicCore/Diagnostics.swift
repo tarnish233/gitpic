@@ -2,10 +2,11 @@ import Foundation
 
 /// Append-only launch log at `~/Library/Logs/GitPic.log`.
 ///
-/// This exists because the app's hardest failure mode is invisible from the UI:
-/// a Finder-launched bundle gets `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, and if `gh`
-/// is not found every upload fails with one collapsed error message. Recording the
-/// resolved paths at launch turns "uploads mysteriously fail" into one line to read.
+/// This exists because the app's hardest failure mode is invisible from the UI: a
+/// Finder-launched bundle gets `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so nothing on a
+/// Homebrew or nix prefix is findable by name, and if `gitpic` is not located the app
+/// cannot upload at all. Recording the resolved path at launch turns "uploads
+/// mysteriously fail" into one line to read.
 public enum Diagnostics {
     public static var logURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -33,16 +34,14 @@ public enum Diagnostics {
     }
 
     /// One line describing what the process can actually reach.
-    public static func recordLaunch(appVersion: String, tools: ToolPaths?, ghStatus: GHStatus?) {
+    public static func recordLaunch(appVersion: String, tools: ToolPaths?) {
         let path = ProcessInfo.processInfo.environment["PATH"] ?? "<unset>"
         log("launch app=\(appVersion) inheritedPATH=\(path)")
         if let tools {
             log("  gitpic=\(tools.gitpic.path)")
-            log("  gh=\(tools.gh?.path ?? "NOT FOUND")")
-            log("  childPATH=\(tools.childPATH)")
+            log("  childPATH=\(ToolPaths.childPATH)")
         } else {
             log("  gitpic=NOT FOUND (app cannot upload)")
         }
-        if let ghStatus { log("  ghStatus=\(ghStatus)") }
     }
 }

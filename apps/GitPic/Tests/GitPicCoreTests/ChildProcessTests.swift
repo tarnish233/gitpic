@@ -133,7 +133,7 @@ struct RunnerSerialisationTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let log = dir.appendingPathComponent("log")
         let runner = GitpicRunner(
-            tools: ToolPaths(gitpic: try Self.fakeGitpic(in: dir, log: log), gh: nil))
+            tools: ToolPaths(gitpic: try Self.fakeGitpic(in: dir, log: log)))
 
         let old = try JSONDecoder()
             .decode(ConfigEnvelope.self, from: Data(ConfigTests.live.utf8)).config

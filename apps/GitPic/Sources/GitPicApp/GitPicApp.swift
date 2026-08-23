@@ -75,65 +75,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Tools
 
-    /// Locating `gh` and probing `gh auth status` spawn processes and can block
-    /// on a login shell. Keep that off the main thread so a hung probe cannot
-    /// freeze the menu extra at launch.
+    /// Locating `gitpic` can spawn a login shell. Keep that off the main thread so
+    /// a hung probe cannot freeze the menu extra at launch.
     private func resolveTools() async {
         let discovered = await Self.discover(bundleResourceURL: Bundle.main.resourceURL)
         let version = Bundle.main
             .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
-        guard let paths = discovered.0 else {
+        guard let paths = discovered else {
             statusIcon = .unavailable
             // The model has to be told the search *finished*, not just that there is
             // no runner: until then every pane reads a nil runner as "still looking"
             // and offers no way forward.
             AppModel.shared.toolsUnavailable()
-            Diagnostics.recordLaunch(appVersion: version, tools: nil, ghStatus: nil)
+            Diagnostics.recordLaunch(appVersion: version, tools: nil)
             return
         }
         tools = paths
         let r = GitpicRunner(tools: paths)
         runner = r
+        // `attach` starts the reads that need a runner — see it for why the window's
+        // own first attempt cannot be what does it.
         AppModel.shared.attach(runner: r, tools: paths)
-        // The window can be open before discovery finishes, and the reload it fired
-        // on open no-ops while `runner` is nil. Without this the form sits on its
-        // placeholder until the user happens to find the retry button.
-        Task { await AppModel.shared.reload() }
-        // Probing gh here costs one spawn at launch and makes the single most
-        // confusing failure (no gh under a Finder launch) legible in the log.
-        Diagnostics.recordLaunch(appVersion: version, tools: paths,
-                                 ghStatus: discovered.1)
+        Diagnostics.recordLaunch(appVersion: version, tools: paths)
         Diagnostics.log("  dryRun=\(dryRun)")
     }
 
     /// The one thread discovery is allowed to block.
     ///
-    /// `ToolDiscovery.resolve` and `GHProbe.status` both spawn and wait, and
-    /// `ChildProcess.run` drains the pipes *on the calling thread*. `Task.detached`
-    /// does not come with a thread of its own — it runs on the cooperative pool — so
-    /// doing this there parks a cooperative thread for up to 8 s per tool, the one
-    /// thing `GitpicRunner`'s gate comment says never to do. Here the pool only ever
-    /// waits on the continuation.
+    /// `ToolDiscovery.resolve` spawns and waits, and `ChildProcess.run` drains the
+    /// pipes *on the calling thread*. `Task.detached` does not come with a thread of
+    /// its own — it runs on the cooperative pool — so doing this there parks a
+    /// cooperative thread for up to 8 s, the one thing `GitpicRunner`'s gate comment
+    /// says never to do. Here the pool only ever waits on the continuation.
     ///
     /// Its own queue rather than `GitpicRunner`'s gate: discovery is not a `gitpic`
     /// invocation and must not queue behind an upload.
     private static let discoveryQueue = DispatchQueue(label: "dev.gitpic.app.discovery")
 
-    private static func discover(bundleResourceURL: URL?) async -> (ToolPaths?, GHStatus?) {
+    private static func discover(bundleResourceURL: URL?) async -> ToolPaths? {
         await withCheckedContinuation { cont in
             discoveryQueue.async {
-                let paths = ToolDiscovery.resolve(bundleResourceURL: bundleResourceURL)
-                cont.resume(returning: (paths, paths.map { GHProbe.status(gh: $0.gh) }))
-            }
-        }
-    }
-
-    /// `GHProbe.status` spawns and waits. Same queue as `discover`, same reason:
-    /// never `Task.detached` — that parks a cooperative thread for up to 8 s.
-    private static func probeGH(gh: URL?) async -> GHStatus {
-        await withCheckedContinuation { cont in
-            discoveryQueue.async {
-                cont.resume(returning: GHProbe.status(gh: gh))
+                cont.resume(returning: ToolDiscovery.resolve(bundleResourceURL: bundleResourceURL))
             }
         }
     }
@@ -641,36 +623,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                         clipboard: clipboard, form: form))
     }
 
+    /// Echo what the CLI said, for every code including `CONFIG_MISSING`.
+    ///
+    /// `CONFIG_MISSING` used to be re-diagnosed here: the CLI took its credential
+    /// from `gh auth token` and collapsed "gh missing", "gh not logged in" and "gh
+    /// failed" into one message with gh's stderr thrown away, so the GUI ran
+    /// `gh auth status` itself to say something a user could act on. With one
+    /// credential source there is one state and one remedy — "run `gitpic auth
+    /// login`" — and it is already in `err.message`, so re-deriving it here could
+    /// only go out of step with the CLI.
     private func reportFailure(_ err: ErrorBody) {
-        // CONFIG_MISSING is the one code the GUI must not simply echo: the CLI
-        // collapses "gh missing", "gh not logged in", and "gh failed" into it and
-        // throws gh's stderr away, so re-probe and say something actionable.
-        if let code = GitpicErrorCode(wire: err.code), code.needsToolDiagnosis {
-            let gh = tools?.gh
-            // Probe off the main actor; do not `report(.failed)` — that would
-            // banner a second time if a first report is ever added, and today
-            // there is none. `present` returns, `defer { endUpload() }` clears
-            // the icon, then this notifies with the diagnosed string.
-            Task { @MainActor in
-                let status = await Self.probeGH(gh: gh)
-                let summary: String
-                switch status {
-                case .notInstalled:
-                    summary = "找不到 gh，请 brew install gh"
-                case .notLoggedIn:
-                    summary = "gh 未登录，请 gh auth login"
-                case .failed(let detail):
-                    summary = "gh 异常：\(detail.prefix(60))"
-                case .ready:
-                    // gh is fine, so the credential problem is elsewhere — show what
-                    // the CLI actually said rather than guessing.
-                    summary = err.message
-                }
-                AppModel.shared.notify(title: "GitPic 上传失败", body: summary)
-            }
-            return
-        }
-        report(.failed(summary: "\(err.code)：\(err.message)"))
+        report(.failed(summary: UploadPresentation.failureSummary(err)))
     }
 
     private func present(_ error: Error) {

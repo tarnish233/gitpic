@@ -168,15 +168,18 @@ impl Cli {
         Err(crate::error::AppError::usage(
             "upload options apply to nothing before a subcommand: pass them to the \
              upload itself (`gitpic a.png --compress`), after `paste` (`gitpic paste \
-             --no-copy`), or as `--repo` after `doctor`. No other subcommand takes \
-             them.",
+             --no-copy`), or as `--repo` after `doctor` or `branches`. No other \
+             subcommand takes them.",
         ))
     }
 
     /// `--repo`, from whichever command actually accepts it.
     pub fn repo_override(&self) -> Option<&str> {
         match &self.command {
-            Some(Command::Doctor { repo }) => repo.as_deref(),
+            // The two read-only checks that answer a question *about* a repository, so
+            // both take one directly — that is what lets someone look before committing
+            // the value to `config.toml`.
+            Some(Command::Doctor { repo }) | Some(Command::Branches { repo }) => repo.as_deref(),
             _ => self.upload_args().repo.as_deref(),
         }
     }
@@ -203,8 +206,11 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Interactively initialize configuration
-    Init,
+    /// Log in to GitHub and manage the stored credential
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
+    },
     /// Read an image from the clipboard and upload it
     Paste {
         #[command(flatten)]
@@ -217,6 +223,14 @@ pub enum Command {
     },
     /// Health check: config present, token valid, repo writable
     Doctor {
+        /// Override target repo (owner/repo)
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// List the repositories this credential could upload to
+    Repos,
+    /// List the branches on the configured repository
+    Branches {
         /// Override target repo (owner/repo)
         #[arg(long)]
         repo: Option<String>,
@@ -238,6 +252,29 @@ pub enum Command {
         #[command(subcommand)]
         action: SkillAction,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuthAction {
+    /// Log in to GitHub in the browser and store the credential
+    Login {
+        /// Print the code and URL without trying to open a browser
+        #[arg(long)]
+        no_browser: bool,
+
+        /// OAuth scopes to ask for (default: public_repo; use `repo` for a private
+        /// image host)
+        #[arg(long)]
+        scope: Option<String>,
+
+        /// Log in against another OAuth app instead of gitpic's own
+        #[arg(long)]
+        client_id: Option<String>,
+    },
+    /// Show which credential gitpic would use, and whose it is
+    Status,
+    /// Remove the credential stored by `gitpic auth login`
+    Logout,
 }
 
 #[derive(Debug, Subcommand)]
@@ -344,7 +381,9 @@ mod tests {
             vec!["config", "get"],
             vec!["skill", "path"],
             vec!["completion", "bash"],
-            vec!["init"],
+            vec!["auth", "status"],
+            vec!["repos"],
+            vec!["branches"],
             vec!["paste"],
         ] {
             for global in [vec!["--json"], vec!["-q"], vec!["-vv"]] {
@@ -374,6 +413,7 @@ mod tests {
             vec!["gitpic", "--repo", "o/r", "doctor"],
             vec!["gitpic", "--max-width", "800", "list"],
             vec!["gitpic", "-f", "url", "config", "get"],
+            vec!["gitpic", "--compress", "auth", "login"],
         ] {
             let cli = Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
             let err = cli
@@ -596,6 +636,89 @@ mod tests {
         assert_eq!(u.max_width, Some(800));
         assert_eq!(u.quality, Some(90));
         assert!(matches!(cli.command, Some(Command::Paste { .. })));
+    }
+
+    #[test]
+    fn auth_login_takes_the_browser_flow_with_no_flags() {
+        let cli = Cli::try_parse_from(["gitpic", "auth", "login"]).unwrap();
+        match cli.command {
+            Some(Command::Auth {
+                action:
+                    AuthAction::Login {
+                        no_browser,
+                        ref scope,
+                        ref client_id,
+                    },
+            }) => {
+                assert!(!no_browser);
+                // Both unset here, and `oauth::scope` is what turns that into
+                // `public_repo` — the flag stays an `Option` so "the user asked for
+                // public_repo" and "nobody said anything" remain distinguishable.
+                assert!(scope.is_none() && client_id.is_none());
+            }
+            ref other => panic!("expected auth login, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_login_parses_its_overrides() {
+        let cli = Cli::try_parse_from([
+            "gitpic",
+            "auth",
+            "login",
+            "--no-browser",
+            "--scope",
+            "repo",
+            "--client-id",
+            "Ov23liX",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Auth {
+                action:
+                    AuthAction::Login {
+                        no_browser,
+                        ref scope,
+                        ref client_id,
+                    },
+            }) => {
+                assert!(no_browser);
+                assert_eq!(scope.as_deref(), Some("repo"));
+                assert_eq!(client_id.as_deref(), Some("Ov23liX"));
+            }
+            ref other => panic!("expected auth login, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_removed_credential_route_does_not_parse() {
+        // `--with-token` was a real flag once. Left in place it would be accepted and
+        // then ignored, which is the shape this project refuses everywhere else — and
+        // silently doing nothing with a token someone piped in is the worst available
+        // outcome, because the secret has already left its keychain.
+        assert!(Cli::try_parse_from(["gitpic", "auth", "login", "--with-token"]).is_err());
+    }
+
+    #[test]
+    fn auth_status_and_logout_parse() {
+        assert!(matches!(
+            Cli::try_parse_from(["gitpic", "auth", "status", "--json"])
+                .unwrap()
+                .command,
+            Some(Command::Auth {
+                action: AuthAction::Status
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["gitpic", "auth", "logout"])
+                .unwrap()
+                .command,
+            Some(Command::Auth {
+                action: AuthAction::Logout
+            })
+        ));
+        // `auth` on its own names no action; clap must ask for one.
+        assert!(Cli::try_parse_from(["gitpic", "auth"]).is_err());
     }
 
     #[test]

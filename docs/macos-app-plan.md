@@ -19,7 +19,9 @@ Finder 启动的 .app 内 ProcessInfo.PATH     → /usr/bin:/bin:/usr/sbin:/sbin
 测法：`osascript -e 'tell application "Finder" to open POSIX file …'` 启动探针 app，让 Finder 当父进程。
 **注意**：用 `open Probe.app` 测是错的——`open` 会把调用方（终端）的环境传播进去，PATH 完整、`gh` 能找到，测出来是假阴性。必须由 Finder 启动。
 
-影响：`src/auth.rs:49` 是 `Command::new("gh")` 裸名 PATH 查找，无绝对路径兜底、无配置项可覆盖；而 v0.4.0 之后 gitpic 的凭据**只**来自 `gh auth token`。所以 Finder 启动的 GUI 直接 spawn `gitpic` 会 100% 拿不到 token，报 `CONFIG_MISSING`（exit 3）。→ 见 §3。
+影响（**当时**）：`src/auth.rs` 用 `Command::new("gh")` 裸名查 PATH，无绝对路径兜底、无配置项可覆盖；而 v0.4.0 之后 gitpic 的凭据**只**来自 `gh auth token`。所以 Finder 启动的 GUI 直接 spawn `gitpic` 会 100% 拿不到 token，报 `CONFIG_MISSING`（exit 3）。→ 见 §3。
+
+> **上面这条影响已经不成立。** 凭据现在只来自 `gitpic auth login`（GitHub App device flow），CLI 认证时不 spawn 任何东西，`gh` 探测整套已从 app 删除。**C1 的测量本身仍然成立**，而且仍然是嵌入 CLI 的理由 —— 只是它不再关乎凭据。
 
 ### C2 — 菜单栏那 32px 是系统保留区，任何 window level 的面板都收不到鼠标/拖拽事件
 
@@ -178,6 +180,13 @@ writeObjects():   changeCount     1,  types 6,  file urls 1
 
 ## 3. `gh` 发现与首启动引导
 
+> **本节已废弃，保留作为记录。** 凭据现在只来自 `gitpic auth login`（GitHub App device flow），CLI
+> 认证时不 spawn 任何东西，所以 C1 的 PATH 问题对凭据不再成立。`gh` 探测整套已从 app 删除：
+> `ToolPaths.gh`、`locateGH`、`GHStatus`、`GHProbe` 都没了，`childPATH` 现在只有
+> `/usr/bin:/bin:/usr/sbin:/sbin`，前面不再拼任何目录。首启动诊断仍然用 `doctor --json`，但一个凭据
+> 来源只有一种状态和一个补救办法，而它已经在 `error.message` 里 —— 所以 app 直接回显 CLI 说的话，
+> 不再自己探测一遍。下面的发现顺序和分支引导都是当时的记录。
+
 C1 决定这一节不是可选项——不做，Finder 启动的 app 每次上传都失败。
 
 **发现顺序**（首次启动解析一次，存进 UserDefaults，失效时重解析）：
@@ -187,7 +196,7 @@ C1 决定这一节不是可选项——不做，Finder 启动的 app 每次上�
 
 解析到后，spawn `gitpic` 时**显式传 env**：`PATH = <gh 所在目录>:/usr/bin:/bin:/usr/sbin:/sbin`。这是让 `src/auth.rs:49` 的裸名查找能成功的唯一办法，且不需要改 CLI。
 
-**首启动诊断用 `doctor --json`**，不要自己猜状态。它返回 `config_ok`/`token_valid`/`repo_writable`/`branch_protected`/`token_source`/`login`/`detail`，够画一个体检页。
+**首启动诊断用 `doctor --json`**，不要自己猜状态。它返回 `ok`/`config_ok`/`token_valid`/`repo_writable`/`branch_protected`/`login`/`detail`/`error`，够画一个体检页。（`token_source` 是当时有的字段，已随第二个凭据来源一起删掉。）
 
 但有一个已知的分辨率问题必须在 GUI 侧补：`src/auth.rs:57-60` 和 `84-86` 把**「没装 gh」「装了但没登录」「gh 因任何原因非零退出」三种情况塌成同一个 `CONFIG_MISSING` + 同一句文案**，且 `gh` 的 stderr 被 `Stdio::null()` 丢掉。而首启动引导最需要区分的恰好是前两种。
 

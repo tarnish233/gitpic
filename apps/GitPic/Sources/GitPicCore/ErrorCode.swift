@@ -35,9 +35,8 @@ public enum GitpicErrorCode: UInt8, Sendable, CaseIterable {
         self = m
     }
 
-    /// What the user should be told to *do*. `configMissing` is the one the GUI
-    /// must not parrot: the CLI collapses "no gh", "gh not logged in", and "gh
-    /// failed" into it (`src/auth.rs:57-60`, `84-86`) with gh's stderr dropped,
-    /// so the GUI re-probes gh itself before showing anything.
-    public var needsToolDiagnosis: Bool { self == .configMissing }
+    // `needsToolDiagnosis` lived here: `CONFIG_MISSING` was the one code the GUI
+    // re-diagnosed rather than echoed, because the CLI collapsed three `gh` states
+    // into it. One credential source means one state and one remedy, already in the
+    // message, so nothing branches on the code any more.
 }

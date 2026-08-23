@@ -60,8 +60,8 @@ struct LiveContractTests {
     func liveDoctor() async throws {
         let r = try await Self.runner().doctor()
         #expect(r.configOK == true)
-        #expect(r.tokenValid == true, "gh credential not usable: \(r.detail ?? "no detail")")
-        #expect(r.tokenSource == "gh")
+        #expect(r.tokenValid == true,
+                "no usable credential — run `gitpic auth login`: \(r.detail ?? "no detail")")
         #expect(r.error == nil)
     }
 

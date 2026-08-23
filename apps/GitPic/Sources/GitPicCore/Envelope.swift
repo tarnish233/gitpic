@@ -95,7 +95,6 @@ public struct DoctorReport: Codable, Sendable {
     public let tokenValid: Bool?
     public let repoWritable: Bool?
     public let branchProtected: Bool?
-    public let tokenSource: String?
     public let login: String?
     public let detail: String?
     public let error: ErrorBody?
@@ -106,7 +105,6 @@ public struct DoctorReport: Codable, Sendable {
         case tokenValid = "token_valid"
         case repoWritable = "repo_writable"
         case branchProtected = "branch_protected"
-        case tokenSource = "token_source"
         case login, detail, error
     }
 }
