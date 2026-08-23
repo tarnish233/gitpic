@@ -96,7 +96,8 @@ fn env_var(key: &str) -> Option<String> {
 
 /// Resolve a base directory: prefer the given env var, else `$HOME/<fallback>`
 /// (on Windows, fall back to `%USERPROFILE%`). Used for the XDG config/data dirs
-/// and for agent home dirs such as `CLAUDE_CONFIG_DIR` / `CODEX_HOME`.
+/// and for agent home dirs such as `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and
+/// `AGENT_HOME`.
 pub(crate) fn base_dir(key: &str, fallback: &str) -> Result<PathBuf> {
     // Absolute only, which is what the XDG spec says to do with a relative value:
     // ignore it. `XDG_CONFIG_HOME=.config` in a shell profile — an easy typo — made
@@ -415,12 +416,47 @@ pub(crate) fn write_private_atomic(path: &Path, text: &str, what: &str) -> Resul
 /// [`write_private_atomic`] without the permissions: atomic, but not tightened.
 ///
 /// For files gitpic writes *outside* its own config directory — `skill install` puts
-/// `SKILL.md` under `~/.claude/skills`, which belongs to the user's agent. The
+/// `SKILL.md` under an agent's skills directory, which belongs to that agent. The
 /// atomicity is what is wanted there (a truncate-then-write left a half-written skill
 /// that an agent loads as a valid-but-lobotomised document), while chmod-ing that
 /// directory to 0700 would be gitpic reaching outside its own house.
 pub(crate) fn write_atomic(path: &Path, text: &str, what: &str) -> Result<()> {
     write_atomic_inner(path, text, what, false)
+}
+
+/// Publish a complete new file without ever replacing an existing destination.
+///
+/// The temporary file is linked into place in one filesystem operation. A concurrent
+/// creator therefore wins cleanly: `hard_link` returns `AlreadyExists`, the caller gets
+/// an error, and the other process's file is left untouched. Writing directly with
+/// `create_new` would also avoid replacement, but a crash could leave a truncated file
+/// at the final path for an agent to load.
+pub(crate) fn write_new_atomic(path: &Path, text: &str, what: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| AppError::general(format!("mkdir: {e}")))?;
+    }
+
+    let temp_path = temporary_path(path);
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        file.write_all(text.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+
+        fs::hard_link(&temp_path, path)?;
+        fs::remove_file(&temp_path)
+    })();
+
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(AppError::general(format!("write {what}: {error}")));
+    }
+
+    Ok(())
 }
 
 fn write_atomic_inner(path: &Path, text: &str, what: &str, private: bool) -> Result<()> {
@@ -623,6 +659,26 @@ mod tests {
         let saved = fs::read_to_string(&path).unwrap();
         assert!(saved.contains("owner = \"owner\""), "{saved}");
         assert!(saved.contains("repo = \"repo\""), "{saved}");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "temp file survived");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn new_atomic_write_publishes_whole_content_and_never_replaces() {
+        let dir = std::env::temp_dir().join(format!(
+            "gitpic-new-atomic-{}-{}",
+            std::process::id(),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = dir.join("SKILL.md");
+
+        write_new_atomic(&path, "first complete skill\n", "skill").unwrap();
+        let error = write_new_atomic(&path, "replacement\n", "skill")
+            .expect_err("an existing destination must win");
+
+        assert_eq!(error.code, ErrorCode::General);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first complete skill\n");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "temp file survived");
 
         fs::remove_dir_all(&dir).ok();

@@ -258,16 +258,25 @@ Argument-parsing errors also come back as `{ "ok": false, "error": … }` under 
 others how to drive it. The skill document is compiled into the binary, so the version you
 install always matches the `gitpic` you are running.
 
+In GitPic.app, open **Settings ▸ Agent** to manage Claude Code, Codex, and Generic Agent
+separately. Each shows whether its copy is missing, different, or current and has its own
+install or update action. The app asks before replacing a differing `SKILL.md`.
+
 ```bash
 gitpic skill install                 # choose among the agents it detects
 gitpic skill install --agent codex   # or name one
+gitpic skill install --agent generic # Generic Agent (~/.agent/skills)
 gitpic skill install --dir DIR       # or any skills directory
+gitpic skill install --agent codex --force # replace a differing file after review
 gitpic skill print                   # write it to stdout
 ```
 
-It detects `~/.claude/skills` and `~/.codex/skills` (honouring `CLAUDE_CONFIG_DIR` /
-`CODEX_HOME`) and asks before writing. In scripts and CI pass `--yes`, `--agent` or
-`--dir` — with no terminal it errors rather than guessing for you.
+It detects `~/.claude/skills`, `~/.codex/skills`, and `~/.agent/skills` (honouring
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `AGENT_HOME`, respectively) and asks before writing.
+In scripts and CI pass `--yes`, `--agent` or `--dir` — with no terminal it errors rather
+than guessing for you. When an existing `SKILL.md` differs, the CLI leaves it untouched
+and fails; inspect it, then pass `--force` explicitly to replace it. The app passes that
+permission only after its confirmation dialog.
 
 It can also be installed as a plugin:
 
