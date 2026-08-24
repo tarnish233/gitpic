@@ -72,21 +72,59 @@ public struct UpdateReport: Decodable, Equatable, Sendable {
     /// body, so keeping it here printed the same sentence twice, once as a heading and once
     /// as a heading marker. Only the *first* line, and only when it is a heading: a body
     /// that happens to open with a bullet is left alone.
+    ///
+    /// **Both rules skip fenced code blocks, and "heading" means hashes then a space.** The
+    /// two together are the spec ``displayMarkdown`` follows and `src/release.rs`'s `summary`
+    /// mirrors on the CLI side; each of them was a real defect here:
+    ///
+    /// - `hasPrefix("#")` without the space deleted any first line merely *starting* with a
+    ///   hash. Release notes opening `#42 修复剪贴板上传失败` lost that change silently — while
+    ///   ``displayMarkdown`` three lines down required the space and documented why.
+    /// - Neither rule knew about ``` fences, so a `## ` inside one — a changelog example, a
+    ///   diff excerpt — ended the notes there, dropping every change after it and leaving an
+    ///   unterminated fence for the renderer.
     public var summary: String {
         var kept: [String] = []
+        var inFence = false
         for line in notes.components(separatedBy: .newlines) {
-            if line.hasPrefix("## ") { break }
+            if Self.isFenceDelimiter(line) {
+                inFence.toggle()
+            } else if !inFence, Self.headingLevel(line) == 2 {
+                break
+            }
             kept.append(line)
         }
-        // Leading blank lines first, so the theme line is findable however the awk
-        // extraction spaced it.
+        // Leading blank lines first, so the theme line is findable however the extraction
+        // spaced it.
         while let first = kept.first, first.trimmingCharacters(in: .whitespaces).isEmpty {
             kept.removeFirst()
         }
-        if let first = kept.first, first.hasPrefix("#") {
+        // A fence cannot be the *first* line and also be a heading, so this needs no fence
+        // state — but it does need the space, which is the whole of the `#42` bug.
+        if let first = kept.first, Self.headingLevel(first) != nil {
             kept.removeFirst()
         }
         return kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The ATX heading level of `line`, or `nil` if it is not a heading.
+    ///
+    /// One place deciding what a heading is, so ``summary`` and ``displayMarkdown`` cannot
+    /// drift again. A heading is one or more `#` followed by a space: that is what
+    /// CommonMark says, and it is what keeps `#42` and `#hashtag` out.
+    static func headingLevel(_ line: String) -> Int? {
+        let hashes = line.prefix { $0 == "#" }
+        guard !hashes.isEmpty, line.dropFirst(hashes.count).hasPrefix(" ") else { return nil }
+        return hashes.count
+    }
+
+    /// Whether `line` opens or closes a fenced code block.
+    ///
+    /// Three backticks or three tildes at the start of the line, per CommonMark. Info
+    /// strings (```` ```swift ````) are fine — only the run of delimiters is looked at.
+    static func isFenceDelimiter(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~")
     }
 
     /// ATX headings rewritten as bold, for a renderer that does not do headings.
@@ -102,15 +140,21 @@ public struct UpdateReport: Decodable, Equatable, Sendable {
     /// for out of a parser that only does inline syntax.
     ///
     /// Requires a space after the hashes, so a line that merely starts with `#` — a shell
-    /// comment inside an indented block, a `#hashtag` — is left alone.
+    /// comment inside an indented block, a `#hashtag` — is left alone. That rule is now
+    /// ``headingLevel(_:)``, shared with ``summary``, which did *not* require the space and
+    /// was deleting first lines like `#42 修复…` because of it.
+    ///
+    /// Fenced blocks are left alone too: a `# ` inside ``` is a shell comment or a diff
+    /// line, and bolding it would rewrite the code being quoted.
     public static func displayMarkdown(_ s: String) -> String {
-        s.components(separatedBy: .newlines).map { line -> String in
-            let hashes = line.prefix { $0 == "#" }
-            guard !hashes.isEmpty, line.dropFirst(hashes.count).hasPrefix(" ") else {
+        var inFence = false
+        return s.components(separatedBy: .newlines).map { line -> String in
+            if isFenceDelimiter(line) {
+                inFence.toggle()
                 return line
             }
-            let text = line.dropFirst(hashes.count + 1)
-                .trimmingCharacters(in: .whitespaces)
+            guard !inFence, let level = headingLevel(line) else { return line }
+            let text = line.dropFirst(level + 1).trimmingCharacters(in: .whitespaces)
             return text.isEmpty ? "" : "**\(text)**"
         }
         .joined(separator: "\n")

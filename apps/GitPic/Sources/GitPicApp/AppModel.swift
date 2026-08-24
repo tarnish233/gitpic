@@ -591,17 +591,20 @@ final class AppModel {
         }
     }
 
-    /// A `RunFailure` as a line the user can read: the CLI's own code and message when it
-    /// gave one, the raw error otherwise.
+    /// A `RunFailure` as a line the user can read.
     ///
     /// Named for what it does rather than for its first caller. It was `skillError` while
     /// the skill pane was the only thing that needed it; the update check needs exactly the
     /// same rendering, and a second copy of four lines whose whole point is *one* place
     /// deciding how a CLI failure reads would have been the wrong answer.
+    ///
+    /// The wording moved to ``RunFailure/message`` in `GitPicCore`, where it can be tested.
+    /// This used to match only `.cli` and fall back to `String(describing:)`, which printed
+    /// the enum at the user: `.spawnFailed` and `.undecodable` both reached the window as
+    /// Swift syntax. The fallback that remains is for a genuinely foreign `Error`, which no
+    /// current caller can produce.
     private static func cliMessage(_ error: Error) -> String {
-        if case let RunFailure.cli(_, body) = error {
-            return "\(body.code)：\(body.message)"
-        }
+        if let failure = error as? RunFailure { return failure.message }
         return String(describing: error)
     }
 

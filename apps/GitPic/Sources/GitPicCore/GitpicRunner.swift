@@ -23,6 +23,39 @@ public enum RunFailure: Error, Sendable, Equatable {
     case undecodable(status: Int32, raw: String)
 }
 
+extension RunFailure {
+    /// The failure as a sentence, for a label in the window.
+    ///
+    /// Here rather than in the app because it is the one place that can be tested — and
+    /// because it was `String(describing:)` in the app, which printed the enum. A user with
+    /// an app built from source and an older `gitpic_cli` on `PATH` got
+    /// `undecodable(status: 2, raw: "error: unrecognized subcommand \'update\'")` as an
+    /// orange banner on 设置 ▸ 通用: every case except `.cli` rendered as Swift syntax.
+    ///
+    /// `.cli` keeps its `CODE：message` shape, which is the CLI's own wording and the only
+    /// one of the three the user can usually act on directly.
+    public var message: String {
+        switch self {
+        case .spawnFailed(let why):
+            return "无法启动 gitpic：\(why)"
+        case .cli(_, let body):
+            return "\(body.code)：\(body.message)"
+        case .undecodable(let status, let raw):
+            // The raw text is what the CLI actually said, so it is worth showing — trimmed,
+            // because a multi-line dump in a single-line label is unreadable, and prefixed
+            // with something that says whose fault it is. A stale `gitpic` that does not have
+            // the subcommand yet lands here, and "看不懂 gitpic 的回答" plus its own words is
+            // the most useful thing that can be said without guessing.
+            let first = raw.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+            let said = first.trimmingCharacters(in: .whitespaces)
+            if said.isEmpty {
+                return "看不懂 gitpic 的回答（退出码 \(status)，没有输出）。可能装的是旧版本。"
+            }
+            return "看不懂 gitpic 的回答（退出码 \(status)）：\(said)"
+        }
+    }
+}
+
 /// Runs the bundled `gitpic`.
 ///
 /// Two concurrent `gitpic` uploads race on the branch ref, because every
