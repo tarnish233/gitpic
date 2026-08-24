@@ -93,29 +93,8 @@ struct UploadPane: View {
                     .disabled(!draft.upload.compress.wrappedValue)
                 }
             }
-
-            finderSection
         }
         .formChrome()
-        // System Settings can flip the same switch, so the state is re-read whenever
-        // this pane comes back rather than trusted from launch.
-        .onAppear { model.refreshFinderService() }
-    }
-
-    /// Outside the `draft` branch above, and that placement is the point.
-    ///
-    /// Every other row on this pane edits the config file and waits for 保存. This one
-    /// writes system state the moment it moves, and it has nothing to do with the
-    /// config — so it stays reachable when the config is unreadable, which is exactly
-    /// when someone might want to switch the right-click entry off. Its own section
-    /// keeps the two kinds of row from being mistaken for each other.
-    @ViewBuilder private var finderSection: some View {
-        Section("Finder 右键") {
-            CaptionedToggle(
-                label: "在右键菜单里显示「\(FinderService.menuItemTitle)」",
-                isOn: Binding(get: { model.finderServiceEnabled },
-                              set: { model.setFinderServiceEnabled($0) }))
-        }
     }
 
     /// Slider works in Double; the config stores Int.

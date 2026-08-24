@@ -627,6 +627,94 @@ final class AppModel {
         finderServiceEnabled = enabled
     }
 
+    // MARK: - The 开机自启动 switch
+
+    /// What macOS reports about GitPic's login-item registration.
+    ///
+    /// A mirror of system state, like ``finderServiceEnabled`` and for the same reason:
+    /// the truth is the registration ``LaunchAtLogin`` reads, and this exists only
+    /// because `@Observable` cannot watch another process's state.
+    ///
+    /// Seeded with ``LaunchAtLoginState/off`` rather than a real read, on the same
+    /// argument the Finder switch makes: `AppModel.shared` is first touched from
+    /// `setUpStatusItem()`, and a default that called out to ServiceManagement would put
+    /// an XPC round trip — measured ~12 ms on a process's first call — on the launch path,
+    /// to produce a value nothing reads until 设置 ▸ 通用 opens, which refreshes it before
+    /// showing it. `off` is also the right placeholder, being what the system reports for
+    /// an app nobody has registered (`.notFound`, folded into `off` — see
+    /// ``LaunchAtLoginState``).
+    private(set) var launchAtLogin: LaunchAtLoginState = .off
+
+    /// Why the last flip did not take, or `nil` when nothing is wrong.
+    ///
+    /// Distinct from ``LaunchAtLoginState/blocked``, which is not a failure: there the
+    /// registration landed and macOS is waiting on the user. This is for a flip that did
+    /// not happen at all — a bundle whose signature the system rejects being the
+    /// realistic cause.
+    private(set) var launchAtLoginFailure: String?
+
+    /// The request ``launchAtLoginFailure`` is about, held only while it stands.
+    ///
+    /// Without it, ``refreshLaunchAtLogin()`` has to choose between two wrong things:
+    /// clear the message on every read — and 设置 ▸ 通用 re-reads on `.onAppear`, so
+    /// switching panes and back would erase a diagnosis the user had not finished
+    /// reading — or never clear it, and leave a failure sitting under a switch that has
+    /// since started agreeing with it. Remembering what was asked lets a later read
+    /// retire the message on the evidence that it no longer applies.
+    private var unmetRequest: Bool?
+
+    /// Re-read the registration from the system. Called whenever the settings window is
+    /// about to show it, for the reason ``refreshFinderService()`` is: 系统设置 can revoke
+    /// the same registration, so a value cached since launch would show 开 for an app
+    /// that will not start.
+    func refreshLaunchAtLogin() {
+        launchAtLogin = LaunchAtLogin.state
+        guard let wanted = unmetRequest,
+              launchAtLogin.matches(request: wanted) else { return }
+        launchAtLoginFailure = nil
+        unmetRequest = nil
+    }
+
+    /// Flip the switch, then believe the system rather than the call.
+    ///
+    /// The opposite of ``setFinderServiceEnabled(_:)``, which assigns what was asked for
+    /// because its write cannot be verified. Here it can: the state comes from a fresh
+    /// `status` read taken after the mutation, so the switch shows what macOS will
+    /// actually do — including the case where `register()` succeeded and the answer is
+    /// still ``LaunchAtLoginState/blocked``.
+    ///
+    /// The thrown error is used only to *explain* a disagreement, never to detect one —
+    /// see ``LaunchAtLoginState/matches(request:)`` for why deciding on the re-read status
+    /// is the only reading that survives the header and the running system disagreeing
+    /// about which errors a redundant call produces.
+    func setLaunchAtLogin(_ enabled: Bool) {
+        var reason: String?
+        do {
+            try LaunchAtLogin.setEnabled(enabled)
+        } catch {
+            reason = Self.launchAtLoginReason(error)
+        }
+        launchAtLogin = LaunchAtLogin.state
+        launchAtLoginFailure = LaunchAtLoginState.failureMessage(
+            request: enabled, state: launchAtLogin, reason: reason)
+        unmetRequest = launchAtLoginFailure == nil ? nil : enabled
+    }
+
+    /// The system's own words, plus the one hint worth adding to them.
+    ///
+    /// `localizedDescription` first and always: a ServiceManagement failure is often no
+    /// more specific than "Operation not permitted", but it is what the system said, and
+    /// paraphrasing it loses the only detail a bug report could use. The hint is appended
+    /// when the code matches — see ``LaunchAtLoginState/hint(forErrorCode:)`` for why
+    /// matching on the code alone is safe when the text is additive.
+    private static func launchAtLoginReason(_ error: Error) -> String {
+        let ns = error as NSError
+        guard let hint = LaunchAtLoginState.hint(forErrorCode: ns.code) else {
+            return ns.localizedDescription
+        }
+        return "\(ns.localizedDescription) \(hint)"
+    }
+
     // MARK: - Telling the user what happened
 
     /// Post an outcome to Notification Center, and log it.

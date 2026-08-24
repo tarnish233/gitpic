@@ -4,6 +4,50 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-08-24
+
+### Launch at login, and a 通用 pane that earns its place
+
+### App
+
+- GitPic.app can now **start itself at login**: 设置 ▸ 通用 ▸ 开机时自动启动 GitPic. It writes
+  macOS's own login-item registration (`SMAppService.mainApp`), so 系统设置 ▸ 通用 ▸
+  登录项与扩展 is the same switch rather than a second record that can disagree with it.
+- The switch shows **the status the system reports back**, not the outcome of the click.
+  `SMAppService.mainApp.status` is re-read after every flip, so "registered, and withheld by
+  macOS until you approve it" is shown as on plus a pointer to System Settings instead of
+  masquerading as off — in that state clicking again changes nothing. When a flip genuinely
+  does not take, the system's own message is shown with it.
+- **The Finder right-click switch moved from 上传 to 系统集成 on 通用.** These are the only two
+  switches in the app that write system state immediately instead of editing the config and
+  waiting for 保存; with both in one place, the note on 上传 explaining why that row did not
+  behave like its neighbours is no longer needed. The cost, stated: anyone used to finding it
+  at the bottom of 上传 has to look somewhere else.
+- Tightened the 图床 copy: dropped the `public_repo`/jsDelivr paragraph in the account section
+  (the login button is directly below it) and the standing "you still have to press 保存" note
+  in the repository section — 保存 is present on every config pane and its tooltip already
+  names the keys waiting to be written, and the one case that genuinely needs the instruction
+  (nothing configured yet) still says so.
+
+### Internal
+
+- `LaunchAtLoginState` (`GitPicCore`) owns the status mapping and the copy, so both are
+  testable. Measurement overturned two assumptions taken from the header:
+  `SMAppService.Status.notFound` **is the state of a fresh install** — a bundle the
+  background-task-management store has never seen reports it, and only a bundle registered and
+  then unregistered reports `notRegistered` — so it has to mean plain "off" rather than an
+  error state pointing at System Settings. And `kSMErrorAlreadyRegistered` /
+  `kSMErrorJobNotFound`, which `SMAppService.h` documents for redundant calls, are not thrown
+  on macOS 26.5: both simply succeed. Since the documentation and the running system disagree,
+  the decision rests on the re-read status alone.
+- Fixed a flaky test in `src/github.rs`: the stub server did one `read` per connection, but
+  TCP is a stream and `reqwest` writes headers and body as separate segments, so a single
+  `read` often returned the headers alone. Only
+  `put_file_sends_the_existing_sha_when_overwriting` asserts on a request body, and it failed
+  about two runs in five — across three CI platforms, enough to redden a release build. It
+  now reads to the end of the headers and then exactly as many body bytes as
+  `Content-Length` promises.
+
 ## [0.18.1] - 2026-08-23
 
 ### A quieter settings window

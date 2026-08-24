@@ -36,12 +36,13 @@ struct HostPane: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                Section {
-                    Text("选中的仓库和分支还没写入配置文件，仍然要按右上角的「保存」。"
-                         + "换仓库时分支会跟着跳到该仓库的默认分支，之后可以再改。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                // No standing "这些还没写入配置文件，要按保存" note here. It restated the
+                // toolbar: 保存 is present on every config pane whether or not anything is
+                // dirty, and its tooltip already names the keys waiting to be written. The
+                // one case where the instruction is genuinely needed — nothing configured
+                // at all — still says it, in `unconfiguredHint` below. The same note's
+                // other half, that picking a repository moves 分支 to that repository's
+                // default, went with it: the picker above visibly changes when it happens.
 
                 // An empty target is not self-explanatory, and it is reachable two
                 // ways: a machine where nobody has picked a repository yet (a missing
@@ -103,12 +104,19 @@ struct HostPane: View {
                         .foregroundStyle(.secondary)
                 }
 
-            case .loggedOut(let detail):
+            // No description under the label, deliberately. What was here was the CLI's
+            // own `no GitHub credential: run \`gitpic auth login\`` — telling someone to
+            // run a command while the button that does it sits directly below — plus a
+            // paragraph about `public_repo` being enough for jsDelivr. The label says the
+            // state and the button says the action; the scope is a fact about the login
+            // this pane does not have to teach before performing it.
+            //
+            // The dropped `detail` cost nothing measurable: its only non-CLI value was
+            // 「登录已取消」 from `cancelLogin()`, which that method already overwrites a
+            // moment later by calling `refreshAuth()`, so it was a flash on the way to
+            // the CLI's own answer rather than a message anyone could read.
+            case .loggedOut:
                 Label("还没登录", systemImage: "person.crop.circle.badge.questionmark")
-                Text((detail.map { "\($0)\n" } ?? "")
-                     + "点下面的按钮，在浏览器里授权一次就好。gitpic 申请的是 public_repo —— "
-                     + "只对你的公开仓库有写权限，jsDelivr 图床用这个就够。")
-                    .font(.caption).foregroundStyle(.secondary)
                 Button("使用 GitHub 登录") { model.beginLogin() }
                     .disabled(model.toolState != .ready)
 
