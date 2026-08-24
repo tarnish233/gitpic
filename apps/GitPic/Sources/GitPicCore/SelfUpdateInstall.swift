@@ -313,7 +313,7 @@ extension SelfUpdate {
     /// its shape can be asserted in a test, which is the only way anything about it is checked
     /// before it runs for real.
     ///
-    /// Six things here are the direct result of finding them wrong first:
+    /// Eight things here are the direct result of finding them wrong first:
     ///
     /// 1. **The backup name carries a UUID and its absence is asserted.** `mv a a.old` when
     ///    `a.old` already exists does not fail — it moves `a` *inside* it, giving
@@ -331,37 +331,62 @@ extension SelfUpdate {
     ///    (``sweepLeftovers``), which by existing proves the new version starts. This also
     ///    removes the race the old ordering had with that sweep: two deleters, one of them
     ///    the app the script had just reopened.
-    /// 3. **The reopen is confirmed and the outcome logged either way.** Since `open -a`'s
-    ///    status is not evidence, the status alone was not worth branching on — the old code
-    ///    did not even read it, and `reopen`'s last branch was a bare `echo`, so a total
-    ///    failure to relaunch returned 0 and looked like success. Now every outcome names
-    ///    itself in the log, and `whence` records *which* bundle came up, because the
-    ///    by-name fallback resolves through LaunchServices — which holds registrations for
-    ///    copies under `.GitPic-update-*` too, seen in `lsregister -dump` — so "a GitPic is
-    ///    running" and "the new GitPic is running" are different claims.
-    /// 4. **The reopen is in a `trap … EXIT`**, not on the success path. GitPic is
+    /// 3. **Only the *newly installed* bundle running counts as a reopen.** This is the second
+    ///    false witness found in this one function, and the reason `confirm` reads two things
+    ///    about a process instead of counting them. The first was `open -a`'s exit status
+    ///    (point 2). Its replacement — "some process is running at `$target`" — failed the same
+    ///    way in the shipped 0.20.0, measured twice on a real install: the app did not exit
+    ///    when asked, renaming the parent directory of a running executable does not kill it,
+    ///    `open -a "$target"` therefore found a process with the same bundle identifier already
+    ///    registered and **activated that surviving old instance**, and `ps -Awwo comm=` still
+    ///    printed `$target` for it, because `ps` shows the path a process was launched from and
+    ///    not the inode it is executing. So the evidence was satisfied by the very process
+    ///    whose failure to quit was the bug. `lsof` does answer the right question — the same
+    ///    pid's `txt` image had followed the rename to `…/.GitPic-old-<uuid>/Contents/MacOS/`
+    ///    `GitPic` — so `isnew` requires a pid that is *not* the one this script waited on and
+    ///    an executing image *inside* `$target`. There is deliberately no separate "not under
+    ///    `$backup`" test: `$backup` is a sibling of `$target`, so an image under it cannot
+    ///    match `$target/*` at all.
+    /// 4. **Every outcome names itself in the log, and there are five of them**: the new
+    ///    version confirmed running; the old process never exited so the swap happened
+    ///    underneath it; `open` accepted and nothing executing that bundle appeared; `open`
+    ///    refused; and a confirmation on a path where the swap did *not* happen, which is the
+    ///    bundle that was already there and not `$version`. `reopen` also runs from the trap
+    ///    after a rollback, so that last distinction is the difference between a true line and
+    ///    a false one. `saw` prints the candidates and their real images on every outcome that
+    ///    is not a confirmation, because that list is the evidence the branch was chosen from.
+    /// 5. **The reopen is in a `trap … EXIT`**, not on the success path. GitPic is
     ///    `.accessory`: once it has quit there is no Dock icon and no menu-bar icon, so a
     ///    script that dies before reopening costs the user the entire app.
-    /// 5. **`PATH` is set explicitly.** Not a root-safety measure — nothing here runs
+    /// 6. **`PATH` is set explicitly.** Not a root-safety measure — nothing here runs
     ///    elevated — but the app's own PATH has a Homebrew prefix prepended, and a swap script
-    ///    has no business resolving `mv` through a user-writable directory.
-    /// 6. **`launch`, `running` and `whence` are one-liners.** Everything this script does to
-    ///    the outside world beyond `mv` goes through them, so a test can replace exactly
-    ///    those three lines: a test must never really launch an application, and both sides
-    ///    of the confirmation have to be reachable from one.
+    ///    has no business resolving `mv` through a user-writable directory. `lsof` lives in
+    ///    `/usr/sbin`, which is already on it.
+    /// 7. **`launch`, `candidates` and `image` are one-liners.** Everything this script does to
+    ///    the outside world beyond `mv` goes through them, so a test can replace exactly those
+    ///    three lines: a test must never really launch an application, and every outcome above
+    ///    has to be reachable from one. `image` is the line the tests usually leave alone —
+    ///    what it answers is the whole fix, so `lsof` runs for real there against real
+    ///    processes. `candidates` is stubbed because it cannot be deterministic: measured,
+    ///    `pgrep -x GitPic` on this machine lists the developer's own running copy too.
+    /// 8. **An expired wait is logged as the anomaly it is.** Proceeding is still right — a
+    ///    quit that never happens must not cost the user the update — but it passed in silence,
+    ///    so the log of the update that failed this way read like the log of one that worked.
     ///
     /// Every interpolation goes through `q()`, including `staged.version`. It is constrained
     /// today — `stage` only ever passes the version it matched against the image's
     /// `Info.plist` — but the value is written into `echo` lines that end up in a shell, and
     /// "safe because of a check thirty lines away in another function" is not a property worth
-    /// depending on for the sake of two quotes.
+    /// depending on for the sake of two quotes. The exception is `pid`, an `Int32` that cannot
+    /// carry a quote; `kill -0 \(pid)` is the form
+    /// `SelfUpdateRouteTests.scriptIsValidAndOrdered` pins.
     static func installScript(staged: Staged, pid: Int32, log: URL) -> String {
         func q(_ s: String) -> String {
             "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
         }
         // Adjacent to the target and on its filesystem, so the rename cannot cross devices.
-        let backup = staged.target.deletingLastPathComponent()
-            .appendingPathComponent(".GitPic-old-\(UUID().uuidString)").path
+        let apps = staged.target.deletingLastPathComponent()
+        let backup = apps.appendingPathComponent(".GitPic-old-\(UUID().uuidString)").path
 
         return """
         #!/bin/bash
@@ -375,26 +400,97 @@ extension SelfUpdate {
         backup=\(q(backup))
         stagedir=\(q(staged.directory.path))
         version=\(q(staged.version))
+        # $target's parent — the one directory both renames below happen in, and $backup's
+        # parent too — and $target's last component, which the next two lines need on its own.
+        apps=\(q(apps.path))
+        leaf=\(q(staged.target.lastPathComponent))
+        # What a running process's executing image gets compared against. `lsof` names the
+        # *physical* path of the file a process is executing, so this has to be physical too:
+        # measured, a process started from /tmp/x/GitPic.app is reported at
+        # /private/tmp/x/GitPic.app, and $TMPDIR — where the tests build their fixtures — is
+        # /var/folders/... reached through the /var symlink.
+        #
+        # Only the parent is resolved, and the leaf is kept exactly as written: after the swap
+        # the leaf is a real directory `mv` has just made, so resolving it would follow a
+        # symlinked GitPic.app — a brew cask's, pointing into the Caskroom — to a path the new
+        # bundle will never be at. Two bash builtins rather than doing it in the generator,
+        # because Foundation answers the wrong question: measured,
+        # `URL.resolvingSymlinksInPath()` returns /tmp for /private/tmp, the *logical* path and
+        # the opposite of what lsof prints, and leaves /var/folders untouched.
+        realapps=$(cd "$apps" 2>/dev/null && pwd -P) || realapps=$apps
+        realtarget="$realapps/$leaf"
+        # Set by exactly one line, a second `mv` that succeeded, and read by `reopen`: a process
+        # executing something inside $target is the new version only if the swap happened.
+        # `reopen` also runs from the trap after a rollback, where $target is the old bundle.
+        installed=0
         echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) install $version ==="
 
         # The three things this script does to the world outside its own directory, one line
-        # each so a test can replace them. See point 6 in the doc comment.
+        # each so a test can replace them. See point 7 in the doc comment.
         launch() { open -a "$1"; }
-        running() { pgrep -x GitPic >/dev/null 2>&1; }
-        whence() { ps -Awwo pid=,comm= | grep -F /Contents/MacOS/GitPic; }
+        candidates() { pgrep -x GitPic 2>/dev/null; }
+        image() { lsof -a -p "$1" -d txt -Fn 2>/dev/null | sed -n '/^n[/]/{s/^n//;p;q;}'; }
 
-        # Ask, do not assume. `open -a` exits 0 when LaunchServices accepts the request, not
-        # when the app runs. Bounded at ten seconds: this is the log's evidence, never a
-        # licence to delete anything, so being wrong here costs a misleading line and nothing
-        # else.
+        # Is pid $1, executing image $2, the bundle this script just installed? See point 3:
+        # both halves are here because both halves were false witnesses in a shipped release.
+        #
+        # `-a` in `image` is load-bearing and easy to lose: lsof ORs its selectors, so
+        # `lsof -p "$1" -d txt` means "that pid, or anything with a txt fd" and dumps every
+        # process on the machine. Measured. The first `n` line of what comes back is the main
+        # executable — measured on a real GitPic and on a stand-in binary, where the second was
+        # /usr/lib/dyld one time and a logging cache the other, so only the first is relied on.
+        isnew() {
+          [ "$1" != \(pid) ] || return 1
+          case "$2" in "$realtarget"/*) return 0 ;; esac
+          return 1
+        }
+
+        # What satisfied `isnew`, for the log.
+        newpid=
+        newimage=
+
+        # Ask, do not assume, and ask about the new bundle specifically. Bounded at ten
+        # seconds: this is the log's evidence, never a licence to delete anything, so being
+        # wrong here costs a misleading line and nothing else.
         confirm() {
           n=0
           while [ "$n" -lt 20 ]; do
-            running && return 0
+            for p in $(candidates); do
+              i=$(image "$p")
+              if isnew "$p" "$i"; then
+                newpid=$p
+                newimage=$i
+                return 0
+              fi
+            done
             n=$((n + 1))
             sleep 0.5
           done
           return 1
+        }
+
+        # Every GitPic process and the image it is really executing. Printed on every outcome
+        # that is not a confirmation, because that list is what the branch was decided from —
+        # and because a listing like it, taken from `ps`, is what made the shipped failure read
+        # as a success.
+        saw() {
+          found=0
+          for p in $(candidates); do
+            found=1
+            echo "  pid $p is executing $(image "$p")"
+          done
+          [ "$found" -eq 1 ] || echo "  (no process named GitPic is running)"
+        }
+
+        # A confirmation, said once for both call sites. $1 is how it was found.
+        confirmed() {
+          echo "reopened $target ($1), pid $newpid"
+          if [ "$installed" -eq 1 ]; then
+            echo "$version is running: its executing image is $newimage"
+          else
+            echo "the update did not happen, so this is the bundle that was already there and"
+            echo "not $version; its executing image is $newimage"
+          fi
         }
 
         # Whatever happens below, GitPic comes back. It is .accessory, so once it has quit
@@ -403,28 +499,46 @@ extension SelfUpdate {
         reopen() {
           launch "$target"
           rc=$?
-          if [ "$rc" -eq 0 ] && confirm; then
-            echo "reopened $target; running:"
-            whence
+          if confirm; then
+            confirmed "by path"
             return 0
           fi
+          # **The case that shipped in 0.20.0**, measured twice on a real install: the app was
+          # asked to quit, closed its windows and stayed in its run loop; the renames went
+          # ahead underneath it; `open -a "$target"` then activated that same instance, because
+          # it is what LaunchServices has registered for this bundle identifier. There is
+          # nothing further to try — the GitPic the user can see is already up, so a second
+          # `launch` would activate it again and spend another ten seconds failing to confirm
+          # it. Not SIGKILLed either: it may be mid-upload, and ending a process nobody asked
+          # to end is not this script's business. The app quitting when told to is.
+          if kill -0 \(pid) 2>/dev/null; then
+            echo "NOT reopened: pid \(pid) never exited, so $version was installed underneath it"
+            echo "that surviving process is the GitPic in the menu bar, still executing the"
+            echo "bundle it started from, which this script renamed to $backup"
+            echo "nothing is lost: $version is installed at $target — quit the running GitPic"
+            echo "and start it again, and the update is done"
+            saw
+            return 1
+          fi
           if [ "$rc" -eq 0 ]; then
-            echo "reopen: LaunchServices accepted $target but no GitPic process appeared"
-            echo "within 10s — the new bundle may not be launchable"
+            echo "reopen: LaunchServices accepted $target but no process executing that bundle"
+            echo "appeared within 10s — the new bundle may not be launchable"
           else
             echo "reopen: open -a $target failed (status $rc)"
           fi
+          saw
           # By name, as a last resort, and worth having even though it can resolve to a
           # leftover copy rather than the installed bundle: an old GitPic in the menu bar
-          # beats no GitPic at all, and nothing below deletes what it finds. `whence` says
-          # which one it was.
+          # beats no GitPic at all, and nothing below deletes what it finds. It has to clear
+          # the same bar to count, because LaunchServices holds registrations for copies under
+          # `.GitPic-update-*` too, seen in `lsregister -dump`.
           launch GitPic
           if [ $? -eq 0 ] && confirm; then
-            echo "reopened by name, not by path; running:"
-            whence
+            confirmed "by name, not by path"
             return 0
           fi
-          echo "could not reopen GitPic — open $target by hand"
+          echo "could not reopen GitPic from $target — open it by hand"
+          saw
           return 1
         }
         trap reopen EXIT
@@ -446,6 +560,16 @@ extension SelfUpdate {
           kill -0 \(pid) 2>/dev/null || break
           sleep 0.5
         done
+        # An expired bound is not a neutral event, and this is where the shipped bug starts: it
+        # means GitPic was asked to quit and did not. Measured twice on a real 0.20.0 install.
+        # It used to pass in silence, so the log of an update that failed this way was
+        # indistinguishable from the log of one that worked.
+        if kill -0 \(pid) 2>/dev/null; then
+          echo "ANOMALY: pid \(pid) is still running after 60s — GitPic did not quit when asked"
+          echo "installing anyway: abandoning the update here would cost the user the new"
+          echo "version for nothing, and both renames are atomic, local and undoable whether or"
+          echo "not it is running. What it does cost is the relaunch — see the reopen below."
+        fi
 
         if [ ! -d "$staged" ]; then
           echo "the staged bundle is gone, nothing to install"
@@ -473,6 +597,7 @@ extension SelfUpdate {
           fi
           exit 1
         fi
+        installed=1
         echo "installed $version"
 
         # The backup stays. See point 2: nothing this script can observe proves the new
