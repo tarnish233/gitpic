@@ -37,6 +37,12 @@ struct UpdateCheckTests {
         #expect(r.updateAvailable)
         #expect(!r.ahead)
         #expect(r.publishedAt == "2026-08-24T01:02:03Z")
+        // `name` was the one field this test skipped, and it is the only one whose loss is
+        // silent: it and `publishedAt` are the two optionals, so a rename on the Rust side
+        // leaves this suite green while the sheet's title disappears — and `summary` strips
+        // the `### <theme>` line precisely *because* `name` is shown above it, so the theme
+        // would vanish from both places at once.
+        #expect(r.name == "gitpic v0.20.0 — 更新检查")
     }
 
     /// The trim exists because `release.yml` appends install instructions for someone who
@@ -98,6 +104,42 @@ struct UpdateCheckTests {
         // A heading with no text collapses rather than becoming empty bold markers, which
         // would render as literal asterisks.
         #expect(UpdateReport.displayMarkdown("###   ") == "")
+        // Inside a fence a `# ` is a shell comment or a diff line. Bolding it would rewrite
+        // the code being quoted.
+        #expect(UpdateReport.displayMarkdown("```sh\n# comment\n```")
+                == "```sh\n# comment\n```")
+    }
+
+    /// Two halves of one near-miss: what counts as a heading, and where a heading is allowed
+    /// to count. ``UpdateReport/summary`` used `hasPrefix("#")` without requiring the space
+    /// that ``UpdateReport/displayMarkdown`` did require and documented — so a release
+    /// opening `#42 …` lost that line — and neither rule knew about fenced blocks, so a
+    /// `## ` inside one ended the notes there and left the fence unterminated.
+    @Test("a hash without a space is not a heading, and fences are not scanned for one")
+    func summaryKnowsWhatAHeadingIs() {
+        // An issue reference, not a theme line. Deleting it dropped a real change.
+        #expect(Self.report(notes: "#42 修复剪贴板上传失败\n- 另一条").summary
+                == "#42 修复剪贴板上传失败\n- 另一条")
+        // A genuine theme line still goes.
+        #expect(Self.report(notes: "### 主题\n\n- 一条").summary == "- 一条")
+        // An h2 inside a fence is quoted text, not the workflow's appendix: what follows has
+        // to survive, and the fence has to come out balanced or the renderer sees an
+        // unterminated block.
+        let fenced = """
+        - 改了 changelog 的写法
+
+        ```md
+        ## [0.19.0]
+        ```
+
+        - 还有这一条
+        """
+        let out = Self.report(notes: fenced).summary
+        #expect(out.contains("还有这一条"), "a fenced h2 truncated the notes: \(out)")
+        #expect(out.components(separatedBy: "```").count == 3, "unbalanced fence: \(out)")
+        // The appendix itself, outside any fence, still ends the summary.
+        #expect(Self.report(notes: "- 一条\n\n## GitPic.app\n\n拖到 Applications").summary
+                == "- 一条")
     }
 
     @Test("notes with no appendix survive whole, and no notes is empty")

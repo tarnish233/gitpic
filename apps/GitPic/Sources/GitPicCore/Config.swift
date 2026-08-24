@@ -39,6 +39,12 @@ public enum ConfigFailure: Sendable, Equatable {
     public init(_ error: Error) {
         if case RunFailure.cli(_, let body) = error {
             self = .cli(body)
+        } else if let failure = error as? RunFailure {
+            // Through ``RunFailure/message`` rather than `String(describing:)`, which printed
+            // the enum: `.spawnFailed` reached the window as `spawnFailed("…")` and
+            // `.undecodable` as `undecodable(status: 2, raw: "…")`. The existing test for
+            // this asserted `contains`, so it stayed green either way.
+            self = .other(failure.message)
         } else {
             self = .other(String(describing: error))
         }

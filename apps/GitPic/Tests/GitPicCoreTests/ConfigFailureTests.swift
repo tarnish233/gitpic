@@ -131,5 +131,62 @@ struct ConfigFailureTests {
         let spawn = ConfigFailure(RunFailure.spawnFailed("launch path not accessible"))
         #expect(spawn.code == nil)
         #expect(spawn.message.contains("launch path not accessible"))
+        // And described in words. This assertion is the one the `contains` above could not
+        // make: before `RunFailure.message` existed, this read `spawnFailed("launch path not
+        // accessible")` — the Swift enum, printed at the user — and passed anyway.
+        #expect(!spawn.message.hasPrefix("spawnFailed("))
+    }
+}
+
+/// Every `RunFailure` has to read as a sentence, because all three of them reach a label.
+///
+/// The one that made this necessary: an app built from source finds an older `gitpic_cli` on
+/// `PATH`, `gitpic update check --json` hits clap's "unrecognized subcommand", and 设置 ▸ 通用
+/// showed `undecodable(status: 2, raw: "error: unrecognized subcommand \'update\'")` in orange.
+/// Only `.cli` had ever been given words; the other two fell through to
+/// `String(describing:)`, which prints the enum.
+@Suite("A failure reads as a sentence, not as Swift")
+struct RunFailureMessageTests {
+
+    @Test("no case renders as its enum syntax")
+    func everyCaseIsProse() {
+        let cases: [RunFailure] = [
+            .spawnFailed("launch path not accessible"),
+            .cli(status: 10, error: ErrorBody(code: "CONFIG_INVALID", message: "bad field")),
+            .undecodable(status: 2, raw: "error: unrecognized subcommand 'update'"),
+            .undecodable(status: 1, raw: ""),
+        ]
+        for failure in cases {
+            let m = failure.message
+            #expect(!m.isEmpty, "no message for \(failure)")
+            // The three case names, which are what a `String(describing:)` fallback leaks.
+            for leaked in ["spawnFailed(", "undecodable(", "RunFailure."] {
+                #expect(!m.contains(leaked), "\(leaked) leaked into: \(m)")
+            }
+        }
+    }
+
+    /// The CLI's own wording is the useful part of an undecodable answer — it is usually the
+    /// reason, as with a `gitpic` too old to have the subcommand — so it is quoted rather
+    /// than replaced. One line of it: a multi-line dump in a single-line label is unreadable.
+    @Test("an undecodable answer quotes what the CLI actually said")
+    func undecodableQuotesTheCLI() {
+        let m = RunFailure.undecodable(
+            status: 2, raw: "error: unrecognized subcommand 'update'\n\nUsage: gitpic …").message
+        #expect(m.contains("unrecognized subcommand 'update'"))
+        #expect(!m.contains("Usage:"), "more than the first line reached the label: \(m)")
+        #expect(m.contains("2"), "the exit code is worth keeping: \(m)")
+        // No output at all is its own case: quoting nothing would read as a truncated
+        // sentence, and "possibly an old version" is the actionable guess.
+        #expect(RunFailure.undecodable(status: 2, raw: "   ").message.contains("旧版本"))
+    }
+
+    /// `.cli` keeps the `CODE：message` shape it always had. The CLI writes these to be
+    /// displayed — a rejected `github.token` is reported without its value — so rewording
+    /// them here would lose both the code the UI branches on and that property.
+    @Test("a refusal keeps the CLI's code and message")
+    func cliKeepsItsShape() {
+        let body = ErrorBody(code: "RATE_LIMITED", message: "try again in 60s")
+        #expect(RunFailure.cli(status: 7, error: body).message == "RATE_LIMITED：try again in 60s")
     }
 }
