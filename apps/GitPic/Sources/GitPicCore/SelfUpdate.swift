@@ -113,6 +113,23 @@ public enum SelfUpdate {
         let delegate = DownloadDelegate(destination: destination, onProgress: onProgress)
         // `ephemeral` so nothing is written to a shared cache, and an explicit `User-Agent`
         // for the same reason `ThumbnailStore` sets one.
+        //
+        // **No `connectionProxyDictionary`, deliberately, and this is the asymmetry with
+        // `Updater.upgradeAndRelaunch`** — which forwards `HTTPS_PROXY`/`ALL_PROXY` to brew
+        // and calls that "the difference between an upgrade and a stall". URLSession does not
+        // read those variables at all (measured: with every one of them pointed at a dead
+        // port, a ranged GET of a real release asset still returned 206), so it honours only
+        // System Settings. Forwarding them here was written and then rejected on the
+        // measurement: on the development machine, whose proxy those variables name,
+        //
+        //     direct  → HTTP 206 in ~0.8 s, three for three
+        //     proxied → connection reset after 5 s, three for three
+        //
+        // while the *same* proxy serves `api.github.com` fine (200 in 0.25 s). A release
+        // asset redirects to `release-assets.githubusercontent.com`, a host the proxy does
+        // not carry — so honouring the environment would have broken the download it was
+        // meant to rescue. brew still needs the variables because `curl` and `git` do read
+        // them and go through the proxy whether or not it works for the asset host.
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
