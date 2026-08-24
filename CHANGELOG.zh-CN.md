@@ -4,6 +4,64 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.20.1] - 2026-08-25
+
+### 修复一个「更新已装好、跑的还是旧版本」的问题
+
+- **之前 App 说「正在退出」却没有退出。**AppKit 在更新确认框仍挂着时会拒绝终止，替换脚本
+  等满时限后照常替换，`open -a` 只是重新激活了没退出的旧进程——日志写着「已重新打开」，跑的
+  还是旧版本。现在退出是真正的 `exit`，任何 sheet 都拦不住。
+- **「已重新打开」改按进程实际执行的映像判定**，而不是启动时记录的路径——被替换到一边的旧进程
+  仍然在跑旧代码，不能再冒充新版本。
+- **启动清扫同样按实际执行的映像保护**，而不是启动路径，避免删掉正在运行的备份。
+- 新增 `scripts/check-self-update.sh`：真正安装一次更新，断言旧进程退出、新进程以新版本回来。
+  凡是动到更新路径的发布必须先通过它——0.20.0 正是因为没有这一关才带着上面的问题发布。
+
+<!-- release-notes-end: 以上是 GitHub Release 与 App 内更新弹窗共用的文案；以下只留在本文件。上面每条保持一行——App 的更新弹窗用 .inlineOnlyPreservingWhitespace 渲染，换行会保留，折行会在 480pt 处断句 -->
+
+### 修复
+
+- **真正的修复是 `exit`，而不是一个更好的 terminate。**失败的运行里，AppKit 自己的日志是：
+  ```
+  [AppKit:Application] terminate:
+  [AppKit:Application] Attempting sudden termination (1st attempt)
+  [AppKit:Application] App termination blocked by modal sheet
+  [AppKit:Application] Termination aborted
+  ```
+  更新路径上永远有 sheet 挂着——安装正是从更新 sheet 里的按钮发起的——而 AppKit 在询问
+  delegate **之前**就拒绝终止，所以 `applicationShouldTerminate` 从未被调用（实测：失败的运行里
+  探针构建在这个回调一声不吭，而成功的运行里它照常触发）。激活策略同样被洗清：窗口开着、没有
+  sheet 时，关窗流程照样跑 `windowWillClose` 里的 `setActivationPolicy(.accessory)`，进程正常
+  退出。先关掉 sheet 再终止被否决：只有在关闭动画先于 `terminate:` 跑完时才有效，而且任何
+  人以后加一个新 sheet 都会让这个 bug 悄悄复活。`quitForUpdate` 返回 `Never`，让编译器守住
+  0.20.0 丢掉的约束。此前 dry-run 没发现它，是因为 `GITPIC_APP_DRY_RUN=1` 在退出之前就
+  return 了——那一行从未被测试、dry-run 或 code review 执行过；现在它跑完除 `exit` 之外的一切。
+- **「`Killed: 9`」这条测量在它曾支撑的注释里被纠正。**重新实测两次：把正在运行的 bundle
+  目录改名，进程会继续从移走的副本运行——这正是「失败的退出变成重新打开的旧版本」的机制。
+  先退出再替换的次序站得住的理由是朴素的那条（换了一半的 bundle 会把新老版本混在一起，这里
+  没有任何东西能把它换回来），而不是那条错误的测量。
+- **重开的证据从 argv 换成映像。**`ps` 显示的是启动时的路径；`lsof -a -p <pid> -d txt` 显示
+  的是实际执行的。两个条件都满足才算：pid 不是脚本等待过的那一个，且它的映像在安装目标内部。
+  原来「无条件 reopened」的一种结局变成五种可区分的：确认新版本在跑；旧进程从未退出（0.20.0
+  的形状——说明新版本已在磁盘上，让用户退出再开即可）；`open` 被接受但没有任何进程在执行
+  那个 bundle；被拒绝；回滚后的「看似确认」——那里在跑的是原本就在的那份。60 秒等待超时现在
+  记为 `ANOMALY`，不再无声通过。候选来源用 `pgrep -x GitPic` 也被否了，理由和 argv 一样：
+  在这台机器上它会匹配 `/Applications` 里一份完全无关的、Homebrew 管理的 GitPic。
+- **清扫按实际执行的映像保护，而不是启动路径。**`Bundle.main.bundleURL` 是启动时的路径，
+  而改名恰好会让它失效；被替换在脚下的进程因此保护着一个它根本没在执行的目标，却把备份——
+  唯一的另一份 App——暴露在外。今天还够不着，只是因为清扫恰好只在启动时跑一次、存活进程
+  永远到不了它；但一旦挪到定时器或安装完成时就会变 live，而 unlink 不会停下一个正在执行的
+  Mach-O：伤害无声，`ROLLBACK FAILED` 的指引还会指向一片虚无。默认值改为
+  `SelfUpdate.currentImage()`（lsof），失败时回落到启动路径——不设防比设错防更糟。新测试
+  顺便回答了为它而设的问题：`contains` 的符号链接归一化确实能把 lsof 的
+  `/private/var/folders/…` 与 `contentsOfDirectory` 的 `/var/folders/…` 两种拼写对上。
+- **这道关是整个流程的一部分，不只是个脚本。**`scripts/check-self-update.sh` 构建一个旧版本
+  GitPic，装进 `~/Applications`，通过 UI 驱动一次真实更新，断言旧 pid 退出、新 pid 以新版本
+  从安装路径回来、重开后的 App 是 `.accessory`、以及机器上 `/Applications/GitPic.app` 从未
+  被移动。`~/Applications/GitPic.app` 已存在时没有 `--force` 会拒绝运行，并通过 trap 还原
+  `Cargo.toml`、`Cargo.lock` 和共享的 release 二进制。`AGENTS.md` 现在写着这条规则：动到
+  更新路径的发布，必须先在一台真机上通过它。
+
 ## [0.20.0] - 2026-08-24
 
 ### 手动安装的也能在界面里更新
