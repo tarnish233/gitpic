@@ -89,6 +89,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the status item is on screen first: the icon is what the user is waiting
         // for at launch, and this is ~150ms they would otherwise wait for it.
         Task { @MainActor in SettingsWindowController.prewarm() }
+        // Tidying, one launch after the fact: an upgrade script is still running when it
+        // reopens this app, so it can only be deleted by a later launch than the one it
+        // caused. See `Updater.sweepStaleScripts()`.
+        Task { @MainActor in Updater.sweepStaleScripts() }
     }
 
     // MARK: - Tools
