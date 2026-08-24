@@ -282,12 +282,21 @@ struct SelfUpdateRouteTests {
         // The relaunch is a trap, not a line at the bottom: GitPic is .accessory, so a script
         // that dies before reopening leaves no icon anywhere to click.
         #expect(script.contains("trap reopen EXIT"))
-        // Reopen happens before the rollback material is deleted, so a bundle that will not
-        // launch still has the old one behind it.
+        // Nothing here deletes the rollback material: `open -a` returning 0 is not the new
+        // version running, so the delete belongs to a later launch
+        // (`SelfUpdate.sweepLeftovers`). This used to assert that the reopen came *before* the
+        // `rm -rf "$backup"`, an ordering that cannot be worth anything while the thing it
+        // orders against is a delete the script has no evidence for.
+        #expect(!script.contains("rm -rf"), "the script must not delete anything recursively")
+        // `rmdir` is not a smaller `rm -rf`: it refuses a directory with anything in it. So if
+        // the second `mv` failed and the staging directory still holds the new bundle, the
+        // tidy-up fails harmlessly instead of destroying what was about to be installed.
+        #expect(script.contains(#"rmdir "$stagedir""#),
+                "the emptied staging directory should go by rmdir")
         let reopened = try #require(script.range(of: "\nreopen\ntrap - EXIT"))
-        let removed = try #require(script.range(of: "rm -rf \"$backup\""))
-        #expect(reopened.upperBound < removed.lowerBound,
-                "the backup is deleted before the app is reopened")
+        let tidied = try #require(script.range(of: #"rmdir "$stagedir""#))
+        #expect(reopened.upperBound < tidied.lowerBound,
+                "the app is reopened before any tidying")
         // PATH is pinned: the app's own has a Homebrew prefix prepended, and a swap script has
         // no business resolving `mv` through a user-writable directory.
         #expect(script.contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin"))
@@ -602,31 +611,34 @@ struct SelfUpdateRouteTests {
     // MARK: - Sweeping leftovers
     /// A failed install can leave a bundle-sized staging directory and a backup in
     /// `/Applications`; the script cannot remove its own staging directory, and deliberately
-    /// keeps the backup until after the reopen. They are swept a launch later.
-    @Test("stale staging and backup directories are swept, fresh ones are left alone")
+    /// keeps the backup until a later launch. They are swept from here, one launch later.
+    ///
+    /// **This half only: nothing of ours is deleted, and nothing of anyone else's ever is.**
+    /// What decides *when* a leftover goes belongs with the code — see
+    /// `SelfUpdateInstallTests.sweepAgesFromCtimeNotMtime`, which drives the cutoff directly.
+    /// It has to live there because the age is read from `st_ctime`, and a fixture cannot
+    /// fabricate that: measured, `touch` moves mtime and birthtime but cannot move ctime
+    /// backwards. This test used to set `.modificationDate` three days back and expect a
+    /// sweep, which is exactly the rule that made a fresh backup deletable — `mv` does not
+    /// touch mtime and `ditto` preserves it, so a backup's mtime is its release's build time.
+    @Test("leftovers created moments ago are kept, and lookalikes are never touched")
     func sweepsOnlyStaleLeftovers() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("gitpic-sweep-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let old = Date().addingTimeInterval(-86_400 * 3)
-        let stale = [".GitPic-update-stale", ".GitPic-old-stale"]
         let fresh = [".GitPic-update-fresh", ".GitPic-old-fresh"]
         // Something that merely looks similar, and a real app, must both survive.
         let bystanders = ["GitPic.app", ".GitPicSomethingElse", "Other.app"]
 
-        for name in stale + fresh + bystanders {
+        for name in fresh + bystanders {
             let url = root.appendingPathComponent(name)
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         }
-        for name in stale + [bystanders[1]] {
-            try FileManager.default.setAttributes([.modificationDate: old],
-                                                 ofItemAtPath: root.appendingPathComponent(name).path)
-        }
 
         let swept = SelfUpdate.sweepLeftovers(in: [root])
-        #expect(Set(swept.map(\.lastPathComponent)) == Set(stale))
+        #expect(swept.isEmpty, "swept: \(swept.map(\.lastPathComponent))")
         for name in fresh + bystanders {
             #expect(FileManager.default.fileExists(
                 atPath: root.appendingPathComponent(name).path),

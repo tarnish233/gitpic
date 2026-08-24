@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import GitPicCore
@@ -55,6 +56,8 @@ struct SelfUpdateInstallTests {
     enum FixtureError: Error {
         case signing(String)
         case image(String)
+        /// A line the test needs to stub is no longer in the generated script.
+        case stub(String)
     }
 
     /// A read-only `UDZO` image with the app at its root, exactly as `release.yml:216-220`
@@ -81,14 +84,27 @@ struct SelfUpdateInstallTests {
     /// building it per test added most of a minute to the run for nothing. Safe as a `static`
     /// because the suite is `.serialized` and the image is only ever read.
     ///
-    /// **A fixed directory, not a per-run UUID.** Swift Testing has no suite-level teardown, so
-    /// a unique name per run leaks one signed bundle plus a disk image into the temporary
-    /// directory every time the suite executes — measured, after four runs, four directories.
-    /// A fixed name means at most one exists, and `hdiutil create -ov` overwrites it.
+    /// **Two constraints that pull against each other, and the name has to satisfy both.**
+    ///
+    /// *Fixed, not per-run.* Swift Testing has no suite-level teardown, so a unique name per
+    /// run leaks one signed bundle plus a disk image into the temporary directory every time
+    /// the suite executes — measured, after four runs, four directories. A fixed name means at
+    /// most one exists, and `hdiutil create -ov` overwrites it. Anything derived from a pid or
+    /// a clock brings that leak straight back.
+    ///
+    /// *Scoped to this checkout, not to the machine.* `$TMPDIR` is per-user, so a globally
+    /// fixed name puts two worktrees' test runs in the same directory. Measured, with two
+    /// checkouts running `swift test` at once: five failures in this suite with
+    /// `NSCocoaErrorDomain Code=4 "dmgroot couldn't be removed"`, and one image attached by one
+    /// process while the other tried to attach the same file, which `hdiutil` refuses with
+    /// `资源暂时不可用`. `#filePath` is the discriminator: stable across runs of one checkout,
+    /// different between checkouts, and needs no environment variable to be set up.
     private static let sharedImage: Result<URL, Error> = {
         do {
+            let scope = SHA256.hash(data: Data(#filePath.utf8))
+                .prefix(4).map { String(format: "%02x", $0) }.joined()
             let dir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("gitpic-install-test-image")
+                .appendingPathComponent("gitpic-install-test-image-\(scope)")
             try? FileManager.default.removeItem(at: dir)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let source = dir.appendingPathComponent("GitPic.app")
@@ -107,6 +123,8 @@ struct SelfUpdateInstallTests {
         let root: URL
         let target: URL
         let dmg: URL
+        /// The stand-in for `/Applications`: the directory the swap and the sweep work in.
+        var apps: URL { target.deletingLastPathComponent() }
     }
 
     private static func fixture(installed: String = "0.18.0") throws -> Fixture {
@@ -123,32 +141,74 @@ struct SelfUpdateInstallTests {
         return Fixture(root: root, target: target, dmg: dmg)
     }
 
+    /// Names in a directory starting with `prefix`.
+    private static func entries(in dir: URL, prefix: String) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+            .filter { $0.hasPrefix(prefix) }.sorted()
+    }
+
+    /// The mount points staging has left in the temporary directory.
+    ///
+    /// Compared before and after rather than asserted to be empty, so a mount some other
+    /// suite left cannot make this one fail — and so a leaked one here cannot hide in it.
+    /// A leak is invisible in Finder (`-nobrowse`) and survives until reboot, so it is worth
+    /// asserting on every path through `stage`.
+    private static func mountLeftovers() -> Set<String> {
+        let tmp = FileManager.default.temporaryDirectory.path
+        return Set(((try? FileManager.default.contentsOfDirectory(atPath: tmp)) ?? [])
+            .filter { $0.hasPrefix("gitpic-mount-") })
+    }
+
     @Test("staging copies the image's app beside the target, signature and all")
     func stages() throws {
         let f = try Self.fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
+        let mountsBefore = Self.mountLeftovers()
 
         let staged = try SelfUpdate.stage(dmg: f.dmg, expectedVersion: "0.19.0",
                                          replacing: f.target)
 
         // Beside the target, so the swap is a rename and not a copy across devices — and so
         // that creating it was the permission check.
-        #expect(staged.directory.deletingLastPathComponent().path
-                == f.target.deletingLastPathComponent().path)
+        #expect(staged.directory.deletingLastPathComponent().path == f.apps.path)
         #expect(staged.directory.lastPathComponent.hasPrefix(".GitPic-update-"))
         #expect(SelfUpdate.bundleVersion(of: staged.bundle) == "0.19.0")
         // `ditto` was used rather than `cp -R` precisely so this passes: an ad-hoc signature
-        // lives in extended attributes, which `cp -R` does not carry across.
+        // lives in extended attributes, which `cp -R` does not carry across. This is also the
+        // check `stage` itself now makes, and on this same object — it used to make it against
+        // the mounted image, before any copy existed to check.
         let check = try ChildProcess.run(
             executable: URL(fileURLWithPath: "/usr/bin/codesign"),
             args: ["--verify", "--deep", "--strict", staged.bundle.path], timeout: 120)
         #expect(check.status == 0, "the staged copy failed codesign — was it copied with cp?")
         // Nothing has touched the installed bundle yet.
         #expect(SelfUpdate.bundleVersion(of: f.target) == "0.18.0")
+        // The image was detached and its mount point removed.
+        #expect(Self.mountLeftovers() == mountsBefore)
+    }
+
+    /// The check that used to run on the wrong object, tested directly on both answers.
+    ///
+    /// Worth its own test because `stage` cannot show the difference: an image whose bundle is
+    /// broken fails either way. What this pins is that the function answers about the bundle it
+    /// is handed, which is what moving the call from the mount to the copy was for.
+    @Test("the signature check follows the bundle it is given")
+    func verifiesTheBundleItIsGiven() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+
+        #expect(SelfUpdate.signatureIsIntact(at: f.target))
+        // The same damage a `ditto` that exited 0 with a dropped extended attribute would
+        // leave: the seal no longer matches what is inside.
+        let exe = f.target.appendingPathComponent("Contents/MacOS/GitPic")
+        try Data("#!/bin/sh\necho tampered\n".utf8).write(to: exe)
+        #expect(!SelfUpdate.signatureIsIntact(at: f.target))
+        // Not a bundle at all is also a "no", not a crash.
+        #expect(!SelfUpdate.signatureIsIntact(at: f.root.appendingPathComponent("nothing")))
     }
 
     /// The swap itself, by running the generated script.
-    @Test("the script swaps the bundles, reopens, and leaves nothing behind")
+    @Test("the script swaps the bundles, reopens, and keeps the old bundle for rollback")
     func swaps() throws {
         let f = try Self.fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
@@ -160,12 +220,68 @@ struct SelfUpdateInstallTests {
 
         #expect(SelfUpdate.bundleVersion(of: f.target) == "0.19.0", "log: \(output)")
         #expect(output.contains("installed 0.19.0"), "log: \(output)")
-        // The relaunch ran, and it ran *before* the leftovers were removed.
-        #expect(output.contains("WOULD REOPEN"), "the app was never reopened: \(output)")
-        let rest = try FileManager.default.contentsOfDirectory(
-            atPath: f.target.deletingLastPathComponent().path)
-        #expect(!rest.contains { $0.hasPrefix(".GitPic-update-") }, "staging left: \(rest)")
-        #expect(!rest.contains { $0.hasPrefix(".GitPic-old-") }, "backup left: \(rest)")
+        // The relaunch ran, and it was confirmed rather than assumed.
+        #expect(output.contains("WOULD REOPEN \(f.target.path)"),
+                "the app was never reopened: \(output)")
+        #expect(output.contains("reopened \(f.target.path)"), "not confirmed: \(output)")
+        // **The old bundle is still there.** The script used to `rm -rf` it right after
+        // `open -a` returned, which is not the same event as the new version working; the
+        // delete belongs to a later launch of the app instead. A new build that fails on
+        // first run has this to go back to.
+        let backups = Self.entries(in: f.apps, prefix: ".GitPic-old-")
+        #expect(backups.count == 1, "the rollback material was destroyed: \(backups)")
+        if let backup = backups.first {
+            let url = f.apps.appendingPathComponent(backup)
+            #expect(SelfUpdate.bundleVersion(of: url) == "0.18.0",
+                    "the backup is not a working bundle")
+            #expect(SelfUpdate.signatureIsIntact(at: url),
+                    "the backup would be refused by Gatekeeper")
+            #expect(output.contains("kept for rollback: \(url.path)"), "log: \(output)")
+        }
+        // The staging directory is empty once its bundle has moved out, and `rmdir` takes it.
+        #expect(Self.entries(in: f.apps, prefix: ".GitPic-update-").isEmpty,
+                "staging left: \(Self.entries(in: f.apps, prefix: ".GitPic-update-"))")
+    }
+
+    /// The reopen that is accepted and then does not happen — the case `open -a`'s exit status
+    /// cannot tell you about, and the case that used to return 0 from a bare `echo`.
+    @Test("a reopen that never comes up says so, and still keeps the old bundle")
+    func reportsAReopenThatNeverRuns() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let staged = try SelfUpdate.stage(dmg: f.dmg, expectedVersion: "0.19.0",
+                                         replacing: f.target)
+
+        let log = f.root.appendingPathComponent("install.log")
+        let output = try Self.runScript(staged: staged, log: log, root: f.root,
+                                       appComesUp: false)
+
+        #expect(output.contains("installed 0.19.0"), "log: \(output)")
+        // Both attempts were made — by path, then by name — and both are on the record.
+        #expect(output.contains("no GitPic process appeared"), "log: \(output)")
+        #expect(output.contains("could not reopen GitPic"), "log: \(output)")
+        #expect(!output.contains("reopened"), "log: \(output)")
+        // The new version is in place and the old one is still recoverable, which is the
+        // entire point of not deleting it here: this is what "the update does not launch"
+        // looks like from the script's side.
+        #expect(SelfUpdate.bundleVersion(of: f.target) == "0.19.0", "log: \(output)")
+        #expect(Self.entries(in: f.apps, prefix: ".GitPic-old-").count == 1, "log: \(output)")
+    }
+
+    /// A launch request that is refused outright, as opposed to accepted and dropped.
+    @Test("a refused reopen logs the status it was refused with")
+    func reportsARefusedReopen() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let staged = try SelfUpdate.stage(dmg: f.dmg, expectedVersion: "0.19.0",
+                                         replacing: f.target)
+
+        let log = f.root.appendingPathComponent("install.log")
+        let output = try Self.runScript(staged: staged, log: log, root: f.root,
+                                       launchSucceeds: false, appComesUp: false)
+
+        #expect(output.contains("open -a \(f.target.path) failed (status 1)"), "log: \(output)")
+        #expect(output.contains("could not reopen GitPic"), "log: \(output)")
     }
 
     /// **The failure that must not lose the user's app.** With the new bundle unmovable, the
@@ -177,13 +293,22 @@ struct SelfUpdateInstallTests {
         defer { try? FileManager.default.removeItem(at: f.root) }
         let staged = try SelfUpdate.stage(dmg: f.dmg, expectedVersion: "0.19.0",
                                          replacing: f.target)
-        // Make the second `mv` fail by removing what it would move.
-        try FileManager.default.removeItem(at: staged.bundle)
-        // ...but leave the staging directory, so the script gets past its existence check and
-        // into the renames. A directory where a bundle is expected is what fails the move.
-        try FileManager.default.createDirectory(at: staged.bundle,
-                                               withIntermediateDirectories: true)
-        try FileManager.default.setAttributes([.posixPermissions: 0o000],
+        // `0o500`, and the execute bit is the whole trick. This test used to use `0o000`,
+        // which also defeats the script's own `[ ! -d "$staged" ]` guard three lines before
+        // the renames — `test -d` on a path inside a `0o000` directory fails on traversal — so
+        // the script exited at "the staged bundle is gone" and **neither `mv` ever ran**. Both
+        // assertions below then passed because nothing had happened at all, and deleting the
+        // rollback line from the script left the test green. Measured, with the execute bit on:
+        //
+        //     chmod 500 stagedir
+        //     [ -d stagedir/GitPic.app ]     -> true
+        //     mv stagedir/GitPic.app apps/   -> "Permission denied"
+        //
+        // because `rename(2)` needs write permission on the *source's* parent to remove the
+        // entry. It has to be the source side: both renames share the target's parent, so any
+        // permission that stops the second one from the destination side stops the first one
+        // too, and then the rollback is never reached either.
+        try FileManager.default.setAttributes([.posixPermissions: 0o500],
                                              ofItemAtPath: staged.directory.path)
         defer {
             try? FileManager.default.setAttributes([.posixPermissions: 0o755],
@@ -191,31 +316,96 @@ struct SelfUpdateInstallTests {
         }
 
         let log = f.root.appendingPathComponent("install.log")
-        _ = try Self.runScript(staged: staged, log: log, root: f.root)
+        let output = try Self.runScript(staged: staged, log: log, root: f.root)
+
+        // It really got past the guard and into the renames, which is what this test did not
+        // do before: the first `mv` moved the old bundle aside and the second one refused.
+        #expect(output.contains("could not put the new bundle in place"), "log: \(output)")
+        // ...and the rollback really ran. Deleting `mv "$backup" "$target"` from the script
+        // turns this red now; it did not before.
+        #expect(output.contains("rolled back to the old bundle"), "log: \(output)")
+        #expect(!output.contains("ROLLBACK FAILED"), "log: \(output)")
 
         // Whatever happened, the user still has a working 0.18.0 at the original path.
-        let logged = (try? String(contentsOf: log, encoding: .utf8)) ?? "<no log>"
         #expect(SelfUpdate.bundleVersion(of: f.target) == "0.18.0",
-                "the old bundle was not restored: \(logged)")
+                "the old bundle was not restored: \(output)")
         // And it is the real bundle, not a directory containing one — the `mv a a.old` trap.
         #expect(!FileManager.default.fileExists(
             atPath: f.target.appendingPathComponent("GitPic.app").path),
             "the rollback restored a wrapper directory instead of the bundle")
+        #expect(SelfUpdate.signatureIsIntact(at: f.target),
+                "the restored bundle would be refused by Gatekeeper")
+        // The rollback consumed the backup, so there is nothing left under that name.
+        #expect(Self.entries(in: f.apps, prefix: ".GitPic-old-").isEmpty,
+                "a backup survived a successful rollback")
+    }
+
+    /// The branch below the branch: the swap failed *and* the rollback failed. Nothing the
+    /// filesystem can do provokes this — both renames use the same parent directory — so the
+    /// test shadows `mv` on `PATH` for exactly the rollback call.
+    @Test("a failed rollback leaves the old bundle findable and says how to restore it")
+    func reportsAFailedRollback() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let staged = try SelfUpdate.stage(dmg: f.dmg, expectedVersion: "0.19.0",
+                                         replacing: f.target)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500],
+                                             ofItemAtPath: staged.directory.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                                   ofItemAtPath: staged.directory.path)
+        }
+        // Fails only when asked to move the backup, so the first `mv` still moves the old
+        // bundle aside and the second still refuses on the `0o500` directory above.
+        let stub = f.root.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: stub, withIntermediateDirectories: true)
+        let mv = stub.appendingPathComponent("mv")
+        try Data("""
+        #!/bin/bash
+        case "$1" in
+          */.GitPic-old-*) exit 1 ;;
+        esac
+        exec /bin/mv "$@"
+        """.utf8).write(to: mv)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                             ofItemAtPath: mv.path)
+
+        let log = f.root.appendingPathComponent("install.log")
+        let output = try Self.runScript(staged: staged, log: log, root: f.root,
+                                        pathPrefix: stub.path)
+
+        #expect(output.contains("ROLLBACK FAILED"), "log: \(output)")
+        // The old bundle is where the log says it is, and the log says what to type. This is
+        // the message the user acts on, and acting on it is what used to make the *next*
+        // launch's sweep delete the bundle it was running from.
+        let backups = Self.entries(in: f.apps, prefix: ".GitPic-old-")
+        #expect(backups.count == 1, "the old bundle is gone: \(output)")
+        if let backup = backups.first {
+            let url = f.apps.appendingPathComponent(backup)
+            #expect(output.contains("the old GitPic is at \(url.path)"), "log: \(output)")
+            #expect(output.contains("to restore it by hand: mv \(url.path) \(f.target.path)"),
+                    "log: \(output)")
+            #expect(SelfUpdate.bundleVersion(of: url) == "0.18.0", "not a working bundle")
+            #expect(SelfUpdate.signatureIsIntact(at: url), "would be refused by Gatekeeper")
+        }
+        // Nothing is at the install path — which is exactly why the message has to be right.
+        #expect(!FileManager.default.fileExists(atPath: f.target.path))
     }
 
     @Test("an image holding the wrong version is refused before anything is staged")
     func refusesTheWrongVersion() throws {
         let f = try Self.fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
+        let mountsBefore = Self.mountLeftovers()
 
         #expect(throws: SelfUpdate.InstallFailure.self) {
             _ = try SelfUpdate.stage(dmg: f.dmg, expectedVersion: "0.99.0",
                                      replacing: f.target)
         }
-        let rest = try FileManager.default.contentsOfDirectory(
-            atPath: f.target.deletingLastPathComponent().path)
+        let rest = try FileManager.default.contentsOfDirectory(atPath: f.apps.path)
         #expect(rest == ["GitPic.app"], "a refused image left something behind: \(rest)")
         #expect(SelfUpdate.bundleVersion(of: f.target) == "0.18.0")
+        #expect(Self.mountLeftovers() == mountsBefore, "a refusal left the image attached")
     }
 
     /// The writability answer, which is also the permission probe: staging is done by really
@@ -224,12 +414,11 @@ struct SelfUpdateInstallTests {
     func refusesAnUnwritableParent() throws {
         let f = try Self.fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
-        let apps = f.target.deletingLastPathComponent()
         try FileManager.default.setAttributes([.posixPermissions: 0o555],
-                                             ofItemAtPath: apps.path)
+                                             ofItemAtPath: f.apps.path)
         defer {
             try? FileManager.default.setAttributes([.posixPermissions: 0o755],
-                                                   ofItemAtPath: apps.path)
+                                                   ofItemAtPath: f.apps.path)
         }
 
         do {
@@ -254,6 +443,7 @@ struct SelfUpdateInstallTests {
             .appendingPathComponent("gitpic-install-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        let mountsBefore = Self.mountLeftovers()
         let notAnImage = root.appendingPathComponent("GitPic-0.19.0-macos-arm64.dmg")
         try Data("this is not a disk image".utf8).write(to: notAnImage)
 
@@ -261,17 +451,227 @@ struct SelfUpdateInstallTests {
             _ = try SelfUpdate.stage(dmg: notAnImage, expectedVersion: "0.19.0",
                                      replacing: root.appendingPathComponent("GitPic.app"))
         }
+        // Nothing was mounted, so the mount point was removed by the plain `rmdir` path — no
+        // `hdiutil detach` was needed and none of it recursed into a volume.
+        #expect(Self.mountLeftovers() == mountsBefore)
     }
 
-    /// Run the generated script with the reopen stubbed out — the one thing a test must not do
-    /// is launch an application — and with a pid that has already exited so the wait loop
-    /// falls straight through.
-    private static func runScript(staged: SelfUpdate.Staged, log: URL, root: URL) throws
+    // MARK: - Cancellation
+
+    /// "Cancel on the Nth question", so a test can land the cancellation between two chosen
+    /// steps of `stage`. Locked because the closure is `@Sendable` and `stage` is documented
+    /// as callable off the main actor.
+    private final class CancelFrom: @unchecked Sendable {
+        private let lock = NSLock()
+        private let nth: Int
+        private var asked = 0
+        init(_ nth: Int) { self.nth = nth }
+        /// How many times `stage` asked, which is how the test knows it asked at all.
+        var count: Int { lock.lock(); defer { lock.unlock() }; return asked }
+        var callback: @Sendable () -> Bool {
+            { [self] in
+                lock.lock()
+                defer { lock.unlock() }
+                asked += 1
+                return asked >= nth
+            }
+        }
+    }
+
+    @Test("cancelling between two steps stages nothing and mounts nothing",
+          arguments: [1, 2, 3, 4, 5])
+    func cancels(atQuestion nth: Int) throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let mountsBefore = Self.mountLeftovers()
+        let cancel = CancelFrom(nth)
+
+        do {
+            _ = try SelfUpdate.stage(dmg: f.dmg, expectedVersion: "0.19.0",
+                                     replacing: f.target, isCancelled: cancel.callback)
+            Issue.record("staging continued after the user cancelled")
+        } catch let failure as SelfUpdate.InstallFailure {
+            // Its own case, so the sheet can tell "you stopped this" from "this broke".
+            #expect(failure == .cancelled, "expected .cancelled, got \(failure)")
+        }
+
+        #expect(cancel.count == nth, "the check was not reached in order")
+        // Unwound through the same two `defer`s a failure uses: image detached, mount point
+        // gone, staging directory gone, installed bundle untouched.
+        #expect(Self.mountLeftovers() == mountsBefore, "a cancel left the image attached")
+        let rest = try FileManager.default.contentsOfDirectory(atPath: f.apps.path)
+        #expect(rest == ["GitPic.app"], "a cancel left something behind: \(rest)")
+        #expect(SelfUpdate.bundleVersion(of: f.target) == "0.18.0")
+    }
+
+    @Test("the default never cancels, so an existing caller still stages")
+    func stagesWithoutACancelCallback() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        // The default argument is what keeps every current call site compiling, so it is worth
+        // one assertion that it means "carry on" rather than "stop".
+        let staged = try SelfUpdate.stage(dmg: f.dmg, expectedVersion: "0.19.0",
+                                         replacing: f.target)
+        #expect(SelfUpdate.bundleVersion(of: staged.bundle) == "0.19.0")
+    }
+
+    // MARK: - Sweeping leftovers
+
+    /// Two leftovers in the shapes an install really produces: the backup *is* a bundle
+    /// (`mv GitPic.app .GitPic-old-x` renames the bundle itself), and the staging directory
+    /// *contains* one.
+    private static func leftovers(in apps: URL) throws -> (backup: URL, staging: URL) {
+        let backup = apps.appendingPathComponent(".GitPic-old-\(UUID().uuidString)")
+        try makeApp(at: backup, version: "0.18.0")
+        let staging = apps.appendingPathComponent(".GitPic-update-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        try makeApp(at: staging.appendingPathComponent("GitPic.app"), version: "0.19.0")
+        return (backup, staging)
+    }
+
+    /// **The path that could leave the machine with no GitPic at all.** The script hits
+    /// `ROLLBACK FAILED`, the user follows the log and starts the app from the backup, and the
+    /// sweep at that launch matched its own bundle's prefix and deleted the directory it was
+    /// running from. Structural, so no cutoff can reopen it: the cutoff here is in the future,
+    /// which makes every leftover eligible on age.
+    @Test("the sweep never deletes the bundle it is running from")
+    func sweepProtectsTheRunningBundle() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let everythingIsOldEnough = Date().addingTimeInterval(60)
+
+        // Launched from the backup: `Bundle.main.bundleURL` is the backup directory itself,
+        // because the bundle root is what holds `Contents/MacOS/GitPic`.
+        var (backup, staging) = try Self.leftovers(in: f.apps)
+        var swept = SelfUpdate.sweepLeftovers(in: [f.apps], olderThan: everythingIsOldEnough,
+                                             running: backup)
+        #expect(swept.map(\.lastPathComponent) == [staging.lastPathComponent],
+                "swept: \(swept.map(\.lastPathComponent))")
+        #expect(SelfUpdate.bundleVersion(of: backup) == "0.18.0",
+                "the sweep deleted the bundle it was running from")
+
+        // Launched from a staged copy, which is what the by-name reopen fallback can bring up:
+        // there the running bundle is one level inside the leftover directory.
+        try FileManager.default.removeItem(at: backup)
+        (backup, staging) = try Self.leftovers(in: f.apps)
+        swept = SelfUpdate.sweepLeftovers(
+            in: [f.apps], olderThan: everythingIsOldEnough,
+            running: staging.appendingPathComponent("GitPic.app"))
+        #expect(swept.map(\.lastPathComponent) == [backup.lastPathComponent],
+                "swept: \(swept.map(\.lastPathComponent))")
+        #expect(SelfUpdate.bundleVersion(of: staging.appendingPathComponent("GitPic.app"))
+                == "0.19.0", "the sweep deleted the directory it was running from")
+
+        // A name that is a string prefix of the running bundle's but not a path prefix is not
+        // protected by it.
+        let lookalike = f.apps.appendingPathComponent(staging.lastPathComponent + "-old")
+        try FileManager.default.createDirectory(at: lookalike, withIntermediateDirectories: true)
+        swept = SelfUpdate.sweepLeftovers(
+            in: [f.apps], olderThan: everythingIsOldEnough,
+            running: staging.appendingPathComponent("GitPic.app"))
+        #expect(swept.map(\.lastPathComponent).contains(lookalike.lastPathComponent),
+                "swept: \(swept.map(\.lastPathComponent))")
+    }
+
+    /// The one-day floor, on the only clock that measures what it claims to.
+    ///
+    /// The fixture cannot fabricate staleness — `touch` moves mtime, and measured, it does not
+    /// move ctime, which is the point — so the cutoff is injected instead. This is the half of
+    /// `SelfUpdateRouteTests.sweepsOnlyStaleLeftovers` that belongs here, next to the code.
+    @Test("a leftover is aged from when it was created, not from the build time it inherited")
+    func sweepAgesFromCtimeNotMtime() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let (backup, staging) = try Self.leftovers(in: f.apps)
+        // What every real update looks like: `mv` does not touch mtime and `ditto` preserves
+        // it, so a backup's mtime is the *build* time of the release it came from — months
+        // old on the day it is created. Under the old rule that was instantly past a one-day
+        // floor, so the backup was gone before the new version had ever launched.
+        let buildTime = Date().addingTimeInterval(-86_400 * 200)
+        for url in [backup, staging] {
+            try FileManager.default.setAttributes([.modificationDate: buildTime],
+                                                 ofItemAtPath: url.path)
+        }
+
+        #expect(SelfUpdate.sweepLeftovers(in: [f.apps], running: nil).isEmpty,
+                "a leftover created moments ago was swept on its inherited mtime")
+        #expect(FileManager.default.fileExists(atPath: backup.path))
+
+        // Both go once the cutoff is past the time they were actually created.
+        let swept = SelfUpdate.sweepLeftovers(in: [f.apps],
+                                             olderThan: Date().addingTimeInterval(60),
+                                             running: nil)
+        #expect(Set(swept.map(\.lastPathComponent))
+                == [backup.lastPathComponent, staging.lastPathComponent],
+                "swept: \(swept.map(\.lastPathComponent))")
+    }
+
+    @Test("the sweep only ever touches the two names it owns")
+    func sweepLeavesEverythingElseAlone() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        // Something that merely looks similar, a real app, and a real app of someone else's.
+        let bystanders = ["GitPic.app", ".GitPicSomethingElse", "Other.app"]
+        for name in bystanders where name != "GitPic.app" {
+            try FileManager.default.createDirectory(
+                at: f.apps.appendingPathComponent(name), withIntermediateDirectories: true)
+        }
+
+        let swept = SelfUpdate.sweepLeftovers(in: [f.apps],
+                                             olderThan: Date().addingTimeInterval(60),
+                                             running: nil)
+        #expect(swept.isEmpty, "swept: \(swept.map(\.lastPathComponent))")
+        for name in bystanders {
+            #expect(FileManager.default.fileExists(
+                atPath: f.apps.appendingPathComponent(name).path), "\(name) must not be swept")
+        }
+    }
+
+    // MARK: - Running the generated script
+
+    /// Replace one line of the generated script, refusing to run if it is no longer there.
+    ///
+    /// The stubs are the only reason this suite can run the real script at all, so a reworded
+    /// line must not quietly turn one into a no-op. A stub that silently stopped applying is
+    /// how `rollsBack` came to assert nothing.
+    private static func stub(_ script: String, _ line: String, with replacement: String) throws
         -> String {
+        guard script.contains(line) else {
+            throw FixtureError.stub("the generated script no longer contains: \(line)")
+        }
+        return script.replacingOccurrences(of: line, with: replacement)
+    }
+
+    /// Run the generated script with its three outside-world one-liners stubbed — the one
+    /// thing a test must not do is launch an application — and with a pid that has already
+    /// exited so the wait loop falls straight through.
+    ///
+    /// - Parameters:
+    ///   - launchSucceeds: what the stubbed `open -a` returns. Measured on the real thing: 0
+    ///     when LaunchServices accepts the request, which is not the same as the app running.
+    ///   - appComesUp: what the stubbed process check answers. `false` also flattens the
+    ///     poll's `sleep 0.5` to `sleep 0`, or each of the two confirmations would really sit
+    ///     there for ten seconds.
+    ///   - pathPrefix: prepended to the script's own `PATH`, which is otherwise fixed on
+    ///     purpose. The only way to make one specific `mv` fail.
+    private static func runScript(
+        staged: SelfUpdate.Staged, log: URL, root: URL,
+        launchSucceeds: Bool = true, appComesUp: Bool = true, pathPrefix: String? = nil
+    ) throws -> String {
         var script = SelfUpdate.installScript(staged: staged, pid: 999_999, log: log)
-        script = script.replacingOccurrences(
-            of: "open -a \"$target\" 2>/dev/null && return 0",
-            with: "echo \"WOULD REOPEN $target\"; return 0")
+        script = try stub(script, #"launch() { open -a "$1"; }"#,
+                          with: #"launch() { echo "WOULD REOPEN $1"; return \#(launchSucceeds ? 0 : 1); }"#)
+        script = try stub(script, #"running() { pgrep -x GitPic >/dev/null 2>&1; }"#,
+                          with: "running() { return \(appComesUp ? 0 : 1); }")
+        script = try stub(script, #"whence() { ps -Awwo pid=,comm= | grep -F /Contents/MacOS/GitPic; }"#,
+                          with: #"whence() { echo "WOULD LIST PROCESSES"; }"#)
+        if !appComesUp {
+            script = try stub(script, "sleep 0.5", with: "sleep 0")
+        }
+        if let pathPrefix {
+            script = try stub(script, "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+                              with: "PATH=\(pathPrefix):/usr/bin:/bin:/usr/sbin:/sbin")
+        }
         let file = root.appendingPathComponent("install-\(UUID().uuidString).sh")
         try script.write(to: file, atomically: true, encoding: .utf8)
         _ = try ChildProcess.run(executable: URL(fileURLWithPath: "/bin/bash"),
