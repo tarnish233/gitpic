@@ -756,11 +756,24 @@ final class AppModel {
     /// finish after the window had gone.
     var updateSheetPresented = false
 
-    /// Whether brew can do the upgrade, once asked. `nil` until the sheet asks.
-    private(set) var upgradePath: Updater.Availability?
+    /// Which upgrade this install can be offered, once asked. `nil` until the sheet asks.
+    private(set) var upgradePath: SelfUpdate.Route?
 
-    /// A brew probe is in flight. The `upgradePath == nil` guard did not hold across its
-    /// own `await`, so two sheet appearances could both spawn one.
+    /// How far the in-app download has got, or `nil` when one is not running.
+    ///
+    /// A stored property on the model rather than the `AsyncStream` machinery `ThumbnailStore`
+    /// uses: the sheet is the only consumer and both ends are already on the main actor, so a
+    /// multi-watcher stream would be scaffolding around a single assignment.
+    private(set) var downloadProgress: SelfUpdate.Progress?
+
+    /// The install is past downloading and is mounting, checking and copying.
+    private(set) var installing = false
+
+    /// The task doing the download, kept only so 取消 can stop it.
+    private var installTask: Task<Void, Never>?
+
+    /// An upgrade-path probe is in flight. The `upgradePath == nil` guard did not hold across
+    /// its own `await`, so two sheet appearances could both spawn one.
     private var resolvingUpgradePath = false
 
     /// The user asked for a check while one was already running.
@@ -938,7 +951,7 @@ final class AppModel {
         return true
     }
 
-    /// Ask whether brew can perform the upgrade. Called when the sheet appears.
+    /// Ask which upgrade this install can be offered. Called when the sheet appears.
     ///
     /// Only a definite answer is kept. `guard upgradePath == nil` cached whatever came back,
     /// including the two failures that say nothing about this install: `brew list --cask`
@@ -948,29 +961,96 @@ final class AppModel {
     /// with quitting the app as the only way to ask again.
     func resolveUpgradePath() async {
         if case .unavailable(_, retryable: false) = upgradePath { return }
-        if case .ready = upgradePath { return }
+        if case .homebrew = upgradePath { return }
+        if case .selfInstall = upgradePath { return }
         // The old guard also did not hold across the `await`, so two sheet appearances could
         // both spawn the probe.
         guard !resolvingUpgradePath else { return }
+        // Nothing to resolve without a report: the answer depends on which assets the release
+        // published, so it cannot be computed before the check has completed.
+        guard let report = update else { return }
         resolvingUpgradePath = true
         defer { resolvingUpgradePath = false }
         // Back to `nil` for the duration, because that is what `UpdateSheet` renders as
         // 「正在确认升级方式…」. Leaving the previous retryable failure in place would show the
-        // 「不是用 Homebrew 装的」 paragraph while the probe that may contradict it is running.
+        // 「不能在这里直接升级」 paragraph while the probe that may contradict it is running.
         upgradePath = nil
-        upgradePath = await Updater.availability()
+        upgradePath = await Updater.resolve(report: report)
     }
 
-    /// Hand off to brew and quit. Only reachable when ``upgradePath`` is `.ready`.
+    /// Do whichever upgrade was resolved, and quit.
     func performUpgrade() {
-        guard case .ready(let brew) = upgradePath else { return }
-        do {
-            try Updater.upgradeAndRelaunch(brew: brew)
-        } catch {
-            // The handoff itself failed, so this process is still alive to say so.
-            updateFailure = "启动升级失败：\(error.localizedDescription)"
-            Diagnostics.log("update: handoff failed: \(String(describing: error))")
+        switch upgradePath {
+        case .homebrew(let brew):
+            do {
+                try Updater.upgradeAndRelaunch(brew: brew)
+            } catch {
+                // The handoff itself failed, so this process is still alive to say so.
+                updateFailure = "启动升级失败：\(error.localizedDescription)"
+                Diagnostics.log("update: handoff failed: \(String(describing: error))")
+            }
+        case .selfInstall(let asset, let sha):
+            performSelfInstall(asset: asset, sha256: sha)
+        case .unavailable, .none:
+            return
         }
+    }
+
+    /// Download, verify, stage and hand off — reporting each stage into the sheet.
+    ///
+    /// Everything here can fail while the app is still on screen, which is the point: a failed
+    /// download or a digest that does not match costs a message, not the application.
+    private func performSelfInstall(asset: ReleaseAsset, sha256: String) {
+        guard installTask == nil, let version = update?.latest else { return }
+        updateFailure = nil
+        downloadProgress = SelfUpdate.Progress(received: 0, total: asset.size)
+        // `self` strongly, unlike `loginTask` above: this type is a main-actor singleton, and
+        // the progress callback arrives on a URLSession queue, so a weak capture inside that
+        // `@Sendable` closure is the one thing Swift 6 will not allow here.
+        installTask = Task {
+            do {
+                try await Updater.installAndRelaunch(
+                    asset: asset, sha256: sha256, version: version,
+                    onProgress: { progress in
+                        Task { @MainActor in self.observeInstall(progress) }
+                    })
+            } catch is CancellationError {
+                Diagnostics.log("update: install cancelled by the user")
+            } catch let failure as SelfUpdate.Failure {
+                self.reportInstallFailure(failure.message, log: String(describing: failure))
+            } catch let failure as SelfUpdate.InstallFailure {
+                self.reportInstallFailure(failure.message, log: String(describing: failure))
+            } catch {
+                self.reportInstallFailure(
+                    "安装失败：\((error as NSError).localizedDescription)",
+                    log: String(describing: error))
+            }
+            self.finishInstall()
+        }
+    }
+
+    private func observeInstall(_ progress: SelfUpdate.Progress) {
+        downloadProgress = progress
+        // The mount, the version check, the signature check and the copy all come after the
+        // last byte, and they are not instant — say so rather than leaving a full bar sitting
+        // there looking stuck.
+        if let total = progress.total, progress.received >= total { installing = true }
+    }
+
+    private func reportInstallFailure(_ message: String, log: String) {
+        updateFailure = message
+        Diagnostics.log("update: install failed: \(log)")
+    }
+
+    private func finishInstall() {
+        installTask = nil
+        downloadProgress = nil
+        installing = false
+    }
+
+    /// Stop an in-flight download. The partial file is removed by `SelfUpdate.download`.
+    func cancelInstall() {
+        installTask?.cancel()
     }
 
     // MARK: - Telling the user what happened

@@ -57,8 +57,9 @@ struct GeneralPane: View {
             Section("更新") {
                 // The label is short; the caption carries the two facts it dropped — that
                 // this checks rather than installs, and that it does so daily. Nothing here
-                // ever replaces the app on its own: a found update is reported, and 立即更新
-                // in the sheet is the only thing that hands off to brew.
+                // ever replaces the app on its own: a found update is reported, and the
+                // sheet's button is the only thing that installs anything — through brew when
+                // brew owns the bundle, and by downloading a verified image when it does not.
                 CaptionedToggle(
                     label: "自动更新",
                     caption: "每天检查一次，发现新版本会告诉你，不会自动装。"

@@ -10,7 +10,7 @@
 - `github.rs` — GitHub Contents API client (upload, dedup, health checks).
 - `naming.rs`, `link.rs`, `imageproc.rs`, `output.rs`, `error.rs` — path/hash, URL/markdown, compression, human/JSON output, error types.
 - `history.rs` — the upload log the app's 历史 pane reads.
-- `release.rs` — the update check behind `gitpic update check`: version parsing and comparison, and the `releases/latest` fetch. The feed is a compile-time constant on purpose, pinned by a test — its text is rendered inside GitPic's own window, so nothing configurable may choose its origin.
+- `release.rs` — the update check behind `gitpic update check`: version parsing and comparison, the `releases/latest` fetch, and the release's assets (name, size, download URL, GitHub's `digest`) that the app installs an update from. The feed is a compile-time constant on purpose, pinned by a test — its text is rendered inside GitPic's own window, so nothing configurable may choose its origin, and download URLs come from the API rather than a template for the same reason.
 - `testutil.rs` — `#[cfg(test)]` only: the loopback stub server, a canned response, and the request reader shared by `github`'s and `release`'s tests. One `sock.read` is not a whole request; the module says what that cost twice.
 - `commands/` — one module per action (`upload`, `auth_cmd`, `repos`, `branches`, `doctor`, `list`, `config_cmd`, `completion`, `skill`, `update`).
 
@@ -66,6 +66,15 @@ changes go in each version's `### App` subsection of the two root changelogs;
 `apps/GitPic/CHANGELOG.md` is frozen at 0.1.2 as history. The app must never be
 added to the plugin manifests — `check_manifests.py` asserts exactly one plugin
 entry, and that entry is the CLI's skill.
+
+Its two targets are a boundary, not a layout preference: `GitPicApp` is an
+`executableTarget` and **cannot be imported by tests**, so anything worth testing
+belongs in `GitPicCore` — which is also where process spawning lives, because
+`ChildProcess` is internal to that module. The self-update feature is the clearest
+case: `SelfUpdate*.swift` in `GitPicCore` holds the routing decision, the download
+and verification, the staging and the generated swap script, all of which are
+tested; `Updater.swift` in `GitPicApp` is only the wiring that gathers facts off the
+main actor and quits at the end.
 
 The skill at `skills/gitpic/SKILL.md` is the single source shipped three ways:
 embedded into the binary via `include_str!` for `gitpic skill install`, and

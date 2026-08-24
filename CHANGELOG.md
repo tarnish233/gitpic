@@ -4,7 +4,129 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-08-24
+
+### A manual install can update itself now
+
+- **Homebrew installs still go through brew; a manual install downloads and installs the update itself.** Only the first could update in one click before — a hand-installed copy was sent to the release page to fetch a DMG, drag it across, and clear the quarantine flag by hand.
+- Downloading, verifying, mounting and copying all finish *before* GitPic quits, so a failure changes nothing. Only once all of it has passed does it quit, swap, and reopen on its own.
+- Verified against the SHA-256 GitHub publishes for that file — the same thing Homebrew checks a cask against. **No checksum, no install.**
+- When Homebrew owns this copy of GitPic, brew stays the installer; nothing is replaced behind its back.
+- When an in-app update is not possible, it says which of the real reasons it was instead of always blaming Homebrew.
+- `gitpic update check --json` now also reports the release's assets: name, size, download URL and checksum.
+
+<!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file. Keep each bullet above on one line — the app's update sheet renders with .inlineOnlyPreservingWhitespace, which keeps newlines verbatim, so a wrapped line breaks mid-sentence at 480pt -->
+
+### CLI
+
+- `update check` reports the release's downloadable files: name, size,
+  `browser_download_url`, and the `digest` GitHub computes for each one. Additive on the wire —
+  `Decodable` ignores unknown keys, so an older app decodes the new envelope unchanged — and
+  `human()` and the `-q` contract are untouched.
+- `digest` is an `Option` because it is not part of any documented API contract (measured:
+  present on every release of this project that shipped a disk image, from 0.15.0 on; earlier
+  releases published no app asset at all). The consumer treats its absence as "cannot verify,
+  do not install" rather than as permission to skip the check. The `sha256:` prefix is kept
+  rather than stripped — the prefix is what says which algorithm produced the hex, and a future
+  `sha512:` value read as SHA-256 would be verification that verifies nothing.
+- The download URL is `browser_download_url` passed through, never built from a template.
+  Building it would put a second spelling of the release URL in this crate, and
+  `the_release_feed_is_a_compile_time_constant` exists to keep there being exactly one.
+
+### App
+
+- **Installs an update itself** when Homebrew does not own the bundle: 下载并更新 fetches that
+  version's disk image, verifies it, replaces the running GitPic and reopens it. That install
+  used to see nothing but 打开发布页.
+- **The ordering is where the safety comes from.** The download, the SHA-256 check, mounting
+  the image, confirming the version inside it, verifying its signature and copying the new
+  bundle in beside the old one all happen while the app is still running, cancellable, and able
+  to show an error — a failure there costs nothing. Only once all of that has passed does the
+  app quit, and what remains is two renames in one directory. The irreversible window shrinks
+  from "however long a download takes" to "between two renames". It is also why this path needs
+  no watchdog while the brew one does: brew goes to the network *after* the app is gone.
+- **The trust model, stated.** GitPic is ad-hoc signed, so there is no signature chain and
+  macOS cannot vouch for a download's origin. What verifies it is the SHA-256 that
+  `api.github.com` reports for the asset, over TLS, against the bytes that arrive — which is
+  **the same trust root Homebrew uses**: a cask's `sha256` is likewise a hash fetched over TLS
+  from GitHub, and brew has no signature chain either. So this is not a weaker path than the one
+  already shipped. Neither survives a compromised GitHub account or CI; the only real
+  improvement is a Developer ID plus notarisation, equally out of reach for both. Verified: the
+  digest the API reports for 0.19.0's image is byte-identical to `shasum -a 256` over the
+  published file.
+- **Homebrew first, always.** Replacing a cask-managed bundle behind brew's back leaves its
+  manifest describing a version that is no longer on disk, so the next `brew upgrade` fights it.
+  The in-app installer is therefore not an alternative to brew; it is what happens when brew is
+  not the owner. A brew probe that gets **no answer** is never treated as "not brew's" — a
+  timeout can be hiding a working Homebrew, and installing over a cask on that guess is exactly
+  the damage above.
+- Only `/Applications` and `~/Applications` are installed into. The cost, stated: a copy kept
+  anywhere else still sees the release page. It also means a development build in the
+  repository's `dist-app/` cannot be silently replaced by a release build.
+- No checksum means no install, and the release page instead. Better not to install than to
+  install bytes nothing vouched for.
+- The asset is matched on the exact filename `release.yml` builds, not on "ends with .dmg". A
+  release carries five archives and five `.sha256` sidecars beside the image, and "the first
+  thing that looks like a download" is how a sidecar gets hashed and then mounted.
+- The architecture comes from the running process rather than a hardcoded `arm64`, so a machine
+  with no published image finds nothing instead of installing one built for another one.
+- `locateBrew()` returned the same `nil` for "no Homebrew on this machine" and "the 8 s
+  login-shell probe timed out", and both were treated as "ask again later". Free while brew was
+  the only installer; not free now — a machine with no brew is precisely the machine this
+  feature exists for, and folding it in with "could not tell" left that user retrying a probe
+  that was never going to answer differently. `locateBrewOutcome()` separates them, and the
+  asymmetry follows `loginShellLookup`'s existing reasoning: a path in stdout is trusted even if
+  the shell had to be killed, so the bound only decides whether *absence* of a path is evidence.
+- The update decision uses the **bundle's own** version, not the report's `current` — that one
+  is the CLI's, and this replaces the bundle. They are identical in any packaged install
+  (`build-app.sh` refuses to package a mismatch) and can differ for a source build.
+- Copying uses `ditto --noqtn` rather than `cp -R`: `man ditto` documents that it preserves
+  resource forks, extended attributes and ACLs, and an ad-hoc signature lives in extended
+  attributes — `cp -R` would break it. The same page says quarantine bits are preserved too, and
+  a quarantined un-notarised bundle is one Gatekeeper refuses outright.
+- **Quitting before the swap is measured, not assumed.** Renaming a running executable's
+  directory away and putting a fresh one at the old path got the process `Killed: 9`. So the
+  simpler design — swapping in-process — is not available.
+- Four things in the handoff script are the result of finding them wrong first:
+  - The backup directory's name carries a UUID and its absence is asserted before the rename.
+    `mv a a.old` when `a.old` already exists does **not** fail — it moves `a` inside it, giving
+    `a.old/a` (reproduced). With a fixed name, a second attempt would "roll back" a wrapper
+    directory that is not a bundle and then delete the real old app with the leftovers.
+  - The app is reopened *before* the rollback material is deleted, so a new bundle that will not
+    launch still has the old one on disk behind it; the leftovers are swept at the next launch.
+  - The reopen is in a `trap … EXIT`, not at the end of the success path. GitPic is
+    `.accessory`: once it has quit there is no Dock icon and no menu-bar icon, so a script that
+    dies early takes the whole app with it.
+  - `PATH` is pinned explicitly. Not a privilege measure — nothing here runs elevated — but the
+    app's own PATH has a Homebrew prefix prepended, and a script whose job is to replace a
+    bundle has no business resolving `mv` through a user-writable directory.
+- `codesign --verify` is run, and documented as proving **nothing about origin**: it passes for
+  anything anyone ad-hoc signs. It is there to catch a truncated or half-written copy. The
+  digest is the only authentication in the path.
+- The launch-time sweep covers more now: besides stale upgrade scripts, it removes a `.dmg` left
+  by a cancelled download and the staging and backup directories an interrupted install left in
+  an Applications folder. Those two are whole copies of the app, and the script can neither
+  delete the staging directory it is standing in nor drop the backup before the reopen.
+- **No privilege escalation.** The plan was to ask for an administrator password when the target
+  directory could not be written; a red-team pass overturned it. `/Applications` is
+  `root:admin drwxrwxr-x`, so any admin can already write it and would never need the prompt;
+  the only users who hit the refusal are standard ones, and for them the prompt is a genuine
+  local privilege escalation — the app is ad-hoc signed with no library validation and no
+  hardened runtime, so the user can inject code into their own GitPic and control the string
+  that reaches `do shell script`, while the authorisation dialog shows no command text. So an
+  unwritable target says which of the four real causes it was and points at `~/Applications`,
+  which needs no extra permission.
+- The "cannot upgrade here" line now branches on the actual reason. The old sentence — "not
+  installed by Homebrew, or there is no brew on this machine" — was already wrong for a bundle
+  brew manages at a path this app is not running from, and there are now two more causes
+  ("the directory cannot be written", "the release has no verifiable image") than one sentence
+  can carry.
+- Nothing to do about a hand-made `bin/gitpic` symlink: the bundle path does not change across
+  an install, so an existing link stays valid and points at the new version.
+
 ## [0.19.0] - 2026-08-24
+
+
 
 ### Launch at login and update checks
 
