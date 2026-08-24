@@ -21,6 +21,13 @@ jobs:
       - name: Check skill manifests
         run: python3 .github/scripts/check_manifests.py
 
+      # `release_notes` decides what a Release body is, for both the publisher and the
+      # check above, so its own rules are worth exercising. A `--self-test` flag rather
+      # than a test file because this repo has no Python test infrastructure at all —
+      # the shape that actually runs beats the shape that is conventional.
+      - name: Check the release-notes rules
+        run: python3 .github/scripts/release_notes.py --self-test
+
   msrv:
     name: builds on the declared MSRV
     runs-on: ubuntu-latest

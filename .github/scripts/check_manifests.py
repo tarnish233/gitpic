@@ -20,6 +20,12 @@ import re
 import sys
 from pathlib import Path
 
+# Both scripts live in this directory, and Python puts a script's own directory on
+# `sys.path`, so this resolves whatever the caller's cwd is. Importing it rather than
+# restating its rule is the entire point: the marker check below and the extraction in
+# `release.yml` were two implementations of one idea and they drifted.
+import release_notes
+
 ROOT = Path(__file__).resolve().parents[2]
 SKILL_NAME = "gitpic"
 SKILL_MD = ROOT / "skills" / SKILL_NAME / "SKILL.md"
@@ -145,36 +151,25 @@ def check_changelogs(version: str) -> None:
     full detail. ``release.yml`` publishes only what precedes the marker, and
     GitPic.app renders that same text in its update sheet. A section without the
     marker still publishes whole — that is what keeps backfilling pre-0.19.0 tags
-    working — so nothing but this check stands between a forgotten marker and a
-    Release carrying the internal detail. It is required for the version being cut
-    and asked of nothing else, which is why it lives here rather than in the awk.
+    working.
+
+    The rule itself lives in ``release_notes`` and is *shared with the extractor* that
+    publishes the Release, because when it was restated here as a substring test the
+    two answers drifted: this one accepted a marker sitting below the detail, which
+    withholds nothing, and accepted a summary bullet that merely named the marker,
+    which truncated the published body instead. Both are now placement errors that
+    ``release_notes.problems`` reports. That module also decides *when* a marker is
+    required — see its ``MARKER_SINCE`` — which is what lets ``release.yml`` run this
+    check before publishing without breaking a re-run of an older tag.
     """
-    heading = re.compile(r"^## \[" + re.escape(version) + r"\]", flags=re.M)
     for path in CHANGELOGS:
         try:
             text = path.read_text()
         except FileNotFoundError:
             fail(f"{path.relative_to(ROOT)} is missing")
             continue
-        match = heading.search(text)
-        if not match:
-            fail(
-                f"{path.name} has no `## [{version}]` section, but Cargo.toml says "
-                f"{version} — rename the unreleased heading before tagging"
-            )
-            continue
-        # This version's section only: a marker under some older version says nothing
-        # about the notes about to be published.
-        rest = text[match.end() :]
-        next_version = re.search(r"^## \[", rest, flags=re.M)
-        section = rest[: next_version.start()] if next_version else rest
-        if "release-notes-end" not in section:
-            fail(
-                f"{path.name}'s `## [{version}]` section has no `<!-- release-notes-end "
-                f"-->` marker, so the whole section — internal detail included — would "
-                f"become the GitHub Release body and the app's update text. Add the "
-                f"marker after the short summary of user-visible changes"
-            )
+        for msg in release_notes.problems(text, version, path.name):
+            fail(msg)
 
 
 def main() -> int:
