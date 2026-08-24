@@ -9,3 +9,7 @@
 # scripts/new-worktree.sh deliberately uses a sibling directory instead.
 /.claude/worktrees/
 /.local/
+# `check_manifests.py` imports `release_notes`, so running it locally byte-compiles
+# that module. CI does not care, but an untracked directory appearing in everyone's
+# `git status` after every manifest check would be noise.
+/.github/scripts/__pycache__/

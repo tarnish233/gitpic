@@ -73,6 +73,16 @@ jobs:
             test "$GITHUB_REF_NAME" = "v$version"
           fi
 
+      # The guard that keeps a forgotten or misplaced `release-notes-end` marker out of a
+      # published Release. It used to run only in `ci.yml`, which triggers on pushes and
+      # PRs to main — and `git push --follow-tags` starts *this* workflow in parallel with
+      # that one, so a Release could go up before the check had finished, with CI turning
+      # red afterwards next to a Release already carrying the internal detail. `publish`
+      # needs this job, so now it blocks instead. Cheap enough to be unarguable: no
+      # toolchain, no cache, one `python3`.
+      - name: Check manifests and the release-notes marker
+        run: python3 .github/scripts/check_manifests.py
+
   build:
     name: Build ${{ matrix.target }}
     needs: version
@@ -290,27 +300,32 @@ jobs:
         run: |
           set -euo pipefail
           version="$VERSION"
-          # Stops at the `release-notes-end` marker as well as at the next version
-          # heading, and that marker is the whole point: the changelog section keeps the
-          # full detail — what was measured, which design was rejected — while a Release
-          # is read by someone deciding whether to upgrade. Those are different documents,
-          # and this is where they part. What lands here is also what GitPic.app renders
-          # in its update sheet, so the two things a user might read stay identical by
-          # construction rather than by being written twice.
+          # The extraction lives in `.github/scripts/release_notes.py`, which is also what
+          # `check_manifests.py` validates against — one implementation of "the text above
+          # the `release-notes-end` marker", used by the publisher and the checker.
+          #
+          # That marker is the whole point: the changelog section keeps the full detail —
+          # what was measured, which design was rejected — while a Release is read by
+          # someone deciding whether to upgrade. Those are different documents, and this is
+          # where they part. What lands here is also what GitPic.app renders in its update
+          # sheet, so the two things a user might read stay identical by construction rather
+          # than by being written twice.
+          #
+          # It replaced an awk program that stopped at any line *containing* the marker
+          # text, so a summary bullet naming the marker truncated the published body and
+          # this step's own non-empty check below did not notice, because the heading it
+          # truncated to is not empty. The script also exits non-zero on a missing or empty
+          # section, which is what the two guards below used to be for; they stay as a
+          # belt-and-braces check on the file that actually gets uploaded.
           #
           # A section with no marker yields the whole thing, which is what every release
-          # before 0.19.0 did and is what keeps backfilling an old tag working.
-          # `check_manifests.py` requires the marker for the version being *cut*, so
-          # forgetting it fails CI instead of quietly publishing the long version.
-          if ! awk -v version="$version" '
-            BEGIN { heading = "## [" version "]" }
-            $0 == heading || index($0, heading " ") == 1 { found = 1; next }
-            found && index($0, "## [") == 1 { exit }
-            found && index($0, "release-notes-end") { exit }
-            found { print }
-            END { if (!found) exit 1 }
-          ' CHANGELOG.zh-CN.md > RELEASE_NOTES.md; then
-            echo "No changelog section found for ${version}" >&2
+          # before 0.19.0 did and is what keeps backfilling an old tag working. The
+          # `version` job now runs `check_manifests.py`, so from 0.19.0 on a forgotten or
+          # misplaced marker fails *before* `publish` rather than turning CI red after the
+          # Release is already up.
+          if ! python3 .github/scripts/release_notes.py CHANGELOG.zh-CN.md "$version" \
+               > RELEASE_NOTES.md; then
+            echo "Could not extract release notes for ${version}" >&2
             exit 1
           fi
           if ! grep -q '[^[:space:]]' RELEASE_NOTES.md; then
