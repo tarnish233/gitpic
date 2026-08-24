@@ -38,10 +38,17 @@ public struct ReleaseAsset: Decodable, Equatable, Sendable {
     /// Also rejects the wrong length and non-hex characters, so a malformed value becomes
     /// "no digest" — which the caller turns into "no self-update" — instead of a comparison
     /// that can never match and looks like a corrupted download.
+    ///
+    /// `isHexDigit` alone is not that check: it is also true for the fullwidth forms, and for
+    /// nothing else (measured over U+0000–U+2FFF, the accepted non-ASCII set is exactly
+    /// `０１２３４５６７８９ＡＢＣＤＥＦａｂｃｄｅｆ`). Sixty-four of those have `count == 64`
+    /// and pass, then fail the comparison — reporting a malformed digest as 「校验不通过」,
+    /// which reads as a tampered release. Fail-closed either way; the point is that the
+    /// validation should mean what it says.
     public var expectedSHA256: String? {
         guard let digest, digest.hasPrefix("sha256:") else { return nil }
         let hex = digest.dropFirst("sha256:".count).lowercased()
-        guard hex.count == 64, hex.allSatisfy(\.isHexDigit) else { return nil }
+        guard hex.count == 64, hex.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return nil }
         return hex
     }
 }
