@@ -60,15 +60,49 @@ public enum ToolDiscovery {
     /// and answer the overwhelming majority without spawning a login shell, which costs up
     /// to 8 seconds. The probe is the fallback for a custom `HOMEBREW_PREFIX`.
     ///
-    /// `nil` means "do not offer to upgrade" rather than "not installed": the app cannot
-    /// tell those apart from here, and both have the same remedy — send the user to the
-    /// release page instead. See `Updater`.
+    /// `nil` collapses "not installed" and "could not tell", which is all the brew upgrade
+    /// path ever needed — both have the same remedy there. Use ``locateBrewOutcome()`` when
+    /// the difference matters.
     public static func locateBrew() -> URL? {
+        if case .found(let url) = locateBrewOutcome() { return url }
+        return nil
+    }
+
+    /// Whether `brew` is on this machine, keeping "no" and "could not tell" apart.
+    public enum BrewLocation: Equatable, Sendable {
+        case found(URL)
+        /// The login shell answered, and there is no `brew`. A durable fact about the
+        /// machine.
+        case absent
+        /// No answer was obtained — the probe hit its 8 s bound, or the shell could not be
+        /// spawned. Says nothing either way and must not be cached.
+        case unknown(reason: String)
+    }
+
+    /// Locate `brew`, reporting *which* kind of "not found" this is.
+    ///
+    /// **Why the distinction had to exist.** ``locateBrew()`` returns `nil` both for a
+    /// machine with no Homebrew and for a probe that timed out, and the update path treated
+    /// both as "ask again later". That was harmless while Homebrew was the only way to
+    /// upgrade. It is not harmless now: a machine with no `brew` at all is exactly the
+    /// machine the in-app installer exists for, and folding it in with "could not tell" left
+    /// that user retrying a probe forever instead of being offered the one path that works.
+    ///
+    /// The asymmetry is deliberate and follows ``loginShellLookup(_:)``'s own reasoning: a
+    /// path found in stdout is trusted even if the shell had to be killed, because the answer
+    /// was already written. The bound only decides whether the *absence* of a path means
+    /// anything.
+    public static func locateBrewOutcome() -> BrewLocation {
         for p in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
         where FileManager.default.isExecutableFile(atPath: p) {
-            return URL(fileURLWithPath: p)
+            return .found(URL(fileURLWithPath: p))
         }
-        return loginShellLookup("brew")
+        let probe = loginShellProbe("brew")
+        if let path = probe.path { return .found(path) }
+        guard probe.conclusive else {
+            return .unknown(reason: probe.reason ?? "brew 探测没有得到结果")
+        }
+        return .absent
     }
 
     /// What `brew` says about one cask.
@@ -121,8 +155,28 @@ public enum ToolDiscovery {
     /// unchanged, so the evidence still applies — it is left as recorded rather than
     /// rewritten to name a tool it was never run against.
     static func loginShellLookup(_ tool: String) -> URL? {
+        loginShellProbe(tool).path
+    }
+
+    /// What one login-shell probe found, and whether "nothing" is an answer.
+    struct ShellProbe {
+        let path: URL?
+        /// True when the shell ran to completion. Only then does `path == nil` mean the tool
+        /// is not there; otherwise the probe simply did not finish.
+        let conclusive: Bool
+        let reason: String?
+    }
+
+    /// ``loginShellLookup(_:)`` with the reason it came back empty.
+    ///
+    /// The body is unchanged from when this returned a bare Optional; all that is new is
+    /// carrying out *why* there was no path, which only the brew caller needs.
+    static func loginShellProbe(_ tool: String) -> ShellProbe {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        guard FileManager.default.isExecutableFile(atPath: shell) else { return nil }
+        guard FileManager.default.isExecutableFile(atPath: shell) else {
+            return ShellProbe(path: nil, conclusive: false,
+                              reason: "找不到可执行的登录 shell（\(shell)）")
+        }
         let out: ProcessOutcome
         do {
             out = try ChildProcess.run(
@@ -130,7 +184,8 @@ public enum ToolDiscovery {
                 args: ["-l", "-c", "command -v \(tool)"],
                 timeout: 8)
         } catch {
-            return nil
+            return ShellProbe(path: nil, conclusive: false,
+                              reason: "登录 shell 无法启动：\(error)")
         }
         // Decoded leniently: `String(data:encoding: .utf8)` returns nil for the
         // *whole* blob when one byte in it is not UTF-8, so a latin-1 motd
@@ -147,7 +202,14 @@ public enum ToolDiscovery {
         // 8-second bound fires and kills the shell *after* the path was written.
         // Measured: stdout already held `/opt/homebrew/bin/gh` at the moment the
         // reader had to be killed.
-        return commandVPath(in: String(decoding: out.stdout, as: UTF8.self), tool: tool)
+        let path = commandVPath(in: String(decoding: out.stdout, as: UTF8.self), tool: tool)
+        // The bound gates only the *negative* answer, which is the other half of the same
+        // reasoning: a shell that had to be killed never got to say whether the tool exists,
+        // so "no path" from it is not evidence of absence.
+        return ShellProbe(
+            path: path,
+            conclusive: !out.timedOut,
+            reason: out.timedOut ? "登录 shell 在 8 秒内没有回答" : nil)
     }
 
     /// Pick a tool's path out of a login shell's stdout.
