@@ -49,6 +49,68 @@ public enum ToolDiscovery {
         return loginShellLookup("gitpic")
     }
 
+    /// Where `brew` is, for the one thing the app asks of it: upgrading its own cask.
+    ///
+    /// Same shape as ``locateGitpic(bundleResourceURL:)`` minus the bundle, and it exists
+    /// for the same measured reason — a Finder-launched app's PATH is
+    /// `/usr/bin:/bin:/usr/sbin:/sbin`, so neither Homebrew prefix is on it and `brew`
+    /// cannot be found by name however normal it looks in a terminal.
+    ///
+    /// The two hardcoded prefixes are Homebrew's own defaults (Apple Silicon, then Intel)
+    /// and answer the overwhelming majority without spawning a login shell, which costs up
+    /// to 8 seconds. The probe is the fallback for a custom `HOMEBREW_PREFIX`.
+    ///
+    /// `nil` means "do not offer to upgrade" rather than "not installed": the app cannot
+    /// tell those apart from here, and both have the same remedy — send the user to the
+    /// release page instead. See `Updater`.
+    public static func locateBrew() -> URL? {
+        for p in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+        where FileManager.default.isExecutableFile(atPath: p) {
+            return URL(fileURLWithPath: p)
+        }
+        return loginShellLookup("brew")
+    }
+
+    /// What `brew` says about one cask.
+    ///
+    /// Three answers, not two, because the caller acts differently on each: an upgrade may
+    /// be offered only for ``installed``, and the other two differ in what the log should
+    /// say — a non-zero exit is Homebrew answering "I do not manage that", while a spawn
+    /// failure means the answer was never obtained.
+    public enum BrewCaskStatus: Equatable, Sendable {
+        case installed
+        case notInstalled(status: Int32)
+        case unusable(reason: String)
+    }
+
+    /// Whether Homebrew is managing `cask`.
+    ///
+    /// Asked because finding `brew` proves nothing about *this* app's origin: a
+    /// drag-installed copy on a machine that also has Homebrew is entirely ordinary, and
+    /// `brew upgrade --cask` there fails with "not installed". `brew list --cask <name>`
+    /// exits 0 when installed and non-zero when not; the status is the whole answer, so
+    /// stdout is discarded rather than parsed.
+    ///
+    /// Bounded at 20 seconds: a first invocation can catch Homebrew doing its own
+    /// housekeeping, and this runs behind a window that is waiting to draw a button.
+    ///
+    /// Spawning lives here rather than in `GitPicApp` because `ChildProcess` is internal to
+    /// this module — the same reason `locateBrew()` is here and not beside its one caller.
+    public static func brewCaskStatus(_ cask: String, brew: URL) -> BrewCaskStatus {
+        do {
+            let out = try ChildProcess.run(
+                executable: brew,
+                args: ["list", "--cask", cask],
+                timeout: 20)
+            if out.timedOut {
+                return .unusable(reason: "brew list --cask \(cask) timed out")
+            }
+            return out.status == 0 ? .installed : .notInstalled(status: out.status)
+        } catch {
+            return .unusable(reason: "brew list --cask \(cask) failed: \(error)")
+        }
+    }
+
     /// Ask the user's login shell where a tool is. A login shell sources the user's
     /// profile, so this covers nix, asdf, and custom prefixes that no hardcoded list
     /// would catch. Verified to return `/opt/homebrew/bin/gh` even from a

@@ -61,16 +61,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // is delivered as soon as one comes round, and a service message that
         // arrives with no provider registered is simply dropped.
         installServiceProvider()
-        // The menu's checkmarks are derived from the config, so they have to be
-        // redrawn whenever it changes — including when the change came from the
-        // window's 保存 two panes away.
-        AppModel.shared.onConfigChange = { [weak self] in self?.rebuildMenu() }
+        // The menu is derived from state that changes behind it — the link-form
+        // checkmarks from the config (including a 保存 two panes away), and the last item
+        // from whether an update has been found — so it is redrawn on demand rather than
+        // built once.
+        AppModel.shared.onMenuNeedsRebuild = { [weak self] in self?.rebuildMenu() }
         // Held rather than fired and forgotten: `resolvedRunner()` awaits it.
         discovery = Task { await resolveTools() }
         // Ask at launch rather than at the first upload: the prompt is a modal
         // interruption, and the moment a result is ready is the worst time to
         // discover the app cannot show it.
         Task { await Notifier.authorize() }
+        // The daily update check, if one is due — see `UpdateSchedule`. After discovery,
+        // because it goes through the CLI: `resolvedRunner()` is what waits for the binary
+        // to be located, and asking before that would find no runner and quietly do nothing.
+        //
+        // At launch rather than on a timer, and that is a deliberate limit: a Mac that stays
+        // logged in for a week checks once, when it started. A repeating timer would be the
+        // thorough version; the cost is a background network request on a schedule nobody
+        // is watching, and the settings pane checks again whenever it is opened.
+        Task { @MainActor in
+            _ = await resolvedRunner()
+            await AppModel.shared.checkForUpdatesIfDue()
+        }
         // Build the settings window now, while nothing is waiting on it — see
         // `SettingsWindowController.prewarm()`. In its own turn of the main loop, so
         // the status item is on screen first: the icon is what the user is waiting
@@ -422,6 +435,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         doc.target = self
         menu.addItem(doc)
 
+        // Here as well as in 设置 ▸ 通用, because this menu is the app's only always-visible
+        // surface: an `.accessory` app has no Dock icon and no app menu, so the place a Mac
+        // user looks for "Check for Updates…" does not exist here. The label changes when
+        // one is waiting, so the menu itself reports the daily check's finding rather than
+        // leaving it to a banner that may have been dismissed hours ago.
+        let update: NSMenuItem
+        if let found = AppModel.shared.update, found.updateAvailable {
+            update = Self.item("有新版本 \(found.latest)…", "arrow.down.circle.fill",
+                               #selector(showUpdate))
+        } else {
+            update = Self.item("检查更新", "arrow.triangle.2.circlepath",
+                               #selector(checkForUpdates))
+        }
+        update.target = self
+        menu.addItem(update)
+
         menu.addItem(Self.item("退出 GitPic", "power",
                                #selector(NSApplication.terminate(_:))))
 
@@ -429,7 +458,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Both of these write the config file, and the menu redraws from what landed
-    /// rather than from what was clicked — `AppModel.onConfigChange` calls
+    /// rather than from what was clicked — `AppModel.onMenuNeedsRebuild` calls
     /// `rebuildMenu()` after the reload, so a write that fails leaves the checkmark
     /// where it was instead of claiming a change the file never took.
     @objc private func setSyntax(_ sender: NSMenuItem) {
@@ -776,5 +805,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func runDoctor() {
         SettingsWindowController.show(tab: .host)
         Task { await AppModel.shared.runDoctor() }
+    }
+
+    /// Check now, from the menu.
+    ///
+    /// Opens 通用 first, for the reason `runDoctor` opens 图床: the result — a version, a
+    /// verdict, or a reason it failed — has a home on that pane, and a check whose answer
+    /// lands somewhere the user is not looking is a check they have to run again. `manual:
+    /// true` is what lets a found update raise the sheet.
+    @objc private func checkForUpdates() {
+        SettingsWindowController.show(tab: .general)
+        Task { await AppModel.shared.checkForUpdates(manual: true) }
+    }
+
+    /// Show the notes for an update already found — the menu item the daily check's
+    /// finding turns into.
+    @objc private func showUpdate() {
+        SettingsWindowController.show(tab: .general)
+        AppModel.shared.updateSheetPresented = true
     }
 }

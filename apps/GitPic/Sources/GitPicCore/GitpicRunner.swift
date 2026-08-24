@@ -363,6 +363,20 @@ extension GitpicRunner {
         try await runJSON(["repos", "--json"], as: ReposReport.self)
     }
 
+    /// Whether a newer gitpic has been released, and what changed in it.
+    ///
+    /// Unlike its neighbours this one needs neither config nor credential — the releases
+    /// endpoint is public — so it is the one report that still works on a machine where
+    /// `config.toml` is unreadable. That matters here more than it sounds: the fix for
+    /// whatever broke it may be in the release this call is about to find.
+    ///
+    /// A failure to reach GitHub throws, and the caller shows it rather than swallowing
+    /// it: "已是最新" for a check that never completed is the one answer that hides a
+    /// pending update behind a reassuring message.
+    public func updateCheck() async throws -> UpdateReport {
+        try await runJSON(["update", "check", "--json"], as: UpdateReport.self)
+    }
+
     /// Every branch on one repository.
     ///
     /// Takes the repository explicitly rather than reading the saved config, because the

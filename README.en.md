@@ -28,14 +28,19 @@ straight to the clipboard, and both success and failure are reported as system
 notifications. **You can also select images in Finder and right-click 「GitPic
 上传至图床」** (the app is launched if it is not running; the 「系统集成」 switch on the
 通用 pane takes the item back out of the menu). The settings window has six panes: 通用
-(launch at login, Finder right-click), 图床 (account, repository, connectivity test), 上传
-(path template, link form, compression), 历史 (history, with thumbnails and one-click
-copy), Agent (per-agent skill installation), and 关于.
+(launch at login, update checks, Finder right-click), 图床 (account, repository, connectivity
+test), 上传 (path template, link form, compression), 历史 (history, with thumbnails and
+one-click copy), Agent (per-agent skill installation), and 关于.
 
 To have GitPic waiting in the menu bar from the moment you log in, switch on 「开机时自动启动
 GitPic」 on the 通用 pane. It writes macOS's own login-item registration, so the same switch
 appears — and can be turned off — in 系统设置 ▸ 通用 ▸ 登录项与扩展; the two are never two
 separate settings.
+
+**Update checks** run once a day by default, and can be run on demand from the 通用 pane or the
+menu bar. A new version is shown with its release notes; on a Homebrew install, 立即更新 runs
+`brew upgrade --cask gitpic` for you (Homebrew cannot replace a running app, so GitPic quits
+first and reopens when the upgrade finishes). The terminal equivalent is `gitpic update check`.
 
 **Nothing needs a terminal to get started.** Open the settings window → 图床 → 「使用
 GitHub 登录」: the one-time code appears in the window and the browser opens on its own.
