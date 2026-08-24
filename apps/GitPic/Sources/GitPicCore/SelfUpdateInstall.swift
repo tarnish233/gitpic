@@ -719,12 +719,45 @@ extension SelfUpdate {
     /// and then swept at the next launch. It is a deliberate trade against the alternative,
     /// which was deleting the only copy of a working GitPic on the machine.
     ///
+    /// The process guarding this sweep: the image it is actually executing, not
+    /// the path it was launched from.
+    ///
+    /// **The two differ, measurably.** The swap happens by renaming the bundle
+    /// directory, and that does not stop a running process — measured twice — so
+    /// a process the swap happened underneath keeps running from
+    /// `.GitPic-old-<uuid>` while `Bundle.main.bundleURL`, which is only a
+    /// launch-time path, still says `$target`. A sweep guarded by the launch
+    /// path then protects a directory that process is not executing and leaves
+    /// the one it is executing unprotected — the same failure as no guard, in
+    /// the direction that deletes the only other copy of the app.
+    ///
+    /// `lsof` reports the executing image; `-a` is load-bearing (without it the
+    /// selectors are OR-ed and lsof dumps the `txt` of *every* process —
+    /// measured, 2.4 MB starting at `loginwindow`), and `-F n` is the format
+    /// whose first `n/…` line is the image. Falls back to the launch path rather
+    /// than to nothing: an unguarded sweep is strictly worse than a misdirected
+    /// one.
+    public static func currentImage() -> URL? {
+        let out = try? ChildProcess.run(
+            executable: URL(fileURLWithPath: "/usr/sbin/lsof"),
+            args: ["-a", "-p", "\(ProcessInfo.processInfo.processIdentifier)",
+                   "-d", "txt", "-Fn"],
+            timeout: 10)
+        guard let out, out.status == 0 else { return nil }
+        for line in String(decoding: out.stdout, as: UTF8.self).split(separator: "\n") {
+            if line.hasPrefix("n/") {
+                return URL(fileURLWithPath: String(line.dropFirst()))
+            }
+        }
+        return nil
+    }
+
     /// Returns what it removed, for the log and for the test.
     @discardableResult
     public static func sweepLeftovers(
         in directories: [URL] = defaultInstallDirs,
         olderThan cutoff: Date = Date().addingTimeInterval(-86_400),
-        running: URL? = Bundle.main.bundleURL
+        running: URL? = currentImage() ?? Bundle.main.bundleURL
     ) -> [URL] {
         var swept: [URL] = []
         for dir in directories {

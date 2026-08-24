@@ -753,6 +753,63 @@ struct SelfUpdateInstallTests {
                 "swept: \(swept.map(\.lastPathComponent))")
     }
 
+    /// The *default* `running:` must be the image the caller is actually executing, not the
+    /// path it was launched from. The two differ because the swap renames the bundle
+    /// directory and that does not stop a running process (measured twice in this feature),
+    /// so a caller the swap happened underneath executes from `.GitPic-old-<uuid>` while
+    /// `Bundle.main.bundleURL` still says `$target`. A guard pointed at the launch path
+    /// protects nothing the process executes and leaves the backup — the only other copy of
+    /// the app — unprotected.
+    ///
+    /// Uses a real process and the real `lsof` line because the two sides of the comparison
+    /// arrive in different spellings: `contentsOfDirectory` reports `/var/folders/…` while
+    /// `lsof` reports `/private/var/folders/…`, and the question of whether `contains`
+    /// reconciles them is exactly what this test exists to answer.
+    @Test("the sweep protects the image it executes, not where it was launched")
+    func sweepProtectsTheExecutingImage() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+
+        // A real Mach-O process running from the fixture's bundle, then the swap happens
+        // underneath it.
+        let app = try Self.probe(executing: f.target)
+        defer { if app.isRunning { app.terminate() } }
+        let backup = f.apps.appendingPathComponent(".GitPic-old-\(UUID().uuidString)")
+        try FileManager.default.moveItem(at: f.target, to: backup)
+        // Moving it is what makes this a survivor: the executable is no longer at the
+        // launched-from path, but the process is still running from it.
+        #expect(app.isRunning)
+        let image = try Self.lsofImage(pid: app.processIdentifier)
+        #expect(image.path.contains(".GitPic-old-"),
+                "the probe is not executing from the backup: \(image.path)")
+
+        // An unoccupied backup must still go — the protection has to be per-directory, not
+        // per-name.
+        let unoccupied = f.apps.appendingPathComponent(".GitPic-old-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: unoccupied, withIntermediateDirectories: true)
+
+        let swept = SelfUpdate.sweepLeftovers(
+            in: [f.apps], olderThan: Date().addingTimeInterval(60), running: image)
+        #expect(swept.map(\.lastPathComponent) == [unoccupied.lastPathComponent],
+                "swept: \(swept.map(\.lastPathComponent))")
+        #expect(FileManager.default.fileExists(atPath: backup.path),
+                "the sweep deleted the backup its process is executing from")
+    }
+
+    /// The `lsof` line the default uses, for a given pid — in the test so the *test* decides
+    /// which process is guarded rather than relying on the code under test to agree with
+    /// itself.
+    private static func lsofImage(pid: Int32) throws -> URL {
+        let out = try ChildProcess.run(
+            executable: URL(fileURLWithPath: "/usr/sbin/lsof"),
+            args: ["-a", "-p", "\(pid)", "-d", "txt", "-Fn"], timeout: 10)
+        guard out.status == 0,
+              let line = String(decoding: out.stdout, as: UTF8.self)
+                  .split(separator: "\n").first(where: { $0.hasPrefix("n/") })
+        else { throw FixtureError.probe("lsof pid \(pid)") }
+        return URL(fileURLWithPath: String(line.dropFirst()))
+    }
+
     /// The one-day floor, on the only clock that measures what it claims to.
     ///
     /// The fixture cannot fabricate staleness — `touch` moves mtime, and measured, it does not
