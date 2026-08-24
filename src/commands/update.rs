@@ -48,13 +48,17 @@ fn human(report: &UpdateReport) {
             crate::output::line("");
             crate::output::line(name);
         }
-        if !report.notes.trim().is_empty() {
+        let notes = report.summary();
+        if !notes.is_empty() {
             crate::output::line("");
-            // Verbatim, indented. The notes are Markdown written for GitHub, and
-            // reformatting them here would be a second renderer to keep in step with
-            // however the release is actually written — see the app's update sheet, which
-            // makes the same call.
-            for line in report.notes.lines() {
+            // Verbatim, indented — but the *summary*, not the raw body. The notes are
+            // Markdown written for GitHub and reformatting them here would be a second
+            // renderer to keep in step with however the release is actually written; what
+            // `summary()` takes out is structure rather than wording — the `## ` install
+            // appendix aimed at someone who downloaded the DMG, and the theme line already
+            // printed just above as the release name. It is the same rule the app's update
+            // sheet applies. Printing `notes` was the version that only claimed to.
+            for line in notes.lines() {
                 crate::output::line(&format!("  {line}"));
             }
         }

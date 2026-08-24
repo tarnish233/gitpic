@@ -437,6 +437,7 @@ mod tests {
             vec!["repos"],
             vec!["branches"],
             vec!["paste"],
+            vec!["update", "check"],
         ] {
             for global in [vec!["--json"], vec!["-q"], vec!["-vv"]] {
                 let mut argv = vec!["gitpic"];
@@ -677,6 +678,27 @@ mod tests {
                 action: SkillAction::Path
             })
         ));
+    }
+
+    /// The only subcommand that had no parse test, which is how it also ended up missing
+    /// from the global-flag table below.
+    ///
+    /// `check` is required, and that is the part worth pinning: a bare `gitpic update` must
+    /// not parse, because it reads as "install the update" — which this does not do and,
+    /// per `commands::update`, should not. Requiring the verb keeps an `apply` possible later
+    /// without today's spelling having promised it.
+    #[test]
+    fn update_check_parses_and_the_verb_is_required() {
+        assert!(matches!(
+            Cli::try_parse_from(["gitpic", "update", "check"])
+                .unwrap()
+                .command,
+            Some(Command::Update {
+                action: UpdateAction::Check
+            })
+        ));
+        assert!(Cli::try_parse_from(["gitpic", "update"]).is_err());
+        assert!(Cli::try_parse_from(["gitpic", "update", "apply"]).is_err());
     }
 
     #[test]

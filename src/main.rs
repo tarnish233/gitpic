@@ -13,6 +13,10 @@ mod naming;
 mod oauth;
 mod output;
 mod release;
+/// Loopback-stub helpers shared by `github`'s and `release`'s tests. Test-only, so it does
+/// not exist in a release build.
+#[cfg(test)]
+mod testutil;
 
 use clap::{error::ErrorKind, Parser};
 use cli::{Cli, Command};
