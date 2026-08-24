@@ -1,22 +1,35 @@
 import AppKit
 import GitPicCore
 
-/// Running `brew upgrade --cask gitpic` on the app's own behalf.
+/// Installing a newer GitPic: `brew upgrade --cask gitpic` when Homebrew owns this bundle,
+/// and a verified download when it does not.
 ///
-/// **Why this shells out to Homebrew instead of updating itself.** The app is distributed
-/// as a Homebrew cask and signed ad-hoc — no Developer ID, no notarisation (see
-/// `scripts/build-app.sh`). A Sparkle-style updater would therefore have no signature
-/// chain to verify a download against, which is the one thing that makes self-update safe;
-/// and replacing the bundle behind Homebrew's back leaves the cask's manifest describing a
-/// version that is no longer on disk, so the next `brew upgrade` would fight it. Asking
-/// brew to do the install keeps one owner of what is in `/Applications`.
+/// **Homebrew first, always.** Replacing a cask-managed bundle behind brew's back leaves its
+/// manifest describing a version that is no longer on disk, so the next `brew upgrade` fights
+/// it. Asking brew to do the install keeps one owner of what is in `/Applications`, and that
+/// argument is untouched by anything below — the in-app installer is not an alternative to
+/// brew, it is what happens when brew is not the owner.
 ///
-/// **Why it cannot happen in this process.** The thing being replaced is the bundle this
-/// code is executing from. So the work is handed to a detached script that waits for this
-/// process to exit first, and the app quits. That ordering is the whole design here, and
-/// everything below follows from it: the script cannot report back into a UI that no longer
-/// exists, so it logs; and it reopens the app whether or not brew succeeded, because the
-/// alternative is a user left with no GitPic and no explanation.
+/// **What changed, and why it is not a weakening.** This file used to argue that self-update
+/// was unsafe here at all, because an ad-hoc signature gives no chain to verify a download
+/// against. That is true and it is also true of the Homebrew path: a cask's `sha256` is
+/// likewise a hash fetched over TLS from GitHub, and brew has no signature chain either. The
+/// in-app installer verifies the SHA-256 that `api.github.com` reports for the asset, so the
+/// trust root is the same one already shipped rather than a new, lower one. Neither survives
+/// a compromised GitHub account; the only real improvement is a Developer ID plus
+/// notarisation, which is out of reach for both. See `SelfUpdate` for the full statement.
+///
+/// **Why neither can happen in this process.** The thing being replaced is the bundle this
+/// code is executing from — measured: renaming a running executable's directory away gets the
+/// process `Killed: 9`. So the work is handed to a detached script that waits for this process
+/// to exit first, and the app quits. Everything else follows: the script cannot report into a
+/// UI that no longer exists, so it logs; and it reopens the app whichever way the install
+/// went, because the alternative is a user left with no GitPic and no explanation.
+///
+/// The two paths differ in what happens *after* the quit, and that is the interesting part.
+/// brew goes to the network with the app already gone, so a stall costs the user everything —
+/// hence the watchdog below. The in-app installer has already downloaded, verified and staged
+/// while the window was open, so all that is left is two renames.
 @MainActor
 enum Updater {
 
@@ -27,7 +40,7 @@ enum Updater {
     /// `--cask` is ambiguous and Homebrew resolves it in favour of a formula, so both the
     /// flag and this spelling are load-bearing.
     ///
-    /// `nonisolated` because ``availability()`` reads it from a detached task — an immutable
+    /// `nonisolated` because ``resolve(report:)`` reads it from a detached task — an immutable
     /// `String` needs no actor to be read safely, and the alternative was hoisting a copy
     /// into every closure that mentions it.
     nonisolated static let caskName = "gitpic"
@@ -38,103 +51,55 @@ enum Updater {
     /// cannot drift from the one that was waited.
     private static let upgradeBound = 900
 
-    enum Availability: Equatable {
-        /// brew is here and it is managing this app: an upgrade can be offered.
-        case ready(brew: URL)
-        /// It cannot be offered. The reason is for the log, not the window — the UI just
-        /// falls back to the release page.
-        ///
-        /// `retryable` separates a fact about this install — the bundle is not where a cask
-        /// puts one, brew answered that it does not manage it — from a probe that simply did
-        /// not get an answer this time. Only the first kind is worth remembering, because
-        /// caching the second told users with a working Homebrew that their app was not
-        /// installed by it, for as long as the process lived. See
-        /// `AppModel.resolveUpgradePath()`.
-        case unavailable(reason: String, retryable: Bool)
-    }
-
-    /// Its own queue rather than `Task.detached`: the two probes in ``probe(bundle:)`` block
-    /// for up to 8 s and 20 s, and a cooperative thread parked that long is one fewer for
-    /// everything else in the app. Same reason `AppDelegate` gives tool discovery a
-    /// `discoveryQueue` instead of running it on the pool.
+    /// Its own queue rather than `Task.detached`: the probes below block for up to 8 s and
+    /// 20 s, and a cooperative thread parked that long is one fewer for everything else in
+    /// the app. Same reason `AppDelegate` gives tool discovery a `discoveryQueue` instead of
+    /// running it on the pool.
     private nonisolated static let probeQueue = DispatchQueue(label: "dev.gitpic.app.brew-probe")
 
-    /// Whether to offer 立即更新 at all.
+    /// Which upgrade to offer for this install, if any.
     ///
-    /// Three questions now, and each one rules out a way the button could do the wrong
-    /// thing. Finding `brew` says nothing about whether *this* app came from it — a
-    /// drag-installed copy on a machine that also has Homebrew is entirely ordinary, and
-    /// `brew upgrade --cask gitpic` there fails with "not installed". Offering a button that
-    /// cannot work is worse than not offering one, so the cask is checked too.
+    /// Each question the probe asks rules out a way the button could do the wrong thing.
+    /// Finding `brew` says nothing about whether *this* app came from it — a drag-installed
+    /// copy on a machine that also has Homebrew is entirely ordinary, and `brew upgrade --cask
+    /// gitpic` there fails with "not installed". And the cask being installed still does not
+    /// make *this* bundle the one brew manages: a copy running from `dist-app/`, or a second
+    /// one in `~/Applications` while the cask is also installed, would upgrade
+    /// `/Applications/GitPic.app` and then be reopened *at its own path* — an old build, still
+    /// reporting the same update, with brew reporting nothing left to do. The user can repeat
+    /// that forever.
     ///
-    /// And the cask being installed still does not make *this* bundle the one brew manages,
-    /// which is the question that was missing. A copy running from `dist-app/`, or a second
-    /// one dragged into `~/Applications` while the cask is also installed, would upgrade
-    /// `/Applications/GitPic.app` and then be reopened *at its own path* by the script — an
-    /// old build, still reporting the same update, with brew reporting nothing left to do.
-    /// The user can repeat that forever. So the running bundle has to be somewhere a cask
-    /// installs to, and that question is asked first because it is the only one that is free.
-    static func availability() async -> Availability {
+    /// The decision itself is `SelfUpdate.route`, a pure function in `GitPicCore` so that
+    /// every row of it is testable; what is left here is gathering the facts it needs off the
+    /// main actor.
+    static func resolve(report: UpdateReport) async -> SelfUpdate.Route {
         let bundle = Bundle.main.bundleURL
-        let probe: Availability = await withCheckedContinuation { cont in
-            probeQueue.async { cont.resume(returning: Self.probe(bundle: bundle)) }
+        // The bundle's own version, not `report.current` — that one is the CLI's, and this
+        // replaces the bundle.
+        let mine = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        let asset = report.installableAsset()
+        let latest = report.latest
+        let route: SelfUpdate.Route = await withCheckedContinuation { cont in
+            probeQueue.async {
+                cont.resume(returning: SelfUpdate.route(
+                    location: SelfUpdate.location(of: bundle),
+                    bundleVersion: mine,
+                    latest: latest,
+                    brew: SelfUpdate.brewOwnership(cask: Self.caskName),
+                    asset: asset))
+            }
         }
-        if case .unavailable(let reason, let retryable) = probe {
+        switch route {
+        case .homebrew:
+            Diagnostics.log("update: Homebrew owns this bundle — offering brew upgrade")
+        case .selfInstall(let asset, _):
+            Diagnostics.log("update: Homebrew does not own this bundle — offering to install"
+                            + " \(asset.name) (\(asset.size) bytes)")
+        case .unavailable(let reason, let retryable):
             Diagnostics.log("update: no in-app upgrade — \(reason)"
                             + (retryable ? " (will ask again)" : ""))
         }
-        return probe
-    }
-
-    /// The blocking half of ``availability()``, off the main actor on ``probeQueue``.
-    private nonisolated static func probe(bundle: URL) -> Availability {
-        guard bundleIsWhereACaskInstalls(bundle) else {
-            // A fact about this process, not a probe that failed: asking again cannot
-            // change where the running bundle lives.
-            return .unavailable(
-                reason: "this copy runs from \(bundle.path), which is not where brew installs"
-                    + " a cask — upgrading would replace a different bundle",
-                retryable: false)
-        }
-        guard let brew = ToolDiscovery.locateBrew() else {
-            // Retryable, and deliberately so even though "no brew on this machine" is the
-            // common reading: `locateBrew()` also returns nil when its 8 s login-shell probe
-            // times out, and the two are indistinguishable from here. Being wrong in the
-            // other direction is the expensive one.
-            return .unavailable(reason: "brew not found on this machine", retryable: true)
-        }
-        switch ToolDiscovery.brewCaskStatus(Self.caskName, brew: brew) {
-        case .installed:
-            return .ready(brew: brew)
-        case .notInstalled(let status):
-            // brew answered. That answer does not change until something is installed.
-            return .unavailable(
-                reason: "brew does not manage this app (list --cask exited \(status))",
-                retryable: false)
-        case .unusable(let reason):
-            // The bound was hit or the command could not be read — no answer was obtained.
-            return .unavailable(reason: reason, retryable: true)
-        }
-    }
-
-    /// Whether `bundle` sits in a directory Homebrew installs casks into: `/Applications`,
-    /// or `~/Applications` for a machine with `HOMEBREW_CASK_OPTS="--appdir=~/Applications"`.
-    ///
-    /// An `--appdir` beyond those two is not recognised, and the cost is worth stating: that
-    /// install sees the release page instead of a button. It is the safe direction to fail
-    /// in — the alternative is spending the user's bandwidth replacing a bundle this process
-    /// cannot show is the one it is running from.
-    private nonisolated static func bundleIsWhereACaskInstalls(_ bundle: URL) -> Bool {
-        let parent = bundle.resolvingSymlinksInPath().deletingLastPathComponent()
-            .standardizedFileURL.path
-        let appDirs = [
-            "/Applications",
-            URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-                .appendingPathComponent("Applications").standardizedFileURL.path,
-        ]
-        return appDirs.contains {
-            URL(fileURLWithPath: $0).resolvingSymlinksInPath().standardizedFileURL.path == parent
-        }
+        return route
     }
 
     /// `GITPIC_APP_DRY_RUN=1` writes the script and stops there — nothing is spawned and the
@@ -149,6 +114,46 @@ enum Updater {
     /// It also makes the generated script inspectable: the log names the path, and the file
     /// is left on disk to read.
     private static let dryRun = ProcessInfo.processInfo.environment["GITPIC_APP_DRY_RUN"] == "1"
+
+    /// Download, verify, stage, then quit and let the script swap the bundles.
+    ///
+    /// **Everything that can fail harmlessly happens before the app quits.** The download, the
+    /// digest check, the mount and the copy all run with the window still open, so a failure
+    /// costs nothing but a message — and `onProgress` is what the sheet draws. Only once a
+    /// verified bundle is staged beside the old one does this hand off and terminate.
+    ///
+    /// That ordering is the whole reason this path needs no watchdog while the brew one does:
+    /// brew goes to the network *after* the app is gone.
+    static func installAndRelaunch(
+        asset: ReleaseAsset,
+        sha256: String,
+        version: String,
+        onProgress: @Sendable @escaping (SelfUpdate.Progress) -> Void
+    ) async throws {
+        let dmg = try await SelfUpdate.download(asset: asset, sha256: sha256,
+                                                onProgress: onProgress)
+        // From here the image is verified. It is removed either way — a staged copy is what
+        // gets installed, so keeping five megabytes of disk image afterwards serves nobody.
+        defer { try? FileManager.default.removeItem(at: dmg) }
+
+        let target = Bundle.main.bundleURL
+        let staged = try await withCheckedThrowingContinuation { cont in
+            probeQueue.async {
+                cont.resume(with: Result {
+                    try SelfUpdate.stage(dmg: dmg, expectedVersion: version, replacing: target)
+                })
+            }
+        }
+        let script = try SelfUpdate.handOff(staged: staged, dryRun: dryRun)
+        if dryRun {
+            Diagnostics.log("update: DRY RUN — staged at \(staged.bundle.path),"
+                            + " script at \(script.path), not quitting")
+            return
+        }
+        // Not `exit()`: `NSApp.terminate` runs the normal shutdown, which is what lets
+        // `windowWillClose` give back the activation policy and stop an in-flight login.
+        NSApp.terminate(nil)
+    }
 
     /// Quit, upgrade, reopen.
     ///
@@ -268,7 +273,9 @@ enum Updater {
         return url
     }
 
-    /// Delete `gitpic-update-*.sh` left in the temporary directory by past upgrades.
+    /// Delete what past upgrades left behind: the generated scripts, any disk image a
+    /// cancelled download abandoned, and the staging or backup directories an interrupted
+    /// install could not clean up itself.
     ///
     /// The script cannot delete itself: `bash` reads a script lazily, so `rm "$0"` from
     /// inside it is a file being unlinked while more of it is still to be parsed. And it
@@ -277,21 +284,44 @@ enum Updater {
     /// later, which is what the age bound is for: a day is far longer than any upgrade, so
     /// nothing still in use can match.
     ///
-    /// Called at launch. Failures are ignored by design — this is tidying, and a temporary
-    /// directory that refuses a delete is not worth a word to the user.
+    /// The install path adds two more kinds, and they matter more than a 2 KB script: the
+    /// staging directory is a whole copy of the app, and the backup is the old one. The script
+    /// removes both on success, but it deliberately keeps the backup until *after* the reopen,
+    /// so a crash in between leaves them in `/Applications`.
+    ///
+    /// Called at launch. Failures are ignored by design — this is tidying, and a directory
+    /// that refuses a delete is not worth a word to the user.
     static func sweepStaleScripts() {
         let tmp = FileManager.default.temporaryDirectory
         let cutoff = Date().addingTimeInterval(-86_400)
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: tmp, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
         var swept = 0
-        for url in entries where url.lastPathComponent.hasPrefix("gitpic-update-")
-            && url.pathExtension == "sh" {
-            let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey])
-                .contentModificationDate
-            guard let modified, modified < cutoff else { continue }
-            if (try? FileManager.default.removeItem(at: url)) != nil { swept += 1 }
+        if let entries = try? FileManager.default.contentsOfDirectory(
+            at: tmp, includingPropertiesForKeys: [.contentModificationDateKey]) {
+            for url in entries where Self.isStaleArtefactName(url.lastPathComponent) {
+                let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                    .contentModificationDate
+                guard let modified, modified < cutoff else { continue }
+                if (try? FileManager.default.removeItem(at: url)) != nil { swept += 1 }
+            }
         }
-        if swept > 0 { Diagnostics.log("update: swept \(swept) stale upgrade script(s)") }
+        if swept > 0 { Diagnostics.log("update: swept \(swept) stale upgrade file(s)") }
+
+        // The bundle-sized ones, beside wherever the app is installed.
+        let leftovers = SelfUpdate.sweepLeftovers(olderThan: cutoff)
+        if !leftovers.isEmpty {
+            Diagnostics.log("update: swept \(leftovers.count) leftover install director(ies):"
+                            + " \(leftovers.map(\.lastPathComponent).joined(separator: ", "))")
+        }
+    }
+
+    /// The temporary-directory names this feature owns.
+    ///
+    /// `gitpic-update-*` covers both the old upgrade scripts and an abandoned `.dmg`, because
+    /// the download names its file the same way; `gitpic-install-*.sh` is the swap script.
+    private static func isStaleArtefactName(_ name: String) -> Bool {
+        guard name.hasPrefix("gitpic-update-") || name.hasPrefix("gitpic-install-")
+                || name.hasPrefix("gitpic-mount-") else { return false }
+        return name.hasSuffix(".sh") || name.hasSuffix(".dmg")
+            || name.hasPrefix("gitpic-mount-")
     }
 }
