@@ -91,10 +91,31 @@ struct ThumbnailTests {
         }
     }
 
+    /// One parent for every directory this suite makes, emptied once per process.
+    ///
+    /// **Why a fixed parent instead of bare UUID names in `$TMPDIR`.** Swift Testing has no
+    /// suite-level teardown, and the per-test directories below cannot clean up after themselves
+    /// without a `defer` at every one of their ~30 call sites. As bare
+    /// `gitpic-thumb-test-<uuid>` names they therefore accumulated in `$TMPDIR` forever —
+    /// measured, 490 of them, the oldest from an earlier run the same day. Nesting them under one
+    /// fixed name means `$TMPDIR` gains exactly one entry however often the suite runs.
+    ///
+    /// Clearing it from a `static let` matters: that runs once per process, on first use, so a
+    /// directory another test is still working in is never pulled out from under it. The outer
+    /// suite is not `.serialized`, which rules out clearing per call.
+    ///
+    /// Same shape and same reason as `SelfUpdateInstallTests.sharedImage`.
+    private static let root: URL = {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitpic-thumb-tests", isDirectory: true)
+        try? FileManager.default.removeItem(at: url)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }()
+
     /// A fresh directory per test, so nothing leaks between them.
     static func tempDir() -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("gitpic-thumb-test-\(UUID().uuidString)", isDirectory: true)
+        let url = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
