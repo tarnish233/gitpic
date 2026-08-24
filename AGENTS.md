@@ -9,7 +9,10 @@
 - `oauth.rs` — GitHub device flow: the wire protocol behind `gitpic auth login`.
 - `github.rs` — GitHub Contents API client (upload, dedup, health checks).
 - `naming.rs`, `link.rs`, `imageproc.rs`, `output.rs`, `error.rs` — path/hash, URL/markdown, compression, human/JSON output, error types.
-- `commands/` — one module per action (`upload`, `auth_cmd`, `repos`, `branches`, `doctor`, `list`, `config_cmd`, `completion`, `skill`).
+- `history.rs` — the upload log the app's 历史 pane reads.
+- `release.rs` — the update check behind `gitpic update check`: version parsing and comparison, and the `releases/latest` fetch. The feed is a compile-time constant on purpose, pinned by a test — its text is rendered inside GitPic's own window, so nothing configurable may choose its origin.
+- `testutil.rs` — `#[cfg(test)]` only: the loopback stub server, a canned response, and the request reader shared by `github`'s and `release`'s tests. One `sock.read` is not a whole request; the module says what that cost twice.
+- `commands/` — one module per action (`upload`, `auth_cmd`, `repos`, `branches`, `doctor`, `list`, `config_cmd`, `completion`, `skill`, `update`).
 
 Docs: `README.md` (中文, default), `README.en.md`, `skills/gitpic/SKILL.md` (agent
 usage), `CHANGELOG.zh-CN.md` (中文, Release source), and `CHANGELOG.md` (English). Keep

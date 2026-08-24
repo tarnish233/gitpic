@@ -8,15 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Launch at login and update checks
 
-- **Starts itself at login**, optionally: 设置 ▸ 通用 ▸ 开机时自动启动 GitPic. The same switch
-  as 系统设置 ▸ 通用 ▸ 登录项与扩展.
-- **Checks for updates**, daily on its own or whenever you ask. A new version is presented
-  with its release notes and can be installed from there.
+- **Starts itself at login**, optionally: 设置 ▸ 通用 ▸ 开机时自动启动 GitPic. The same switch as 系统设置 ▸ 通用 ▸ 登录项与扩展.
+- **Checks for updates** — daily on its own, again whenever the settings window is opened, and whenever you ask. A new version is presented with its release notes and can be installed from there.
 - The Finder right-click switch moved from 上传 to 通用.
 - Tightened the 图床 copy.
 - New CLI command `gitpic update check`: the latest version and its notes, with `--json`.
 
-<!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file -->
+<!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file. Keep each bullet above on one line — the app's update sheet renders with .inlineOnlyPreservingWhitespace, which keeps newlines verbatim, so a wrapped line breaks mid-sentence at 480pt -->
 
 ### CLI
 
@@ -33,6 +31,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exactly three numeric components are refused rather than coerced; when a comparison is not
   possible it is reported as an error instead of answered "up to date", which would hide a
   real pending update behind a reassuring message.
+- The notes printed in the terminal are trimmed the same way the app's sheet trims them.
+  `human()` printed the release body verbatim, so `gitpic update check` was the one place
+  that showed the `## GitPic.app` appendix — instructions for someone who downloaded the DMG
+  (drag it to Applications, clear the quarantine flag) printed to a person who already has
+  the CLI — plus the theme line already printed just above it as the release name. Measured
+  against 0.18.1: 23 lines of notes, of which 6 are about what changed.
 
 ### App
 
@@ -54,7 +58,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in the repository section — 保存 is present on every config pane and its tooltip already
   names the keys waiting to be written, and the one case that genuinely needs the instruction
   (nothing configured yet) still says so.
-
 - 设置 ▸ 通用 ▸ 更新 carries the `每天自动检查更新` switch, a status line, and 检查更新.
   The status line has four states, and "this build is newer than the latest release" is the
   one that earns its place: every unreleased build of this repository is in it, and calling
@@ -63,34 +66,80 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so the place a Mac user looks for "Check for Updates…" does not exist here. The item becomes
   「有新版本 x.y.z…」 once one is found, so the menu keeps saying so long after a notification
   banner has been dismissed.
-- The automatic check runs once a day, and due-ness is only evaluated at launch. The cost,
-  stated: a Mac left logged in for a week checks once, when it started. A repeating timer
-  would be the thorough version; the price is a background request on a cadence nobody is
-  watching, and the settings pane checks again whenever it is opened.
+- The automatic check runs once a day, and due-ness is evaluated at launch and every time the
+  settings window is put on screen. No repeating timer: the price of one would be a background
+  request on a cadence nobody is watching, and "check again when the window opens" covers
+  ordinary use. Worth recording that this sentence started out false — only `GeneralPane`'s
+  `.task` called it, and since `orderOut` emits no `onDisappear` and the window survives being
+  closed, that `.task` runs once per process. "Daily" was in practice "per launch".
 - An automatic check that finds an update posts a notification; only a manual one raises the
   sheet. A dialog nobody asked for over whatever the window was being used for is an
   interruption, and the window is usually shut when the daily check lands anyway. 设置 ▸ 通用
-  keeps a 「查看更新内容」 button for as long as the update stands, so nothing is lost.
+  keeps a 「查看更新内容」 button for as long as the update stands, so nothing is lost. Once per
+  version, too: `Notifier.post` uses a fresh identifier per banner and nothing coalesces, so
+  someone who saw the notice and chose to stay put was told the same thing again every day.
+- A manual check always produces an answer, which took two things. The sheet is attached to the
+  settings window's root view rather than inside 通用 — `detail` destroys the current pane on
+  every tab switch, so a check completing after the user moved to 图床 had nowhere to present
+  and the answer was simply lost, while the flag stayed raised and ambushed them on their next
+  visit to 通用 with a report that might by then be about another version. And a manual click
+  colliding with a running automatic check is no longer dropped: that check adopts the request
+  instead of reporting through a banner.
 - Two structural trims to the notes shown in that sheet, both found by looking at the
   rendered result: the leading `### <theme>` line is what `release.yml` publishes as the
   Release *title*, already shown above the body, so keeping it printed the same sentence
   twice; and the trailing `## `-level sections are install instructions for someone who
   downloaded the DMG (drag to Applications, clear the quarantine flag), which is of no use to
-  a reader who already has the app open.
+  a reader who already has the app open. A heading means hashes *followed by a space*, and
+  fenced blocks are skipped — otherwise notes opening `#42 修复…` lose that whole line, and a
+  `## ` quoted inside a ``` block ends the notes there and leaves the fence unterminated.
+  `gitpic update check` applies the same rule (`UpdateReport::summary`).
 - 立即更新 runs `brew upgrade --cask gitpic` on the user's behalf. The app is a Homebrew cask,
   signed ad-hoc and not notarised, so a Sparkle-style updater would have no signature chain to
   verify a download against and would fight Homebrew's manifest. Homebrew cannot replace a
   running bundle, so the sequence is: write a script, quit, let the script wait for the exit,
   upgrade, reopen. It reopens on failure too — the old bundle is still there — and logs to
-  `~/Library/Logs/GitPic-update.log`.
+  `~/Library/Logs/GitPic-update.log`. `brew upgrade` itself is bounded by a watchdog (15
+  minutes), because the reopen runs strictly after it: an upgrade that never returns costs the
+  user the whole app, since an `.accessory` app that has quit has no Dock icon, no menu-bar
+  icon, and no dialog left to name the log — `open -a GitPic` in a terminal would be the only
+  way back. The log tells the watchdog's verdict apart from brew's own. The child inherits the
+  app's environment and overrides `PATH` (the policy `GitpicRunner.run` uses); the two
+  hand-picked keys it used to build dropped every proxy variable and left brew fetching direct.
 - 立即更新 appears only once brew is confirmed to be managing this app. Finding `brew` says
   nothing about where this copy came from: a drag-installed app on a machine that also has
-  Homebrew is entirely ordinary, and `brew upgrade --cask` there fails. In that case the sheet
+  Homebrew is entirely ordinary, and `brew upgrade --cask` there fails. The cask being
+  installed is not enough either — the running bundle also has to be where a cask installs one
+  (`/Applications` or `~/Applications`), or a copy running from `dist-app/` would upgrade
+  `/Applications` and then be reopened at its own path: an old build, still reporting the same
+  update, with brew reporting nothing left to do, repeatable forever. In both cases the sheet
   offers the release page and the command to run instead of a button that cannot work.
+- Only a definite answer about brew is cached. `brew list --cask` hitting its 20 s bound, or
+  the 8 s login-shell probe timing out, says nothing about how this copy was installed —
+  remembering either told a user with a perfectly good Homebrew 「这份 GitPic 不是用 Homebrew
+  装的」 for the rest of the process's life, with restarting the app as the only way to ask
+  again.
 - Under `GITPIC_APP_DRY_RUN=1`, 立即更新 writes the script and stops — nothing is spawned and
   the app does not quit. Replacing `/Applications/GitPic.app` is at least as consequential as
   a commit to the image host, and it is the one action in this app that cannot be undone by
   deleting something afterwards.
+- The 「右键上传已关闭」 notification points at 设置 ▸ 通用 ▸ 系统集成. It still named 上传 after
+  the switch moved — and once the entry is off, that notification is the only place the app
+  says where the switch is.
+- 通用's two system-state switches are re-read when the window is focused again, not only when
+  it is opened. The window holds `.regular` while open, so it has a Dock icon and a 窗口 menu,
+  and both route around `showWindow`. Launch-at-login is the one that made this matter: with a
+  stale value `needsSystemSettings` is false, so the 「打开「登录项与扩展」」 button that is the
+  only remedy for `.requiresApproval` was never drawn, under a caption asserting a launch that
+  would not happen.
+- Two sentences come back to 图床, each only when it is needed. After a repository is picked, a
+  line says the choice is not in the config file yet. The standing note that was removed did
+  restate the toolbar — but removing it outright left nothing on screen at the one moment it is
+  load-bearing, when `draft` holds a selection that closing the window would lose, and the
+  「还没配置图床」 block that still says this stops applying the instant a repository is chosen.
+  And a line above the login button names `public_repo` again: it was the only mention of scope
+  *before* the login, so without it someone whose image host is a private repository authorises,
+  gets an empty repository list, and is then sent to a terminal for `--scope repo`.
 
 ### Internal
 
@@ -108,7 +157,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   trim), with the rules on both sides under test. A last-check timestamp in the *future*
   counts as due: a machine whose clock ran ahead and was corrected, or one restored from a
   backup, holds one, and comparing the signed difference would stop it checking until real
-  time caught up.
+  time caught up. The notes trim is implemented twice because it spans two languages, so the
+  rule is written out in both doc comments, clause for clause; `notes` in `--json` is left
+  untrimmed, because a script may want the whole body.
 - Fixed a flaky test in `src/github.rs`: the stub server did one `read` per connection, but
   TCP is a stream and `reqwest` writes headers and body as separate segments, so a single
   `read` often returned the headers alone. Only
@@ -116,6 +167,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   about two runs in five — across three CI platforms, enough to redden a release build. It
   now reads to the end of the headers and then exactly as many body bytes as
   `Content-Length` promises.
+- That correct reader moved into a new `src/testutil.rs` (`#[cfg(test)]`), shared by `github`
+  and `release`. The reason: `release.rs`'s loopback test had reintroduced the single `read`
+  verbatim — and there the consequence is worse than flakiness, because that test asserts the
+  update check sends **no** `Authorization` header, and a truncated read satisfies it by never
+  having read the header block. A security assertion that passes because it looked at nothing
+  is worse than no assertion, since it reads like cover.
+- `RunFailure` grew a `message` (in `GitPicCore`, where it can be tested). The app matched only
+  `.cli` and fell back to `String(describing:)`, printing the enum at the user: an app built
+  from source with an 0.18.x `gitpic_cli` on PATH showed
+  `undecodable(status: 2, raw: "error: unrecognized subcommand 'update'")` on 通用 — and since
+  the check never completes, `lastUpdateCheck` is never stamped, so every visit produced it
+  again. `ConfigFailure.other` had the same fallback and changed with it; its existing test
+  asserted `contains`, so it had stayed green either way.
+- New `.github/scripts/release_notes.py` holds the only implementation of "the summary above
+  the marker": `release.yml` extracts with it, `check_manifests.py` validates with it. The rule
+  used to live in an awk program and, separately, in a substring test, and the two drifted into
+  three defects. The awk stopped at the marker text anywhere in a line, so a summary bullet
+  naming the marker truncated the published body — while this step's own non-empty guard passed,
+  the remaining heading not being empty. The substring test could not tell a marker below the
+  detail (which withholds nothing) from one in the right place. And it ran only in `ci.yml`,
+  while `release.yml` triggers on a tag and never invoked it, so `git push --follow-tags` could
+  publish before CI had finished. The `version` job now runs it and `publish` needs that job.
+  `MARKER_SINCE = (0, 19, 0)` is what lets the guard sit on the publishing path at all:
+  pre-0.19.0 sections have no marker on purpose, because backfilling an old tag must keep
+  publishing them whole, so the marker is required only from 0.19.0 on. The module carries a
+  `--self-test` that `ci.yml` runs — there is no Python test infrastructure here to hang a test
+  file on.
 
 ## [0.18.1] - 2026-08-23
 

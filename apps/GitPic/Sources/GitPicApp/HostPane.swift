@@ -31,12 +31,26 @@ struct HostPane: View {
                         }
                         .controlSize(.small)
                         .disabled(model.reposLoading || model.branchesLoading)
+                        // Only while something is actually unsaved, which is the difference
+                        // between this and the standing note it replaces. That one restated
+                        // the toolbar on every visit; this appears at the one moment it is
+                        // load-bearing — a repository has just been picked, `draft` holds it,
+                        // and nothing on screen otherwise says the choice is still only in
+                        // memory. Closing the window there loses it.
+                        //
+                        // The removed note's mistake was being unconditional; removing it
+                        // outright had the opposite one, since the 「还没配置图床」 hint that
+                        // still says this stops applying the instant a repository is chosen.
+                        if !model.dirtyKeys.isEmpty {
+                            Text("还没写入配置文件，要按右上角的「保存」。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     } else {
                         Text("登录后这里会列出可以上传的仓库。")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                // No standing "这些还没写入配置文件，要按保存" note here. It restated the
+                // No *standing* "这些还没写入配置文件，要按保存" note here. It restated the
                 // toolbar: 保存 is present on every config pane whether or not anything is
                 // dirty, and its tooltip already names the keys waiting to be written. The
                 // one case where the instruction is genuinely needed — nothing configured
@@ -108,8 +122,14 @@ struct HostPane: View {
             // own `no GitHub credential: run \`gitpic auth login\`` — telling someone to
             // run a command while the button that does it sits directly below — plus a
             // paragraph about `public_repo` being enough for jsDelivr. The label says the
-            // state and the button says the action; the scope is a fact about the login
-            // this pane does not have to teach before performing it.
+            // state and the button says the action.
+            //
+            // One line of that paragraph had to come back, though, and it is the scope. It
+            // was the only place the app named `public_repo` *before* the login, and dropping
+            // it meant someone whose image host is a private repository authorised, waited,
+            // and got an empty repository list — with the remedy being `gitpic auth login
+            // --scope repo` in a terminal, which is a round trip this app promises not to
+            // need. One sentence before the button is cheaper than that.
             //
             // The dropped `detail` cost nothing measurable: its only non-CLI value was
             // 「登录已取消」 from `cancelLogin()`, which that method already overwrites a
@@ -117,6 +137,9 @@ struct HostPane: View {
             // the CLI's own answer rather than a message anyone could read.
             case .loggedOut:
                 Label("还没登录", systemImage: "person.crop.circle.badge.questionmark")
+                Text("会申请 `public_repo` 权限，公开仓库够用。图床要用私有仓库的话，"
+                     + "得在终端运行 `gitpic auth login --scope repo`。")
+                    .font(.caption).foregroundStyle(.secondary)
                 Button("使用 GitHub 登录") { model.beginLogin() }
                     .disabled(model.toolState != .ready)
 

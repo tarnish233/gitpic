@@ -124,6 +124,24 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         Task { await AppModel.shared.checkForUpdatesIfDue() }
     }
 
+    /// Re-read the two system-state mirrors whenever the window is focused again.
+    ///
+    /// `showWindow` covers *opening*, and `GeneralPane`'s `.onAppear` covers the pane being
+    /// mounted — but neither fires when a window already on screen is simply re-keyed, and
+    /// this window can be: it holds `.regular` for as long as it is open, so it has a Dock
+    /// icon and a 窗口 menu, and both of those route around `showWindow` entirely.
+    ///
+    /// The launch-at-login switch is the one that made this worth a delegate method. Leave the
+    /// window open on 通用, revoke GitPic in 系统设置 ▸ 登录项与扩展, click back: the system now
+    /// reports `.requiresApproval`, but the pane still held `.off`/`.on` — and because
+    /// `needsSystemSettings` is false for the stale value, the 「打开「登录项与扩展」」 button
+    /// that is the *only* remedy for that state was not drawn, under a caption asserting a
+    /// launch that would not happen.
+    func windowDidBecomeKey(_ notification: Notification) {
+        AppModel.shared.refreshFinderService()
+        AppModel.shared.refreshLaunchAtLogin()
+    }
+
     /// Closing gives back the activation policy and spends the pane history — but
     /// keeps the window.
     ///
