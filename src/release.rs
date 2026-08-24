@@ -99,6 +99,50 @@ struct LatestRelease {
     body: Option<String>,
     html_url: String,
     published_at: Option<String>,
+    /// The downloadable files. `default` because a release published with no assets omits
+    /// nothing — GitHub sends `[]` — but a *stub* in a test that only cares about version
+    /// comparison should not have to spell an empty array.
+    #[serde(default)]
+    assets: Vec<AssetRow>,
+}
+
+/// One release asset as GitHub sends it.
+///
+/// Private, and paired with the public [`ReleaseAsset`] below: the same `…Row` /
+/// `…Candidate` split [`crate::github`] uses for repositories and branches, so the wire
+/// shape being decoded and the wire shape being emitted can be renamed independently.
+#[derive(Deserialize)]
+struct AssetRow {
+    name: String,
+    size: u64,
+    browser_download_url: String,
+    /// `"sha256:<64 hex>"` when GitHub has computed one. Optional because it is not part of
+    /// any documented API contract — it appeared on this project's releases from 0.15.0
+    /// onward, and the consumer treats its absence as "cannot verify, do not install"
+    /// rather than as permission to skip the check.
+    digest: Option<String>,
+}
+
+/// One downloadable file from the release, as `--json` emits it.
+///
+/// **Why the update check reports these at all.** The app can now install an update itself
+/// when Homebrew is not the owner of its bundle, and to do that safely it needs two things
+/// this endpoint already knows: where the disk image is, and what it should hash to. Both
+/// come from the same authenticated-by-TLS response as the version comparison, so there is
+/// no second origin to trust — which is the property that makes verification worth anything.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ReleaseAsset {
+    pub name: String,
+    pub size: u64,
+    /// Straight from GitHub's `browser_download_url`, never constructed here. Building it
+    /// from a template would put a second spelling of the release URL in this crate, and
+    /// `the_release_feed_is_a_compile_time_constant` exists to keep there being exactly one.
+    pub url: String,
+    /// `"sha256:<64 hex>"`, or absent. Emitted verbatim rather than split into algorithm and
+    /// hex: the prefix is what says *which* algorithm, and a consumer that silently assumed
+    /// SHA-256 for some future `sha512:` value would verify nothing while looking like it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
 }
 
 /// The answer, and the shape `--json` emits.
@@ -124,6 +168,11 @@ pub struct UpdateReport {
     pub notes: String,
     pub url: String,
     pub published_at: Option<String>,
+    /// The release's downloadable files, in the order GitHub lists them.
+    ///
+    /// Always present, `[]` for a release with no assets — a caller rendering this never has
+    /// to distinguish absent from empty, the same reasoning [`Self::notes`] follows.
+    pub assets: Vec<ReleaseAsset>,
 }
 
 impl UpdateReport {
@@ -269,6 +318,16 @@ fn report(current: &str, latest: LatestRelease) -> Result<UpdateReport> {
         notes: latest.body.unwrap_or_default(),
         url: latest.html_url,
         published_at: latest.published_at,
+        assets: latest
+            .assets
+            .into_iter()
+            .map(|a| ReleaseAsset {
+                name: a.name,
+                size: a.size,
+                url: a.browser_download_url,
+                digest: a.digest,
+            })
+            .collect(),
     })
 }
 
@@ -309,6 +368,7 @@ mod tests {
             body: Some("- something changed".to_string()),
             html_url: "https://example.invalid/r/1".to_string(),
             published_at: Some("2026-08-24T00:00:00Z".to_string()),
+            assets: Vec::new(),
         }
     }
 
@@ -526,5 +586,94 @@ mod tests {
             !headers.contains("authorization:"),
             "the update check must not send a credential: {req}"
         );
+    }
+
+    /// The asset fields the app installs an update from, decoded from a GitHub-shaped reply.
+    ///
+    /// Verbatim from `repos/tarnish233/gitpic/releases/latest` (trimmed to two assets), so
+    /// this fails if GitHub's spelling of any of the four moves. `digest` is the one that
+    /// matters most and is the one with no documented contract behind it.
+    #[tokio::test]
+    async fn reports_the_assets_with_their_digests() {
+        let body = r#"{"tag_name":"v9.9.9","html_url":"https://example.invalid/rel",
+            "assets":[
+              {"name":"GitPic-9.9.9-macos-arm64.dmg","size":4999203,
+               "browser_download_url":"https://example.invalid/d/GitPic-9.9.9-macos-arm64.dmg",
+               "digest":"sha256:60f48a611df65e09d17d9b55f7ef730be9070ef3fafcb2e3db54519e47bd14b2"},
+              {"name":"GitPic-9.9.9-macos-arm64.dmg.sha256","size":96,
+               "browser_download_url":"https://example.invalid/d/sidecar"}
+            ]}"#;
+        let (addr, served) = crate::testutil::stub(vec![crate::testutil::http("200 OK", body)]);
+
+        let out = check_against(&addr).await.unwrap();
+        assert_eq!(
+            out.assets.len(),
+            2,
+            "both assets must survive: {:?}",
+            out.assets
+        );
+
+        let dmg = &out.assets[0];
+        assert_eq!(dmg.name, "GitPic-9.9.9-macos-arm64.dmg");
+        assert_eq!(dmg.size, 4_999_203);
+        // `browser_download_url`, not a URL this crate built.
+        assert_eq!(
+            dmg.url,
+            "https://example.invalid/d/GitPic-9.9.9-macos-arm64.dmg"
+        );
+        // Prefix included: dropping it would let a future `sha512:` be hashed as SHA-256.
+        assert_eq!(
+            dmg.digest.as_deref(),
+            Some("sha256:60f48a611df65e09d17d9b55f7ef730be9070ef3fafcb2e3db54519e47bd14b2")
+        );
+        // An asset GitHub reported no digest for stays `None` rather than becoming an empty
+        // string — the consumer refuses to install on `None`, so the two must not blur.
+        assert_eq!(out.assets[1].digest, None);
+
+        served.join().unwrap();
+    }
+
+    /// A release with no assets, and one whose reply omits the key altogether.
+    ///
+    /// Both must be an empty list rather than an error: every release before 0.15.0 published
+    /// no disk image, and `releases/latest` is the endpoint the app polls forever — a decode
+    /// that failed on one of those would take the whole update check down with it, reported as
+    /// 「看不懂 gitpic 的回答」.
+    #[test]
+    fn a_release_without_assets_reports_an_empty_list() {
+        let out = report("1.0.0", release("v1.2.3")).unwrap();
+        assert!(out.assets.is_empty());
+
+        // The key missing entirely, which is not what GitHub sends today but is what
+        // `#[serde(default)]` is there for.
+        let decoded: LatestRelease =
+            serde_json::from_str(r#"{"tag_name":"v1.2.3","html_url":"https://e.invalid"}"#)
+                .expect("a reply with no assets key must still decode");
+        assert!(decoded.assets.is_empty());
+    }
+
+    /// `digest` is omitted from the envelope when absent rather than emitted as `null`.
+    ///
+    /// The Swift side decodes this into an Optional either way, so this is about the envelope
+    /// staying readable — the same `skip_serializing_if` the doctor report uses.
+    #[test]
+    fn a_missing_digest_is_left_out_of_the_json() {
+        let with = serde_json::to_string(&ReleaseAsset {
+            name: "a.dmg".to_string(),
+            size: 1,
+            url: "https://e.invalid/a".to_string(),
+            digest: Some("sha256:ab".to_string()),
+        })
+        .unwrap();
+        assert!(with.contains(r#""digest":"sha256:ab""#), "{with}");
+
+        let without = serde_json::to_string(&ReleaseAsset {
+            name: "a.dmg".to_string(),
+            size: 1,
+            url: "https://e.invalid/a".to_string(),
+            digest: None,
+        })
+        .unwrap();
+        assert!(!without.contains("digest"), "null digest leaked: {without}");
     }
 }
