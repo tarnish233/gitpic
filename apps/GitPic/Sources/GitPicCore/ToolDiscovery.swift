@@ -117,13 +117,57 @@ public enum ToolDiscovery {
         case unusable(reason: String)
     }
 
+    /// Which bundle Homebrew installed for `cask`, if any.
+    public enum BrewCaskApp: Equatable, Sendable {
+        /// brew manages this cask, and this is the `.app` it put in place.
+        case installedAt(URL)
+        /// brew answered: it does not manage this cask.
+        case notInstalled(status: Int32)
+        /// No answer was obtained.
+        case unusable(reason: String)
+    }
+
+    /// Ask Homebrew *which* bundle it installed for `cask`, not merely whether it did.
+    ///
+    /// **Why the path and not a yes/no.** `brew list --cask gitpic` exits 0 whenever the cask
+    /// is installed *anywhere*, and that is not the question. A copy in `~/Applications` on a
+    /// machine whose cask installed to `/Applications` would answer "yes" and then be handed to
+    /// `brew upgrade`, which would replace the *other* bundle and leave this one — an old build,
+    /// still reporting the same update available, with brew reporting nothing left to do. The
+    /// user could repeat that forever. Caught by running it, not by reading it.
+    ///
+    /// Homebrew answers exactly: the Caskroom holds a symlink at
+    /// `<prefix>/Caskroom/<cask>/<version>/GitPic.app` pointing at wherever the app was
+    /// installed, and `brew list --cask` prints that path. Resolving it gives the bundle brew
+    /// owns, with no parsing of human-readable output and no guessing at `--appdir`.
+    public static func brewCaskApp(_ cask: String, brew: URL) -> BrewCaskApp {
+        let out: ProcessOutcome
+        do {
+            out = try ChildProcess.run(
+                executable: brew, args: ["list", "--cask", cask], timeout: 20)
+        } catch {
+            return .unusable(reason: "brew list --cask \(cask) failed: \(error)")
+        }
+        if out.timedOut { return .unusable(reason: "brew list --cask \(cask) timed out") }
+        guard out.status == 0 else { return .notInstalled(status: out.status) }
+
+        // One path per line. The `.app` among them is the artifact; the rest are the receipt
+        // and the cask's own JSON.
+        let lines = String(decoding: out.stdout, as: UTF8.self)
+            .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let app = lines.first(where: { $0.hasSuffix(".app") }) else {
+            // Installed, but it lists no bundle — nothing here can be compared against, so
+            // treat it as an answer that does not name this bundle.
+            return .notInstalled(status: 0)
+        }
+        return .installedAt(URL(fileURLWithPath: app).resolvingSymlinksInPath()
+            .standardizedFileURL)
+    }
+
     /// Whether Homebrew is managing `cask`.
     ///
-    /// Asked because finding `brew` proves nothing about *this* app's origin: a
-    /// drag-installed copy on a machine that also has Homebrew is entirely ordinary, and
-    /// `brew upgrade --cask` there fails with "not installed". `brew list --cask <name>`
-    /// exits 0 when installed and non-zero when not; the status is the whole answer, so
-    /// stdout is discarded rather than parsed.
+    /// Kept for callers that only need the yes/no; ``brewCaskApp(_:brew:)`` is what the update
+    /// path uses, because "installed" and "installed *as this bundle*" are different questions.
     ///
     /// Bounded at 20 seconds: a first invocation can catch Homebrew doing its own
     /// housekeeping, and this runs behind a window that is waiting to draw a button.
@@ -131,17 +175,10 @@ public enum ToolDiscovery {
     /// Spawning lives here rather than in `GitPicApp` because `ChildProcess` is internal to
     /// this module — the same reason `locateBrew()` is here and not beside its one caller.
     public static func brewCaskStatus(_ cask: String, brew: URL) -> BrewCaskStatus {
-        do {
-            let out = try ChildProcess.run(
-                executable: brew,
-                args: ["list", "--cask", cask],
-                timeout: 20)
-            if out.timedOut {
-                return .unusable(reason: "brew list --cask \(cask) timed out")
-            }
-            return out.status == 0 ? .installed : .notInstalled(status: out.status)
-        } catch {
-            return .unusable(reason: "brew list --cask \(cask) failed: \(error)")
+        switch brewCaskApp(cask, brew: brew) {
+        case .installedAt: return .installed
+        case .notInstalled(let status): return .notInstalled(status: status)
+        case .unusable(let reason): return .unusable(reason: reason)
         }
     }
 

@@ -155,8 +155,15 @@ extension SelfUpdate {
         return matches ? .applicationsDir : .elsewhere(path: bundle.path)
     }
 
-    /// Ask Homebrew whether it owns `cask`. Blocking: call it off the main actor.
-    public static func brewOwnership(cask: String) -> BrewOwnership {
+    /// Ask Homebrew whether it owns **this** bundle. Blocking: call it off the main actor.
+    ///
+    /// The bundle is a parameter because "is the cask installed" is not the question — see
+    /// `ToolDiscovery.brewCaskApp`. A copy in `~/Applications` on a machine whose cask
+    /// installed to `/Applications` must come back `.doesNotOwnIt`, or it gets handed to brew,
+    /// brew replaces the *other* bundle, and this one is reopened unchanged still reporting the
+    /// same update. That is not hypothetical: it is what this returned before the end-to-end
+    /// run caught it.
+    public static func brewOwnership(cask: String, bundle: URL) -> BrewOwnership {
         switch ToolDiscovery.locateBrewOutcome() {
         case .unknown(let reason):
             return .unknown(reason: reason)
@@ -164,13 +171,14 @@ extension SelfUpdate {
             // A definite answer, and the common one for the users this path exists for.
             return .doesNotOwnIt
         case .found(let brew):
-            switch ToolDiscovery.brewCaskStatus(cask, brew: brew) {
-            case .installed:
-                return .ownsThisCask(brew: brew)
+            switch ToolDiscovery.brewCaskApp(cask, brew: brew) {
             case .notInstalled:
                 return .doesNotOwnIt
             case .unusable(let reason):
                 return .unknown(reason: reason)
+            case .installedAt(let app):
+                let mine = bundle.resolvingSymlinksInPath().standardizedFileURL.path
+                return app.path == mine ? .ownsThisCask(brew: brew) : .doesNotOwnIt
             }
         }
     }

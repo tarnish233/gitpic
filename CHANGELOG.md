@@ -60,6 +60,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not the owner. A brew probe that gets **no answer** is never treated as "not brew's" — a
   timeout can be hiding a working Homebrew, and installing over a cask on that guess is exactly
   the damage above.
+- Ownership is decided by asking Homebrew *which* bundle it installed, not whether the cask is
+  installed at all. `brew list --cask gitpic` exits 0 whenever the cask exists anywhere, so a
+  copy in `~/Applications` on a machine whose cask installed to `/Applications` was reported as
+  brew's — it would have been handed to `brew upgrade`, brew would have replaced the *other*
+  bundle, and the script would have reopened this one: an old build, still reporting the same
+  update available, with brew reporting nothing left to do, repeatable forever. Homebrew answers
+  exactly, and this now reads that answer: the Caskroom holds a symlink at
+  `<prefix>/Caskroom/<cask>/<version>/GitPic.app` pointing at wherever the app was installed.
+  Found by running the whole thing on a machine with the cask genuinely installed, not by
+  reading the code.
 - Only `/Applications` and `~/Applications` are installed into. The cost, stated: a copy kept
   anywhere else still sees the release page. It also means a development build in the
   repository's `dist-app/` cannot be silently replaced by a release build.
