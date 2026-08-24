@@ -113,6 +113,23 @@ public enum SelfUpdate {
         let delegate = DownloadDelegate(destination: destination, onProgress: onProgress)
         // `ephemeral` so nothing is written to a shared cache, and an explicit `User-Agent`
         // for the same reason `ThumbnailStore` sets one.
+        //
+        // **No `connectionProxyDictionary`, deliberately, and this is the asymmetry with
+        // `Updater.upgradeAndRelaunch`** — which forwards `HTTPS_PROXY`/`ALL_PROXY` to brew
+        // and calls that "the difference between an upgrade and a stall". URLSession does not
+        // read those variables at all (measured: with every one of them pointed at a dead
+        // port, a ranged GET of a real release asset still returned 206), so it honours only
+        // System Settings. Forwarding them here was written and then rejected on the
+        // measurement: on the development machine, whose proxy those variables name,
+        //
+        //     direct  → HTTP 206 in ~0.8 s, three for three
+        //     proxied → connection reset after 5 s, three for three
+        //
+        // while the *same* proxy serves `api.github.com` fine (200 in 0.25 s). A release
+        // asset redirects to `release-assets.githubusercontent.com`, a host the proxy does
+        // not carry — so honouring the environment would have broken the download it was
+        // meant to rescue. brew still needs the variables because `curl` and `git` do read
+        // them and go through the proxy whether or not it works for the asset host.
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -128,16 +145,81 @@ public enum SelfUpdate {
                                  delegateQueue: nil)
         // `invalidateAndCancel` rather than `finishTasksAndInvalidate`: on cancellation the
         // task must actually stop, and by this point the file has already been moved out.
-        defer { session.invalidateAndCancel() }
+        // Both routes to it go through the gate, which is what keeps it from overtaking the
+        // task's creation — see ``SessionGate``.
+        let gate = SessionGate(session)
+        defer { gate.cancel() }
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 delegate.attach(continuation)
-                session.downloadTask(with: url).resume()
+                if !gate.start(url) {
+                    // Cancellation already invalidated the session, so no task exists and no
+                    // delegate callback will ever arrive. Failing the waiter here is what
+                    // turns that into a `catch`-able error instead of a download that waits
+                    // forever with its 取消 button gone.
+                    delegate.settle(.failure(CancellationError()))
+                }
             }
         } onCancel: {
-            session.invalidateAndCancel()
+            gate.cancel()
         }
+    }
+}
+
+/// Serialises "create the download task" against "cancellation invalidated the session".
+///
+/// **It exists because one order of those two operations kills the process.** Measured:
+/// `URLSession.downloadTask(with:)` on an invalidated session does not hand back an errored
+/// task, it raises `NSGenericException` — *"Task created in a session that has been
+/// invalidated"* — from `-[__NSURLSessionLocal _downloadTaskWithTaskForClass:]`, and exits
+/// 134. That is an ObjC exception, so no Swift `catch` can intercept it and no amount of
+/// error handling downstream helps. Invalidating *after* creating is fine, and `resume()`
+/// after invalidation is fine too; invalidate-then-**create** is the one fatal order.
+///
+/// And it was reachable rather than theoretical. `withTaskCancellationHandler` runs `onCancel`
+/// **before** the body when the task is already cancelled on entry (measured ordering:
+/// `["onCancel", "body"]`), and `AppModel.performSelfInstall` paints the 取消 button
+/// synchronously before its first `await`, so a click can land before ``SelfUpdate/fetch``
+/// runs at all. GitPic is `LSUIElement`, with no window, no Dock icon and no menu-bar icon —
+/// so what the user saw was the app silently vanishing, with nothing to report.
+///
+/// Internal rather than private so ``ReleaseAssetTests`` can pin the invariant directly: a
+/// gate that creates a task after `cancel()` aborts the test process, which is the loudest
+/// failure available and exactly the one worth having.
+final class SessionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    /// Dropped by ``cancel()``, which is what makes any later ``start(_:)`` refuse.
+    private var session: URLSession?
+
+    init(_ session: URLSession) { self.session = session }
+
+    /// Start the download unless cancellation got here first. `false` means no task was
+    /// created and none ever will be, so the caller must settle its own waiter.
+    ///
+    /// Creating the task *inside* the lock is the whole point: asking "is it still valid?" and
+    /// then creating would leave the same window open, one `invalidateAndCancel` wide. There
+    /// is no inversion to deadlock on — the callbacks this triggers arrive later on the
+    /// session's own queue and take ``DownloadDelegate``'s lock, never this one.
+    func start(_ url: URL) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let session else { return false }
+        session.downloadTask(with: url).resume()
+        return true
+    }
+
+    /// Idempotent, because it is called from the cancellation handler *and* from `fetch`'s
+    /// `defer`, in either order and possibly at the same time.
+    func cancel() {
+        lock.lock()
+        let session = self.session
+        self.session = nil
+        lock.unlock()
+        // Outside the lock: invalidation only needs the reference, and either interleaving is
+        // safe. A `start` that took the lock first has already created its task, which is the
+        // harmless invalidate-*after*-create order; one that takes it afterwards reads `nil`.
+        session?.invalidateAndCancel()
     }
 }
 
@@ -148,14 +230,37 @@ public enum SelfUpdate {
 /// delegate callbacks arrive on a URLSession queue while the continuation is resumed from
 /// whatever awaited it, and none of the callbacks are `async` so an actor cannot be used
 /// without hopping inside every one of them.
-private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+///
+/// Internal rather than private so ``ReleaseAssetTests`` can pin both arrival orders of the
+/// handshake below — the reason it is a state machine rather than two fields.
+final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+
+    /// Which half of the handshake has arrived. Whichever is second does the resuming.
+    ///
+    /// The outcome and the waiter come from different threads — the outcome from a URLSession
+    /// callback, the waiter from whoever suspended in `withCheckedThrowingContinuation` — and
+    /// **either can be first**. The version this replaced kept a `continuation` and a
+    /// `settled` flag and, when an outcome arrived with no continuation stored, returned
+    /// *without* setting `settled`: the outcome was dropped, and the continuation that
+    /// attached a moment later was never resumed. That is a download that hangs forever with
+    /// its 取消 button already gone — strictly worse than the crash, because nothing reports
+    /// it. It was latent only while `attach` was guaranteed to run first; settling
+    /// cancellation from outside the callbacks (see ``SessionGate``) removes that guarantee.
+    private enum Handshake {
+        /// Neither half has arrived yet.
+        case idle
+        /// A waiter, with no outcome yet.
+        case waiting(CheckedContinuation<URL, Error>)
+        /// An outcome, with no waiter yet — parked until ``attach(_:)`` collects it.
+        case parked(Result<URL, Error>)
+        /// Resumed. Exactly-once lives here: nothing leaves this state.
+        case resumed
+    }
+
     private let lock = NSLock()
     private let destination: URL
     private let onProgress: @Sendable (SelfUpdate.Progress) -> Void
-    private var continuation: CheckedContinuation<URL, Error>?
-    /// A continuation may be resumed exactly once, and both `didFinishDownloadingTo` and
-    /// `didCompleteWithError` fire for a successful download.
-    private var settled = false
+    private var handshake = Handshake.idle
 
     init(destination: URL,
          onProgress: @escaping @Sendable (SelfUpdate.Progress) -> Void) {
@@ -163,19 +268,47 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
         self.onProgress = onProgress
     }
 
+    /// Register the waiter, or hand it an outcome that already arrived.
+    ///
+    /// Called exactly once per delegate, by ``SelfUpdate/fetch``.
     func attach(_ continuation: CheckedContinuation<URL, Error>) {
         lock.lock()
-        self.continuation = continuation
-        lock.unlock()
+        switch handshake {
+        case .idle:
+            handshake = .waiting(continuation)
+            lock.unlock()
+        case .parked(let result):
+            handshake = .resumed
+            lock.unlock()
+            continuation.resume(with: result)
+        case .waiting, .resumed:
+            // Unreachable with one call site. Resuming anyway rather than asserting: a
+            // continuation that is merely dropped hangs the caller, and hanging is the failure
+            // mode this whole state machine exists to rule out.
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+        }
     }
 
-    private func settle(_ result: Result<URL, Error>) {
+    /// Deliver `result` to the waiter, or park it for one — exactly once, in either order.
+    ///
+    /// A continuation may be resumed exactly once, and both `didFinishDownloadingTo` and
+    /// `didCompleteWithError` fire for a successful download, so a second outcome is the
+    /// normal path and not an error.
+    func settle(_ result: Result<URL, Error>) {
         lock.lock()
-        guard !settled, let continuation else { lock.unlock(); return }
-        settled = true
-        self.continuation = nil
-        lock.unlock()
-        continuation.resume(with: result)
+        switch handshake {
+        case .waiting(let continuation):
+            handshake = .resumed
+            lock.unlock()
+            continuation.resume(with: result)
+        case .idle:
+            handshake = .parked(result)
+            lock.unlock()
+        case .parked, .resumed:
+            // First outcome wins; a later one is the second callback for the same download.
+            lock.unlock()
+        }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
