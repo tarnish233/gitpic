@@ -4,6 +4,38 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.19.0] - 2026-08-24
+
+### 开机自启动，以及一个真正属于「通用」的设置页
+
+### App
+
+- GitPic.app 新增**开机自启动**：「设置 ▸ 通用 ▸ 开机时自动启动 GitPic」。写的是 macOS 自己的
+  登录项登记（`SMAppService.mainApp`），所以「系统设置 ▸ 通用 ▸ 登录项与扩展」里是同一个开关，
+  不存在两份会互相矛盾的状态。
+- 开关按**系统回读的状态**显示，而不是按点击结果。翻完开关后重新读一次
+  `SMAppService.mainApp.status`，所以「已登记但被 macOS 扣着等你批准」这个状态能如实显示成
+  「开 + 去系统设置批准」，而不是伪装成关 —— 那种情况下再点一次也不会有任何变化。真的没生效时，
+  会把系统原话一并显示出来。
+- **「Finder 右键」开关从「上传」页移到了「通用」页的「系统集成」。** 全 App 只有这两个开关是
+  立即写系统状态、不走配置文件和「保存」的；放在一起之后，「上传」页那段解释「我为什么和邻居
+  行为不一样」的说明就不需要了。代价说清楚：习惯在「上传」页底部找它的话，位置变了。
+- 精简「图床」页文案：删掉登录区那段 `public_repo` / jsDelivr 的说明（正下方就是登录按钮），以及
+  仓库区那条常驻的「还要按保存」提示 —— 右上角的「保存」一直都在，鼠标悬停还会列出待写入的键；
+  真正需要这句话的「还没配置图床」那一处仍然会说。
+
+### 内部
+
+- 新增 `LaunchAtLoginState`（`GitPicCore`）承担状态映射与文案，可被测试覆盖。实测推翻了两处
+  想当然的做法：`SMAppService.Status.notFound` **就是全新安装的状态**（从未登记过的 bundle 报的
+  就是它，只有登记过再取消才报 `notRegistered`），所以它必须等同于「关」，而不能做成一个指向
+  系统设置的错误态；另外头文件里写的 `kSMErrorAlreadyRegistered` / `kSMErrorJobNotFound` 在
+  macOS 26.5 上并不会抛出 —— 重复调用直接成功。文档和系统不一致，所以判定只认回读状态。
+- 修掉 `src/github.rs` 里 stub server 的一个偶发失败：它每个连接只 `read` 一次，而 TCP 是流，
+  `reqwest` 的 header 和 body 分两段发，所以单次 `read` 经常只拿到 header。全套测试里只有
+  `put_file_sends_the_existing_sha_when_overwriting` 断言请求 body，实测约五次挂两次 —— CI 跑
+  三个平台，发布构建变红的概率不低。现在读到 header 结束，再按 `Content-Length` 读完 body。
+
 ## [0.18.1] - 2026-08-23
 
 ### 设置页更简洁

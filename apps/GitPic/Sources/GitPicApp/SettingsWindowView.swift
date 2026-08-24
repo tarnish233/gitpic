@@ -1,11 +1,16 @@
 import SwiftUI
 
 enum SettingsTab: String, CaseIterable, Identifiable {
-    case host, upload, history, agent, about
+    /// 通用 first, where the platform puts it — 系统设置 leads with it too. The window
+    /// still *opens* on ``host`` rather than on this: GitPic cannot upload anything until
+    /// Owner/Repo are filled in, so the pane that has to be filled in is the one to land
+    /// on. See `SettingsNavigation.selectedTab`.
+    case general, host, upload, history, agent, about
     var id: Self { self }
 
     var title: String {
         switch self {
+        case .general: "通用"
         case .host:    "图床"
         case .upload:  "上传"
         case .history: "历史"
@@ -16,6 +21,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 
     var systemImage: String {
         switch self {
+        case .general: "gearshape"
         case .host:    "photo.stack"
         case .upload:  "arrow.up.circle"
         case .history: "clock.arrow.circlepath"
@@ -27,8 +33,8 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     /// Whether this pane edits the config file, and so carries the save bar.
     var savesConfig: Bool {
         switch self {
-        case .host, .upload:           true
-        case .history, .agent, .about: false
+        case .host, .upload:                     true
+        case .general, .history, .agent, .about: false
         }
     }
 }
@@ -83,10 +89,33 @@ struct SettingsWindowView: View {
     @State private var model = AppModel.shared
 
     private var activeTab: SettingsTab { navigation.selectedTab ?? .host }
+
+    /// Whether 刷新 should be showing a spinner in place of its glyph.
+    ///
+    /// A switch rather than the nested ternary this was, because the third pane with its
+    /// own idea of "refresh" is what broke the two-way shape: 通用 re-reads two system
+    /// switches, which is neither the CLI's `busy` nor the skill scan.
+    ///
+    /// `.general` is never refreshing, and that is not an oversight. Its two reads are a
+    /// login-item status (measured 3–6 ms warm) and a `pbs` preference read (1.9 ms on a
+    /// cold domain) — together an order of magnitude below the quarter second `busy`
+    /// itself waits before admitting to anything (see `AppModel.busyDelay`), so a spinner
+    /// here could only ever be a flicker for work that was already over.
     private var refreshing: Bool {
-        activeTab == .agent
-            ? model.skillTargetsLoading || model.skillInstallID != nil
-            : model.busy
+        switch activeTab {
+        case .agent:                            model.skillTargetsLoading || model.skillInstallID != nil
+        case .general:                          false
+        case .host, .upload, .history, .about:  model.busy
+        }
+    }
+
+    /// What ⌘R means on this pane.
+    private var refreshHelp: String {
+        switch activeTab {
+        case .agent:                            "重新检查 Agent（⌘R）"
+        case .general:                          "重新读取系统开关状态（⌘R）"
+        case .host, .upload, .history, .about:  "重新读取配置与历史（⌘R）"
+        }
     }
 
     /// **The sidebar does not collapse, and there is no button offering to collapse
@@ -160,7 +189,7 @@ struct SettingsWindowView: View {
                 // is why they were the two keys that *did* respond before the app had
                 // a main menu at all — see `MainMenu`.
                 .keyboardShortcut("r")
-                .help(activeTab == .agent ? "重新检查 Agent（⌘R）" : "重新读取配置与历史（⌘R）")
+                .help(refreshHelp)
 
                 if activeTab.savesConfig {
                     // Present on every config pane whether or not anything is dirty,
@@ -237,6 +266,7 @@ struct SettingsWindowView: View {
     @ViewBuilder private var detail: some View {
         Group {
             switch activeTab {
+            case .general: GeneralPane(model: model)
             case .host:    HostPane(model: model)
             case .upload:  UploadPane(model: model)
             case .history: HistoryPane(model: model)
@@ -266,9 +296,15 @@ struct SettingsWindowView: View {
     }
 
     private func reloadActivePane() async {
-        if activeTab == .agent {
+        switch activeTab {
+        case .agent:
             await model.loadSkillTargets()
-        } else {
+        case .general:
+            // Synchronous, and awaiting nothing is the honest shape: both reads are
+            // property lookups on system frameworks, not subprocesses.
+            model.refreshLaunchAtLogin()
+            model.refreshFinderService()
+        case .host, .upload, .history, .about:
             await model.reload()
         }
     }
