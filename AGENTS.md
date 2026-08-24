@@ -137,9 +137,20 @@ at one shared `CARGO_TARGET_DIR`. What stays global no matter what:
   worktree needs one `gitpic auth login` of its own.
 - The skills directory that `gitpic skill install` writes to.
 - `/Applications/GitPic.app` and `~/Library/Logs/GitPic.log` — one per machine.
+- **`$TMPDIR`** — per *user*, not per worktree, which bites Swift tests specifically.
+  Swift Testing has no suite-level teardown, so a fixture built once per suite must use
+  a fixed name or it accumulates a copy per run (measured: four runs, four leaked signed
+  bundles). But a *globally* fixed name is a landmine as soon as two agents run
+  `swift test` at once — measured, two worktrees sharing
+  `$TMPDIR/gitpic-install-test-image` gave `NSCocoaErrorDomain Code=4 "dmgroot couldn't
+  be removed"` and five failures indistinguishable from a regression in the code under
+  test. The two constraints pull opposite ways, so satisfy both: derive such a name from
+  `#filePath`, which is fixed per checkout and distinct between worktrees. Never from a
+  PID or a clock — that brings the per-run leak back.
 
 `cargo test` is safe regardless: `tests/json_contract.rs` builds its own temporary
-XDG directories and never reaches the network.
+XDG directories and never reaches the network. `swift test` is not — run it in one
+worktree at a time.
 
 ## Commit & Pull Request Guidelines
 Follow Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`. PRs need a clear description, linked issues, and green CI (fmt, clippy, test on Linux/macOS/Windows). Releases are cut by pushing a `vX.Y.Z` tag, which builds the four platform binaries **and** GitPic.app and publishes them in one Release. The tag must equal `v` plus `Cargo.toml`'s version — the release workflow asserts it. The `app-v*` tags are historical, from when the app versioned separately; do not create new ones.
