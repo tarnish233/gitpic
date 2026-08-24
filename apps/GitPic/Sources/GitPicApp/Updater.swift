@@ -166,13 +166,16 @@ enum Updater {
                         // Nothing has been mounted at this point, so a 取消 that arrived in the
                         // meantime costs nothing at all.
                         if cancelled.isSet { throw CancellationError() }
-                        // `stage` is gaining an `isCancelled` parameter in `GitPicCore` so the
-                        // mount and the copy can bail part-way; when it lands, `cancelled.isSet`
-                        // is the thing to hand it. Until then the worst case is one
-                        // hdiutil/ditto sequence that completes and is then thrown away by the
-                        // check below, rather than one that completes and is then installed.
+                        // `stage` reads this between its own steps — the attach, the version
+                        // gate, the signature check, the copy — so a 取消 during a slow `ditto`
+                        // stops there and unwinds, instead of completing a whole staging
+                        // sequence for the check below to throw away. A closure and not the
+                        // value, because it has to be read at each of those points rather
+                        // than once here; `CancellationFlag` locks, so reading it from
+                        // `GitPicCore`'s thread is safe.
                         return try SelfUpdate.stage(dmg: dmg, expectedVersion: version,
-                                                    replacing: target)
+                                                    replacing: target,
+                                                    isCancelled: { cancelled.isSet })
                     })
                 }
             }
@@ -362,12 +365,20 @@ enum Updater {
                 let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey])
                     .contentModificationDate
                 guard let modified, modified < cutoff else { continue }
-                // A mount point has to be detached before it can be removed, and
-                // `SelfUpdate.detachMount(at:)` in `GitPicCore` is where that rule is going to
-                // live — retry, then `-force`, then remove — because `ChildProcess` is internal
-                // to that module and `hdiutil` has no business being spawned from here. Insert
-                // the call on this line when it lands; the log below is what makes its absence
-                // visible in the meantime rather than silent.
+                // A still-attached mount point cannot be unlinked: `removeItem` fails with
+                // `POSIX 16 Resource busy`, and worse, it walks the mounted read-only volume
+                // trying to delete the image's contents. So the same entry failed on every
+                // launch, forever, while `-nobrowse` kept it invisible in Finder.
+                // `SelfUpdate.detachMount(at:)` owns that rule — retry, then `-force`, then
+                // remove — because `ChildProcess` is internal to `GitPicCore` and `hdiutil` has
+                // no business being spawned from here. It removes the directory itself on
+                // success, and logs why when it cannot, so there is nothing to do afterwards
+                // either way. Guarded on the prefix: the other two things this sweep matches
+                // are a script and a disk image, both plain files.
+                if url.lastPathComponent.hasPrefix("gitpic-mount-") {
+                    if SelfUpdate.detachMount(at: url) { swept += 1 }
+                    continue
+                }
                 do {
                     try FileManager.default.removeItem(at: url)
                     swept += 1
