@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Launch at login and update checks
 
-- **Starts itself at login**, optionally: 设置 ▸ 通用 ▸ 开机时自动启动 GitPic. The same switch as 系统设置 ▸ 通用 ▸ 登录项与扩展.
+- **Starts itself at login**, optionally: 设置 ▸ 通用 ▸ 开机自启动. The same switch as 系统设置 ▸ 通用 ▸ 登录项与扩展.
 - **Checks for updates** — daily on its own, again whenever the settings window is opened, and whenever you ask. A new version is presented with its release notes and can be installed from there.
 - The Finder right-click switch moved from 上传 to 通用.
 - Tightened the 图床 copy.
@@ -40,7 +40,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### App
 
-- GitPic.app can now **start itself at login**: 设置 ▸ 通用 ▸ 开机时自动启动 GitPic. It writes
+- GitPic.app can now **start itself at login**: 设置 ▸ 通用 ▸ 开机自启动. It writes
   macOS's own login-item registration (`SMAppService.mainApp`), so 系统设置 ▸ 通用 ▸
   登录项与扩展 is the same switch rather than a second record that can disagree with it.
 - The switch shows **the status the system reports back**, not the outcome of the click.
@@ -58,7 +58,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in the repository section — 保存 is present on every config pane and its tooltip already
   names the keys waiting to be written, and the one case that genuinely needs the instruction
   (nothing configured yet) still says so.
-- 设置 ▸ 通用 ▸ 更新 carries the `每天自动检查更新` switch, a status line, and 检查更新.
+- 设置 ▸ 通用 ▸ 更新 carries the `自动更新` switch, a status line, and 检查更新.
   The status line has four states, and "this build is newer than the latest release" is the
   one that earns its place: every unreleased build of this repository is in it, and calling
   that "up to date" would be defensible and actively confusing.

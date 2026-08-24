@@ -34,7 +34,7 @@ struct GeneralPane: View {
                 // registration exists and is being withheld, which reads as 开 for the
                 // reason `LaunchAtLoginState.isOn` gives.
                 CaptionedToggle(
-                    label: "开机时自动启动 GitPic",
+                    label: "开机自启动",
                     caption: model.launchAtLogin.caption,
                     isOn: Binding(get: { model.launchAtLogin.isOn },
                                   set: { model.setLaunchAtLogin($0) }))
@@ -55,9 +55,14 @@ struct GeneralPane: View {
             }
 
             Section("更新") {
+                // The label is short; the caption carries the two facts it dropped — that
+                // this checks rather than installs, and that it does so daily. Nothing here
+                // ever replaces the app on its own: a found update is reported, and 立即更新
+                // in the sheet is the only thing that hands off to brew.
                 CaptionedToggle(
-                    label: "每天自动检查更新",
-                    caption: "只读取 GitHub 上的发布信息，不会上传任何内容。",
+                    label: "自动更新",
+                    caption: "每天检查一次，发现新版本会告诉你，不会自动装。"
+                        + "只读取 GitHub 上的发布信息，不会上传任何内容。",
                     isOn: Binding(get: { model.autoCheckUpdates },
                                   set: { model.autoCheckUpdates = $0 }))
 
