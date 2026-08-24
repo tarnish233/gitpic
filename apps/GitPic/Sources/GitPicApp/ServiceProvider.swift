@@ -83,9 +83,14 @@ final class ServiceProvider: NSObject {
             // Not through `refuse`: that ends in `UploadReport.failed`, whose notice title
             // is hard-coded 「GitPic 上传失败」, and a setting being honoured is not an
             // upload failure. Nothing was attempted — say why nothing happened instead.
+            //
+            // The pane has to be named correctly here or the notice is worse than nothing:
+            // once the entry is switched off this banner is the *only* place the app says
+            // where the switch is, and it went on pointing at 上传 after the switch moved to
+            // 通用 ▸ 系统集成 — sending the reader to a pane with no such section.
             AppModel.shared.notify(
                 title: "右键上传已关闭",
-                body: "可在 GitPic 设置 ▸ 上传 ▸「Finder 右键」里重新打开。")
+                body: "可在 GitPic 设置 ▸ 通用 ▸「系统集成」里重新打开。")
             return
         }
         // No `.urlReadingContentsConformToTypes` filter, on purpose: reading the

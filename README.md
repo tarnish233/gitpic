@@ -86,6 +86,7 @@ gitpic auth login                # 浏览器授权登录 GitHub，登录完顺�
 gitpic repos                     # 列出这份凭据能上传的仓库
 gitpic branches                  # 列出当前仓库的分支（可加 --repo owner/name）
 gitpic doctor                    # 检查认证与仓库权限
+gitpic update check              # 有没有新版本，以及这一版改了什么
 gitpic completion zsh            # 打印补全脚本
 gitpic skill install             # 安装 AI 助手技能（见下）
 

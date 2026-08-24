@@ -619,7 +619,7 @@ final class AppModel {
     /// Seeded with `true` rather than a real read, deliberately. `AppModel.shared` is
     /// first touched from `setUpStatusItem()`, so a `FinderService.isEnabled` default
     /// would put a cross-process preference read (measured 1.9 ms on a cold domain) on
-    /// the launch path — to produce a value nothing reads until 设置 ▸ 上传 opens, which
+    /// the launch path — to produce a value nothing reads until 设置 ▸ 通用 opens, which
     /// calls ``refreshFinderService()`` before showing it anyway. `true` is also the right
     /// placeholder: it is what the system reports for a service nobody has toggled.
     private(set) var finderServiceEnabled = true

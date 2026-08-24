@@ -101,6 +101,7 @@ cat img.png | gitpic --stdin     # extension decided from the bytes
 gitpic list                      # recent uploads (local history)
 gitpic auth login                # authorise in the browser
 gitpic doctor                    # check auth and repository permissions
+gitpic update check              # whether a newer release exists, and what changed
 gitpic completion zsh            # print a completion script
 gitpic skill install             # install the agent skill (below)
 
