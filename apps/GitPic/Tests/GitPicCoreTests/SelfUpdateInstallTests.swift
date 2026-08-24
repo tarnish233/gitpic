@@ -80,10 +80,16 @@ struct SelfUpdateInstallTests {
     /// `hdiutil create` costs several seconds and every test here wants the same image, so
     /// building it per test added most of a minute to the run for nothing. Safe as a `static`
     /// because the suite is `.serialized` and the image is only ever read.
+    ///
+    /// **A fixed directory, not a per-run UUID.** Swift Testing has no suite-level teardown, so
+    /// a unique name per run leaks one signed bundle plus a disk image into the temporary
+    /// directory every time the suite executes — measured, after four runs, four directories.
+    /// A fixed name means at most one exists, and `hdiutil create -ov` overwrites it.
     private static let sharedImage: Result<URL, Error> = {
         do {
             let dir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("gitpic-install-image-\(UUID().uuidString)")
+                .appendingPathComponent("gitpic-install-test-image")
+            try? FileManager.default.removeItem(at: dir)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let source = dir.appendingPathComponent("GitPic.app")
             try makeApp(at: source, version: "0.19.0")

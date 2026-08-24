@@ -85,7 +85,7 @@ enum Updater {
                     location: SelfUpdate.location(of: bundle),
                     bundleVersion: mine,
                     latest: latest,
-                    brew: SelfUpdate.brewOwnership(cask: Self.caskName),
+                    brew: SelfUpdate.brewOwnership(cask: Self.caskName, bundle: bundle),
                     asset: asset))
             }
         }

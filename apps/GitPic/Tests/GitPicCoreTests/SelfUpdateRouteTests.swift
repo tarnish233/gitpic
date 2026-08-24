@@ -202,8 +202,45 @@ struct SelfUpdateRouteTests {
         #expect(names[0].contains("/Applications/"))
     }
 
-    // MARK: - Sweeping leftovers
+    // MARK: - Which bundle does brew own
 
+    /// **The bug an end-to-end run caught, pinned.** `brew list --cask gitpic` exits 0 whenever
+    /// the cask is installed *anywhere*, so a copy in `~/Applications` on a machine whose cask
+    /// installed to `/Applications` was reported as brew's. It would then be handed to
+    /// `brew upgrade`, brew would replace the *other* bundle, and the script would reopen this
+    /// one — an old build, still reporting the same update available, with brew reporting
+    /// nothing left to do. Repeatable forever.
+    ///
+    /// Homebrew answers exactly, and this is the shape it answers in: `brew list --cask` prints
+    /// the Caskroom paths, one of which is a symlink to the installed bundle. Verbatim from a
+    /// machine with the cask installed.
+    @Test("brew owning the cask is not the same as brew owning this bundle")
+    func brewOwnsOneBundleNotAnyBundle() {
+        let listing = """
+        /opt/homebrew/Caskroom/gitpic/.metadata/INSTALL_RECEIPT.json
+        /opt/homebrew/Caskroom/gitpic/.metadata/config.json
+        /opt/homebrew/Caskroom/gitpic/.metadata/0.19.0/20260824093614.436/Casks/gitpic.json
+        /opt/homebrew/Caskroom/gitpic/0.19.0/GitPic.app
+        """
+        // The `.app` line is the one that matters, and it is not the first.
+        let app = listing.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { $0.hasSuffix(".app") }
+        #expect(app == "/opt/homebrew/Caskroom/gitpic/0.19.0/GitPic.app",
+                "the receipt JSON must not be mistaken for the artifact")
+
+        // With the cask's bundle resolving to /Applications/GitPic.app, a copy in
+        // ~/Applications is *not* brew's, so it must reach the in-app installer.
+        let route = SelfUpdate.route(
+            location: .applicationsDir, bundleVersion: "0.18.0", latest: "0.19.0",
+            brew: .doesNotOwnIt, asset: Self.choice)
+        guard case .selfInstall = route else {
+            Issue.record("a copy brew did not install must not be handed to brew")
+            return
+        }
+    }
+
+    // MARK: - Sweeping leftovers
     /// A failed install can leave a bundle-sized staging directory and a backup in
     /// `/Applications`; the script cannot remove its own staging directory, and deliberately
     /// keeps the backup until after the reopen. They are swept a launch later.

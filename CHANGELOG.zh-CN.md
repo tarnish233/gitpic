@@ -48,6 +48,13 @@
   在磁盘上的版本，下一次 `brew upgrade` 就会和它打架。所以自己安装不是 brew 的替代品，而是
   「brew 不是这份 bundle 的主人」时才发生的事。brew 探测**没有得到答案**时绝不当成「不是 brew 的」
   —— 超时可能正藏着一个好用的 Homebrew，凭这个猜测覆盖一个 cask 就是上面那种破坏。
+- 归属是问 Homebrew「你装的是**哪一份**」，而不是「cask 装了没有」。`brew list --cask gitpic`
+  只要 cask 存在就退 0，于是在一台 cask 装到 `/Applications` 的机器上，`~/Applications` 里的副本
+  会被判成 brew 的 —— 那样它会被交给 `brew upgrade`，brew 去替换**另一份**，脚本再把这一份原样
+  打开：一个旧构建，仍然报同一个更新可用，而 brew 报告无事可做，可以无限重复。Homebrew 自己有
+  确切答案，现在读的就是它：Caskroom 里有个
+  `<prefix>/Caskroom/<cask>/<version>/GitPic.app` 符号链接，指向 app 实际被装到哪。
+  这条是在一台真的装了 cask 的机器上把整个流程跑了一遍才发现的，不是读代码读出来的。
 - 只在 `/Applications` 或 `~/Applications` 里替换。代价写明：放在别处的副本仍然只看到发布页。
   这也顺带排除了仓库 `dist-app/` 里的开发构建 —— 否则一次自更新会把开发者的构建换成 release 构建。
 - 拿不到校验和就拒绝安装，退回发布页。宁可不装，也不装没人担保过的字节。
