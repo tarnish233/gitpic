@@ -88,7 +88,7 @@ struct GeneralPane: View {
                     // window was being used for, so without this button the banner would be
                     // the only mention of it.
                     if model.update?.updateAvailable == true {
-                        Button("查看更新内容") { model.updateSheetPresented = true }
+                        Button("查看更新内容") { model.presentUpdateSheet() }
                     }
                 }
                 .controlSize(.small)
@@ -117,16 +117,9 @@ struct GeneralPane: View {
         }
         // Only when one is due. `.task` rather than `.onAppear` so it can await, and
         // due-ness rather than every appearance so switching panes back and forth is not a
-        // request per visit — see `UpdateSchedule`.
+        // request per visit — see `UpdateSchedule`. Like `.onAppear` above it fires once per
+        // mount and not on reopen, which is why `showWindow` calls this too.
         .task { await model.checkForUpdatesIfDue() }
-        .sheet(isPresented: $model.updateSheetPresented) {
-            // `report` is passed rather than read inside, so the sheet cannot render a
-            // half-state: nothing raises the flag without an answer in hand, and if the
-            // answer somehow went missing there is nothing worth showing.
-            if let report = model.update {
-                UpdateSheet(model: model, report: report)
-            }
-        }
     }
 
     /// One line for "where does the update situation stand".

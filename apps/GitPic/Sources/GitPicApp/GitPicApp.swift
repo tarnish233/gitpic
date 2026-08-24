@@ -817,15 +817,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// verdict, or a reason it failed — has a home on that pane, and a check whose answer
     /// lands somewhere the user is not looking is a check they have to run again. `manual:
     /// true` is what lets a found update raise the sheet.
+    ///
+    /// Waits for discovery, the way the launch check does. Without it a click inside the
+    /// up-to-8 s window where `runner` is still `nil` returned at the `guard let runner` and
+    /// did nothing at all: no spinner, no message, 状态 still 「还没检查过」. The pane's own
+    /// button is `.disabled(model.toolState != .ready)` and cannot be clicked then — but a
+    /// status-item entry has no `validateMenuItem` in this app, so this was the one route in
+    /// that was both reachable and inert.
     @objc private func checkForUpdates() {
         SettingsWindowController.show(tab: .general)
-        Task { await AppModel.shared.checkForUpdates(manual: true) }
+        Task { @MainActor in
+            _ = await resolvedRunner()
+            await AppModel.shared.checkForUpdates(manual: true)
+        }
     }
 
     /// Show the notes for an update already found — the menu item the daily check's
     /// finding turns into.
     @objc private func showUpdate() {
         SettingsWindowController.show(tab: .general)
-        AppModel.shared.updateSheetPresented = true
+        AppModel.shared.presentUpdateSheet()
     }
 }

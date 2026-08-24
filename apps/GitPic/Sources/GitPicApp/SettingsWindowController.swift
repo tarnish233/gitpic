@@ -31,6 +31,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         if shared == nil { shared = SettingsWindowController() }
     }
 
+    /// Whether the settings window is on screen right now.
+    ///
+    /// `shared` being non-nil says nothing about that: ``prewarm()`` builds the controller and
+    /// its hosting view at launch, long before anything is shown, and `windowWillClose`
+    /// deliberately keeps the instance alive so that reopening is not another ~200 ms. The
+    /// window's own visibility is the only question that matches what the user can see, which
+    /// is what ``AppModel/presentUpdateSheet()`` needs: a sheet raised on a window that is not
+    /// on screen is a sheet nobody can dismiss.
+    static var isOnScreen: Bool { shared?.window?.isVisible ?? false }
+
     private init() {
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: CGSize(width: 760, height: 560)),
@@ -106,6 +116,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // process — and flipping a stale switch writes the wrong value back.
         AppModel.shared.refreshFinderService()
         AppModel.shared.refreshLaunchAtLogin()
+        // And the daily update check, for exactly the reason the paragraph above gives. This
+        // was the missing half of it: `GeneralPane`'s `.task` fires once when the pane is
+        // first mounted, so "checks again whenever the window is opened" — which is the
+        // stated reason `GitPicApp` does not run a repeating timer — was not true of
+        // anything. A Mac left logged in checked once, at launch.
+        Task { await AppModel.shared.checkForUpdatesIfDue() }
     }
 
     /// Closing gives back the activation policy and spends the pane history — but
