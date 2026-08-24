@@ -136,8 +136,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.19.0] - 2026-08-24
 
-
-
 ### Launch at login and update checks
 
 - **Starts itself at login**, optionally: 设置 ▸ 通用 ▸ 开机自启动. The same switch as 系统设置 ▸ 通用 ▸ 登录项与扩展.
