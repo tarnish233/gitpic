@@ -4,6 +4,80 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.1] - 2026-08-25
+
+### Fixes an update that installed and then kept running the old build
+
+- **The app used to log 「quitting」 and then not quit.** AppKit refuses termination while the
+  update sheet is still attached, so the swap script waited out its bound, swapped anyway, and
+  `open -a` merely reactivated the old process — the log said 「reopened」 while the old build
+  kept running. The quit is now an actual exit that no sheet can block.
+- **「Reopened」 is judged from the image a process is actually executing**, not the path it was
+  launched from — a process the swap happened underneath keeps running from the moved-aside
+  copy, and can no longer satisfy the reopen.
+- **The launch sweep protects the image being executed** rather than the launch path, so it
+  cannot delete the backup a process is running from.
+- New `scripts/check-self-update.sh`: installs a real update and asserts the old pid exits and
+  a new one comes back running the new version. Any release touching the update path must pass
+  it — 0.20.0 shipped this bug precisely because that gate did not exist.
+
+<!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file. Keep each bullet above on one line — the app's update sheet renders with .inlineOnlyPreservingWhitespace, which keeps newlines verbatim, so a wrapped line breaks mid-sentence at 480pt -->
+
+### Fixed
+
+- **The quit is the whole fix, and it is `exit`, not a better terminate.** AppKit's own log on a
+  failing run:
+  ```
+  [AppKit:Application] terminate:
+  [AppKit:Application] Attempting sudden termination (1st attempt)
+  [AppKit:Application] App termination blocked by modal sheet
+  [AppKit:Application] Termination aborted
+  ```
+  The update path always has a sheet attached — the install starts from a button inside the
+  update sheet — and AppKit refuses termination before consulting the delegate, so
+  `applicationShouldTerminate` was never called (measured: a probe build logged nothing from it
+  on a failing run while the same probe fired on succeeding ones). The activation policy was
+  exonerated the same way: with the window open and no sheet, the shutdown runs `windowWillClose`'s
+  `setActivationPolicy(.accessory)` and the process exits normally. Dismissing the sheet first was
+  rejected: it works only if the dismissal animation finishes before `terminate:` runs, and it
+  would let the next sheet anyone adds reintroduce the bug silently. `quitForUpdate` returns
+  `Never`, so the compiler holds the invariant 0.20.0 broke. A failed dry run before this found
+  nothing because `GITPIC_APP_DRY_RUN=1` returned before the quit — not one line of it had ever
+  been executed by a test, a dry run or a review; it now runs everything but the `exit`.
+- **The `Killed: 9` measurement is corrected in the comments it justified.** Re-measured twice:
+  renaming a running bundle's directory leaves the process running from the moved-aside copy —
+  which is exactly how the failed quit became a reopened old build. The ordering survives on the
+  plain argument (a half-replaced bundle mixes versions; nothing here can put that back), not on
+  the wrong measurement.
+- **The reopen's evidence is the image, not the argv string.** `ps` shows the path as given at
+  launch; `lsof -a -p <pid> -d txt` shows what is executing. Two conditions, both required: the
+  pid is not the one the script waited on, and its image is inside the installed target. Five
+  distinguishable outcomes replace the single unconditional "reopened": confirmed; the old
+  process never exited (the 0.20.0 shape; says the new version is on disk and tells the user to
+  quit and relaunch); accepted but nothing executing that bundle appeared; refused; or a
+  confirmed-looking process after a rollback, where it is the bundle that was already there.
+  The 60-second wait expiry is logged as an `ANOMALY` now, not passed in silence. `pgrep -x
+  GitPic` was discarded as the candidate source for the same reason the argv string was — on
+  this machine it matches a completely unrelated Homebrew-managed GitPic in `/Applications`.
+- **The sweep guards the image being executed, not the launch path.** `Bundle.main.bundleURL` is
+  a launch-time path, and a rename is exactly what leaves one stale; a process the swap happened
+  underneath therefore protects the directory nothing executes and leaves the backup — the only
+  other copy of the app — unprotected. Latent today because the sweep runs once at launch and a
+  survivor never reaches it, but a timer or an install-completion sweep would make it live, and
+  unlink does not stop a Mach-O mid-exec: silent damage, with `ROLLBACK FAILED` advice pointing
+  at nothing. The default is now `SelfUpdate.currentImage()` (lsof) with the launch path as the
+  fallback, and the new test answers the question it was written around: `contains()`'s symlink
+  normalisation does reconcile lsof's `/private/var/folders/…` spelling with
+  `contentsOfDirectory`'s `/var/folders/…`.
+- **The gate is the process, not the script.** `scripts/check-self-update.sh` builds an
+  old-versioned GitPic, installs it under `~/Applications`, drives a real update through the UI,
+  and asserts the old pid exited, a new pid runs the new version from the installed path, the
+  reopened app is `.accessory`, and the machine's own `/Applications/GitPic.app` never moved. It
+  refuses to run without `--force` if `~/Applications/GitPic.app` exists, and it restores
+  `Cargo.toml`, `Cargo.lock` and the shared release binary through its trap. `AGENTS.md` now
+  records the rule: no release touching the update path goes out until it has passed on a real
+  machine.
+
 ## [0.20.0] - 2026-08-24
 
 ### A manual install can update itself now
