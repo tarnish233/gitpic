@@ -58,6 +58,41 @@ struct SelfUpdateInstallTests {
         case image(String)
         /// A line the test needs to stub is no longer in the generated script.
         case stub(String)
+        /// The stand-in for the app was spawned and was not running a moment later.
+        case probe(String)
+    }
+
+    /// A real, long-lived process executing a real binary inside `bundle`, standing in for the
+    /// running app. Returned so the caller can terminate it; nothing is left running.
+    ///
+    /// **It has to be a real Mach-O, and it has to be signed.** Measured: a shell script's
+    /// `lsof` `txt` image is `/bin/sh` and not the script, so a script cannot show the property
+    /// under test at all; and a plain `cp` of `/bin/sleep` is killed the instant it is exec'd,
+    /// while `codesign --force --sign -` on the copy — the same ad-hoc signature ``makeApp``
+    /// gives the fixture bundles — runs.
+    ///
+    /// It replaces the bundle's own executable, so the bundle's seal no longer verifies
+    /// afterwards. No test that uses this asserts on that bundle's signature.
+    private static func probe(executing bundle: URL, seconds: Int = 30) throws -> Process {
+        let exe = bundle.appendingPathComponent("Contents/MacOS/GitPic")
+        try? FileManager.default.removeItem(at: exe)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/sleep"), to: exe)
+        let signed = try ChildProcess.run(
+            executable: URL(fileURLWithPath: "/usr/bin/codesign"),
+            args: ["--force", "--sign", "-", exe.path], timeout: 120)
+        guard signed.status == 0 else {
+            throw FixtureError.signing(String(decoding: signed.stderr, as: UTF8.self))
+        }
+        let process = Process()
+        process.executableURL = exe
+        process.arguments = ["\(seconds)"]
+        try process.run()
+        // `run()` returns once `posix_spawn` succeeded, which is before the kernel has decided
+        // whether the image may execute. A moment's wait makes the check below about the
+        // signature rather than about the timing.
+        Thread.sleep(forTimeInterval: 0.3)
+        guard process.isRunning else { throw FixtureError.probe(exe.path) }
+        return process
     }
 
     /// A read-only `UDZO` image with the app at its root, exactly as `release.yml:216-220`
@@ -220,10 +255,14 @@ struct SelfUpdateInstallTests {
 
         #expect(SelfUpdate.bundleVersion(of: f.target) == "0.19.0", "log: \(output)")
         #expect(output.contains("installed 0.19.0"), "log: \(output)")
-        // The relaunch ran, and it was confirmed rather than assumed.
+        // The relaunch ran, and it was confirmed rather than assumed — and confirmed of the
+        // *new* bundle, which is a claim about a pid and the image that pid is executing.
         #expect(output.contains("WOULD REOPEN \(f.target.path)"),
                 "the app was never reopened: \(output)")
-        #expect(output.contains("reopened \(f.target.path)"), "not confirmed: \(output)")
+        #expect(output.contains("reopened \(f.target.path) (by path), pid 4242"),
+                "not confirmed: \(output)")
+        #expect(output.contains("0.19.0 is running: its executing image is"),
+                "the confirmation did not say what it confirmed: \(output)")
         // **The old bundle is still there.** The script used to `rm -rf` it right after
         // `open -a` returned, which is not the same event as the new version working; the
         // delete belongs to a later launch of the app instead. A new build that fails on
@@ -254,13 +293,16 @@ struct SelfUpdateInstallTests {
 
         let log = f.root.appendingPathComponent("install.log")
         let output = try Self.runScript(staged: staged, log: log, root: f.root,
-                                       appComesUp: false)
+                                        reopen: .nothing)
 
         #expect(output.contains("installed 0.19.0"), "log: \(output)")
-        // Both attempts were made — by path, then by name — and both are on the record.
-        #expect(output.contains("no GitPic process appeared"), "log: \(output)")
+        // Both attempts were made — by path, then by name — and both are on the record, with
+        // the evidence they were decided on.
+        #expect(output.contains("no process executing that bundle"), "log: \(output)")
+        #expect(output.contains("(no process named GitPic is running)"), "log: \(output)")
         #expect(output.contains("could not reopen GitPic"), "log: \(output)")
-        #expect(!output.contains("reopened"), "log: \(output)")
+        #expect(!output.contains("reopened \(f.target.path)"), "log: \(output)")
+        #expect(!output.contains("0.19.0 is running"), "log: \(output)")
         // The new version is in place and the old one is still recoverable, which is the
         // entire point of not deleting it here: this is what "the update does not launch"
         // looks like from the script's side.
@@ -278,10 +320,141 @@ struct SelfUpdateInstallTests {
 
         let log = f.root.appendingPathComponent("install.log")
         let output = try Self.runScript(staged: staged, log: log, root: f.root,
-                                       launchSucceeds: false, appComesUp: false)
+                                        reopen: .refused)
 
         #expect(output.contains("open -a \(f.target.path) failed (status 1)"), "log: \(output)")
         #expect(output.contains("could not reopen GitPic"), "log: \(output)")
+    }
+
+    /// **The bug that shipped in 0.20.0.** The app is asked to quit and does not; the bounded
+    /// wait expires; the renames go ahead underneath it; and `open -a "$target"` then activates
+    /// that surviving instance, because it is what LaunchServices has registered for the bundle
+    /// identifier. The script called that a success, because its evidence was "a process is
+    /// running at `$target`" and `ps` reports the path a process was launched from rather than
+    /// the inode it is executing.
+    ///
+    /// Nothing about the mechanism is faked. The stand-in for the app is a real process
+    /// executing a real binary inside the installed bundle, and the script's `image()` line is
+    /// the real `lsof`, so the two facts the refusal turns on are produced by the kernel here:
+    /// `mv` on the parent directory of a running executable does not kill it, and `lsof` follows
+    /// that rename. What is stubbed is only the part no test can ask for — LaunchServices
+    /// answering `open -a` with the surviving instance instead of a new one — and it is stubbed
+    /// by handing `candidates` that one pid, which is exactly what `pgrep` returned on the real
+    /// install.
+    @Test("an app that never quit is not mistaken for the reopened new version")
+    func refusesTheAppThatNeverQuit() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let staged = try SelfUpdate.stage(dmg: f.dmg, expectedVersion: "0.19.0",
+                                         replacing: f.target)
+        let app = try Self.probe(executing: f.target)
+        defer { if app.isRunning { app.terminate() } }
+        let pid = app.processIdentifier
+
+        let log = f.root.appendingPathComponent("install.log")
+        let output = try Self.runScript(staged: staged, log: log, root: f.root,
+                                        pid: pid, reopen: .realProcess(pid: pid))
+
+        // The swap still happened. A quit that never comes must not cost the user the update.
+        #expect(SelfUpdate.bundleVersion(of: f.target) == "0.19.0", "log: \(output)")
+        #expect(output.contains("installed 0.19.0"), "log: \(output)")
+        // **And it is not called a reopen.** These two are what fail against 0.20.0's script,
+        // which logged `reopened <target>; running:` followed by a `ps` line naming this very
+        // pid at this very path.
+        #expect(!output.contains("reopened \(f.target.path)"),
+                "the surviving old process was counted as the reopen: \(output)")
+        #expect(!output.contains("0.19.0 is running"), "log: \(output)")
+        // The expired wait is on the record as the anomaly it is, instead of passing in
+        // silence, and the reopen names the cause and what the user should do about it.
+        #expect(output.contains("ANOMALY: pid \(pid) is still running after 60s"),
+                "the expired wait was not recorded: \(output)")
+        #expect(output.contains("NOT reopened: pid \(pid) never exited"), "log: \(output)")
+        #expect(output.contains("quit the running GitPic"),
+                "the log does not say what to do about it: \(output)")
+        // The stand-in really did survive the rename — if it had died, this test would be
+        // pinning nothing — and the log names the image it is really executing, inside the
+        // backup. Asserted as a suffix because the log carries the *physical* path
+        // (/private/var/folders/…) while the fixture only knows the logical one, which is the
+        // whole reason the script resolves it.
+        #expect(app.isRunning, "the rename killed the stand-in; this is not the shipped bug")
+        let backups = Self.entries(in: f.apps, prefix: ".GitPic-old-")
+        #expect(backups.count == 1, "\(backups)")
+        if let backup = backups.first {
+            #expect(output.contains("pid \(pid) is executing "),
+                    "the refused candidate is not in the log: \(output)")
+            #expect(output.contains("/Applications/\(backup)/Contents/MacOS/GitPic"),
+                    "the log does not name the image it was refused for: \(output)")
+        }
+    }
+
+    /// The other half of the same rule, with the pid coincidence taken away: a process that is
+    /// *not* the one the script waited on, executing something that is not the new bundle. That
+    /// is what `open -a` produces whenever LaunchServices resolves the request to a copy other
+    /// than the installed one — and here it is the old bundle at the backup path, which is what
+    /// the process it activated on the real install turned out to be executing. Only the image
+    /// can refuse this one, so this is the test that pins that half of `isnew`.
+    @Test("a process that is not executing the new bundle is refused")
+    func refusesAProcessThatIsNotTheNewBundle() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let staged = try SelfUpdate.stage(dmg: f.dmg, expectedVersion: "0.19.0",
+                                         replacing: f.target)
+        // Executing the *old* bundle, which the swap renames to the backup underneath it.
+        let other = try Self.probe(executing: f.target)
+        defer { if other.isRunning { other.terminate() } }
+        let pid = other.processIdentifier
+
+        let log = f.root.appendingPathComponent("install.log")
+        let output = try Self.runScript(staged: staged, log: log, root: f.root,
+                                        reopen: .realProcess(pid: pid))
+
+        #expect(output.contains("installed 0.19.0"), "log: \(output)")
+        #expect(!output.contains("reopened \(f.target.path)"),
+                "a process executing the old bundle was counted: \(output)")
+        #expect(!output.contains("0.19.0 is running"), "log: \(output)")
+        // Not the "never exited" branch: the pid the script waited on is long gone, so what it
+        // has is a launch that was accepted and produced nothing from the new bundle.
+        #expect(!output.contains("never exited"), "log: \(output)")
+        #expect(output.contains("no process executing that bundle"), "log: \(output)")
+        #expect(output.contains("could not reopen GitPic"), "log: \(output)")
+        // And the refusal is legible: the candidate is listed with the image it is executing.
+        #expect(output.contains("pid \(pid) is executing "), "log: \(output)")
+    }
+
+    /// The confirmation that should be given, on the same real machinery: a pid that is not the
+    /// app's, executing the bundle that was just installed.
+    ///
+    /// The process is started from the staged copy before the script runs, and the swap renames
+    /// that copy to `$target` underneath it — so by the time the script asks, `lsof` reports it
+    /// executing an image inside the installed bundle. Nothing here is stubbed except `launch`,
+    /// and the fact under test is produced by the kernel: this is the same rename-following
+    /// `refusesTheAppThatNeverQuit` relies on, seen from the other direction.
+    @Test("a process executing the newly installed bundle is what counts as reopened")
+    func confirmsAProcessExecutingTheNewBundle() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let staged = try SelfUpdate.stage(dmg: f.dmg, expectedVersion: "0.19.0",
+                                         replacing: f.target)
+        let new = try Self.probe(executing: staged.bundle)
+        defer { if new.isRunning { new.terminate() } }
+        let pid = new.processIdentifier
+
+        let log = f.root.appendingPathComponent("install.log")
+        let output = try Self.runScript(staged: staged, log: log, root: f.root,
+                                        reopen: .realProcess(pid: pid))
+
+        #expect(SelfUpdate.bundleVersion(of: f.target) == "0.19.0", "log: \(output)")
+        #expect(output.contains("reopened \(f.target.path) (by path), pid \(pid)"),
+                "a real process executing the new bundle was refused: \(output)")
+        #expect(output.contains("0.19.0 is running: its executing image is "), "log: \(output)")
+        // The image it named is inside the installed bundle. A suffix, for the reason given in
+        // `refusesTheAppThatNeverQuit`: the log has the physical path and the fixture does not.
+        #expect(output.contains("/Applications/GitPic.app/Contents/MacOS/GitPic"),
+                "log: \(output)")
+        // No second attempt was needed — the by-name fallback echoes the bare name, and no
+        // fixture path starts with it — and no anomaly: the pid the script waited on had gone.
+        #expect(!output.contains("WOULD REOPEN GitPic"), "log: \(output)")
+        #expect(!output.contains("ANOMALY"), "log: \(output)")
     }
 
     /// **The failure that must not lose the user's app.** With the new bundle unmovable, the
@@ -325,6 +498,13 @@ struct SelfUpdateInstallTests {
         // turns this red now; it did not before.
         #expect(output.contains("rolled back to the old bundle"), "log: \(output)")
         #expect(!output.contains("ROLLBACK FAILED"), "log: \(output)")
+        // The reopen runs from the trap here, with the swap undone — so the same confirmation
+        // means something different and has to say so. A process executing something inside
+        // `$target` is the new version *only* if the second `mv` succeeded, and it did not.
+        #expect(output.contains("the update did not happen, so this is the bundle that was"),
+                "log: \(output)")
+        #expect(!output.contains("0.19.0 is running"),
+                "the trap's reopen claimed a version that was never installed: \(output)")
 
         // Whatever happened, the user still has a working 0.18.0 at the original path.
         #expect(SelfUpdate.bundleVersion(of: f.target) == "0.18.0",
@@ -642,32 +822,81 @@ struct SelfUpdateInstallTests {
         return script.replacingOccurrences(of: line, with: replacement)
     }
 
-    /// Run the generated script with its three outside-world one-liners stubbed — the one
-    /// thing a test must not do is launch an application — and with a pid that has already
-    /// exited so the wait loop falls straight through.
+    /// The `lsof` line, quoted once. Every test either replaces it or asserts it is still there,
+    /// so a rewording cannot quietly turn one of them into a test of something else.
+    private static let imageLine =
+        #"image() { lsof -a -p "$1" -d txt -Fn 2>/dev/null | sed -n '/^n[/]/{s/^n//;p;q;}'; }"#
+
+    /// What the stubbed outside world does when the script goes looking for the app.
+    ///
+    /// A value rather than the two booleans this used to take: the confirmation now reads two
+    /// things about a candidate process — its pid, and the image it is really executing — so
+    /// "does the app come up" is no longer a yes or no.
+    private enum Reopen {
+        /// A pid that is not the app's, executing something inside `$target`. Faked at both
+        /// lines, because all a real process adds *here* is that `lsof` answers at all, and the
+        /// three `realProcess` tests spend a real one on exactly that.
+        case theNewBundle
+        /// LaunchServices accepts the request and nothing ever appears.
+        case nothing
+        /// LaunchServices refuses.
+        case refused
+        /// A real, already-running process, handed to `candidates` by pid with the script's own
+        /// `lsof` line left alone — the only way to test the thing the fix turns on.
+        ///
+        /// Started before the script rather than by the `launch` stub because the script cannot
+        /// tell the difference: it calls `launch` and then polls. Keeping the process in the
+        /// test's hands is what makes sure none of them outlives the test.
+        case realProcess(pid: Int32)
+    }
+
+    /// Run the generated script with the three lines that reach outside its own directory
+    /// stubbed — the one thing a test must not do is launch an application.
     ///
     /// - Parameters:
-    ///   - launchSucceeds: what the stubbed `open -a` returns. Measured on the real thing: 0
-    ///     when LaunchServices accepts the request, which is not the same as the app running.
-    ///   - appComesUp: what the stubbed process check answers. `false` also flattens the
-    ///     poll's `sleep 0.5` to `sleep 0`, or each of the two confirmations would really sit
-    ///     there for ten seconds.
+    ///   - pid: the pid the script waits on and refuses to accept as evidence. The default has
+    ///     already exited, so the wait falls straight through; a live one is how
+    ///     ``refusesTheAppThatNeverQuit`` makes the wait expire.
+    ///   - reopen: what the stubs answer. See ``Reopen``.
     ///   - pathPrefix: prepended to the script's own `PATH`, which is otherwise fixed on
     ///     purpose. The only way to make one specific `mv` fail.
     private static func runScript(
         staged: SelfUpdate.Staged, log: URL, root: URL,
-        launchSucceeds: Bool = true, appComesUp: Bool = true, pathPrefix: String? = nil
+        pid: Int32 = 999_999, reopen: Reopen = .theNewBundle, pathPrefix: String? = nil
     ) throws -> String {
-        var script = SelfUpdate.installScript(staged: staged, pid: 999_999, log: log)
-        script = try stub(script, #"launch() { open -a "$1"; }"#,
-                          with: #"launch() { echo "WOULD REOPEN $1"; return \#(launchSucceeds ? 0 : 1); }"#)
-        script = try stub(script, #"running() { pgrep -x GitPic >/dev/null 2>&1; }"#,
-                          with: "running() { return \(appComesUp ? 0 : 1); }")
-        script = try stub(script, #"whence() { ps -Awwo pid=,comm= | grep -F /Contents/MacOS/GitPic; }"#,
-                          with: #"whence() { echo "WOULD LIST PROCESSES"; }"#)
-        if !appComesUp {
-            script = try stub(script, "sleep 0.5", with: "sleep 0")
+        var script = SelfUpdate.installScript(staged: staged, pid: pid, log: log)
+        let launchBody: String
+        // No candidate at all, unless one of the cases below produces one.
+        var candidatesBody = "candidates() { :; }"
+        var imageBody: String?
+        switch reopen {
+        case .theNewBundle:
+            launchBody = #"launch() { echo "WOULD REOPEN $1"; }"#
+            candidatesBody = "candidates() { echo 4242; }"
+            imageBody = #"image() { echo "$realtarget/Contents/MacOS/GitPic"; }"#
+        case .nothing:
+            launchBody = #"launch() { echo "WOULD REOPEN $1"; }"#
+        case .refused:
+            // Measured on the real thing: `open -a` exits 0 when LaunchServices accepts the
+            // request, which is not the same as the app running — so a non-zero status is the
+            // one thing it says that *is* worth believing.
+            launchBody = #"launch() { echo "WOULD REOPEN $1"; return 1; }"#
+        case .realProcess(let live):
+            launchBody = #"launch() { echo "WOULD REOPEN $1"; }"#
+            candidatesBody = "candidates() { echo \(live); }"
         }
+        script = try stub(script, #"launch() { open -a "$1"; }"#, with: launchBody)
+        script = try stub(script, "candidates() { pgrep -x GitPic 2>/dev/null; }",
+                          with: candidatesBody)
+        if let imageBody {
+            script = try stub(script, Self.imageLine, with: imageBody)
+        } else if !script.contains(Self.imageLine) {
+            throw FixtureError.stub("the generated script no longer contains: \(Self.imageLine)")
+        }
+        // Both polls flattened, always. The wait for the app to quit is 120 ticks and each
+        // confirmation is 20, so at the real half-second any test that expects one of them to
+        // expire would sit there for a minute. Nothing asserts on the interval.
+        script = try stub(script, "sleep 0.5", with: "sleep 0")
         if let pathPrefix {
             script = try stub(script, "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
                               with: "PATH=\(pathPrefix):/usr/bin:/bin:/usr/sbin:/sbin")
