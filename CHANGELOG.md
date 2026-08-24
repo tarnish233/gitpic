@@ -102,21 +102,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `mv a a.old` when `a.old` already exists does **not** fail — it moves `a` inside it, giving
     `a.old/a` (reproduced). With a fixed name, a second attempt would "roll back" a wrapper
     directory that is not a bundle and then delete the real old app with the leftovers.
-  - The app is reopened *before* the rollback material is deleted, so a new bundle that will not
-    launch still has the old one on disk behind it; the leftovers are swept at the next launch.
+  - The script does not delete the rollback material at all. `open -a` exiting 0 is not the new
+    version running — measured, it returns 0 for a bundle that aborts on launch, and macOS holds
+    the crashed process long enough that even `pgrep` seeing it proves nothing — so nothing the
+    script can observe entitles it to destroy the only working copy. The previous version is left
+    on disk and removed by a later launch instead. The emptied staging directory goes by `rmdir`,
+    which cannot take a bundle with it if the swap did not happen.
   - The reopen is in a `trap … EXIT`, not at the end of the success path. GitPic is
     `.accessory`: once it has quit there is no Dock icon and no menu-bar icon, so a script that
     dies early takes the whole app with it.
   - `PATH` is pinned explicitly. Not a privilege measure — nothing here runs elevated — but the
     app's own PATH has a Homebrew prefix prepended, and a script whose job is to replace a
     bundle has no business resolving `mv` through a user-writable directory.
-- `codesign --verify` is run, and documented as proving **nothing about origin**: it passes for
-  anything anyone ad-hoc signs. It is there to catch a truncated or half-written copy. The
-  digest is the only authentication in the path.
+- `codesign --verify` is run on the **staged copy**, after `ditto` and after the `xattr` that
+  mutates it, and is documented as proving **nothing about origin**: it passes for anything anyone
+  ad-hoc signs. Catching a truncated or half-written copy is the whole point, so it has to run on
+  the copy — verifying the read-only mount instead, as the first version did, only re-proves what
+  the digest already proved and costs a full decompress pass. The digest is the only
+  authentication in the path.
 - The launch-time sweep covers more now: besides stale upgrade scripts, it removes a `.dmg` left
   by a cancelled download and the staging and backup directories an interrupted install left in
-  an Applications folder. Those two are whole copies of the app, and the script can neither
-  delete the staging directory it is standing in nor drop the backup before the reopen.
+  an Applications folder. Those two are whole copies of the app, and the script can neither delete
+  the staging directory it is standing in nor delete the backup at all. Two rules keep it from
+  eating something in use: it skips anything that **is** or **contains** the bundle it is running
+  from — structurally, not by age, because any age bound eventually expires while the app is still
+  running from there — and it ages a leftover from `st_ctime` rather than mtime, because `mv` and
+  `ditto` both preserve mtime *and* birthtime (measured), so a backup was born already older than
+  any cutoff and the one-day floor protected it for zero seconds.
+- The previous version stays in the Applications folder for about a day, hidden, at roughly the
+  size of the app — so three updates in a day leave three of them. That is a deliberate trade
+  against the alternative, which is deleting the only working GitPic on the machine on the word of
+  an exit code that does not mean what it looks like.
+- 取消 is honoured through the whole sequence, not only the download. The staging steps check it
+  between the attach, the version gate, the signature check and the copy, and a cancel that lands
+  after staging removes the staging directory before throwing. Past the handoff there is nothing
+  left to cancel — the script is a detached process by then — so the button is gone at that point
+  rather than present and inert.
 - **No privilege escalation.** The plan was to ask for an administrator password when the target
   directory could not be written; a red-team pass overturned it. `/Applications` is
   `root:admin drwxrwxr-x`, so any admin can already write it and would never need the prompt;
