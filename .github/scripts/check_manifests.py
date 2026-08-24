@@ -126,7 +126,8 @@ def check_versions(version: str) -> None:
 
 
 def check_changelogs(version: str) -> None:
-    """Both changelogs must carry a section for the version in Cargo.toml.
+    """Both changelogs must carry a section for the version in Cargo.toml, and that
+    section must mark where the release notes stop.
 
     ``release.yml`` extracts release notes from ``CHANGELOG.zh-CN.md`` only, and
     aborts on an empty result — so the Chinese one is already guarded at tag time.
@@ -138,6 +139,15 @@ def check_changelogs(version: str) -> None:
     and one Release, so app changes go in each version's ``### App`` subsection
     here; ``apps/GitPic/CHANGELOG.md`` is frozen at 0.1.2 as history and is
     deliberately not checked.
+
+    **The marker.** Since 0.19.0 a version section is two documents in one: a short
+    summary of user-visible changes, then ``<!-- release-notes-end ... -->``, then the
+    full detail. ``release.yml`` publishes only what precedes the marker, and
+    GitPic.app renders that same text in its update sheet. A section without the
+    marker still publishes whole — that is what keeps backfilling pre-0.19.0 tags
+    working — so nothing but this check stands between a forgotten marker and a
+    Release carrying the internal detail. It is required for the version being cut
+    and asked of nothing else, which is why it lives here rather than in the awk.
     """
     heading = re.compile(r"^## \[" + re.escape(version) + r"\]", flags=re.M)
     for path in CHANGELOGS:
@@ -146,10 +156,24 @@ def check_changelogs(version: str) -> None:
         except FileNotFoundError:
             fail(f"{path.relative_to(ROOT)} is missing")
             continue
-        if not heading.search(text):
+        match = heading.search(text)
+        if not match:
             fail(
                 f"{path.name} has no `## [{version}]` section, but Cargo.toml says "
                 f"{version} — rename the unreleased heading before tagging"
+            )
+            continue
+        # This version's section only: a marker under some older version says nothing
+        # about the notes about to be published.
+        rest = text[match.end() :]
+        next_version = re.search(r"^## \[", rest, flags=re.M)
+        section = rest[: next_version.start()] if next_version else rest
+        if "release-notes-end" not in section:
+            fail(
+                f"{path.name}'s `## [{version}]` section has no `<!-- release-notes-end "
+                f"-->` marker, so the whole section — internal detail included — would "
+                f"become the GitHub Release body and the app's update text. Add the "
+                f"marker after the short summary of user-visible changes"
             )
 
 

@@ -290,10 +290,23 @@ jobs:
         run: |
           set -euo pipefail
           version="$VERSION"
+          # Stops at the `release-notes-end` marker as well as at the next version
+          # heading, and that marker is the whole point: the changelog section keeps the
+          # full detail — what was measured, which design was rejected — while a Release
+          # is read by someone deciding whether to upgrade. Those are different documents,
+          # and this is where they part. What lands here is also what GitPic.app renders
+          # in its update sheet, so the two things a user might read stay identical by
+          # construction rather than by being written twice.
+          #
+          # A section with no marker yields the whole thing, which is what every release
+          # before 0.19.0 did and is what keeps backfilling an old tag working.
+          # `check_manifests.py` requires the marker for the version being *cut*, so
+          # forgetting it fails CI instead of quietly publishing the long version.
           if ! awk -v version="$version" '
             BEGIN { heading = "## [" version "]" }
             $0 == heading || index($0, heading " ") == 1 { found = 1; next }
             found && index($0, "## [") == 1 { exit }
+            found && index($0, "release-notes-end") { exit }
             found { print }
             END { if (!found) exit 1 }
           ' CHANGELOG.zh-CN.md > RELEASE_NOTES.md; then
