@@ -32,6 +32,12 @@ enum Updater {
     /// into every closure that mentions it.
     nonisolated static let caskName = "gitpic"
 
+    /// Seconds `brew upgrade` gets in the generated script before the watchdog kills it.
+    ///
+    /// Interpolated into both the `sleep` and the message it logs, so the number in the log
+    /// cannot drift from the one that was waited.
+    private static let upgradeBound = 900
+
     enum Availability: Equatable {
         /// brew is here and it is managing this app: an upgrade can be offered.
         case ready(brew: URL)
@@ -40,34 +46,77 @@ enum Updater {
         case unavailable(reason: String)
     }
 
+    /// Its own queue rather than `Task.detached`: the two probes in ``probe(bundle:)`` block
+    /// for up to 8 s and 20 s, and a cooperative thread parked that long is one fewer for
+    /// everything else in the app. Same reason `AppDelegate` gives tool discovery a
+    /// `discoveryQueue` instead of running it on the pool.
+    private nonisolated static let probeQueue = DispatchQueue(label: "dev.gitpic.app.brew-probe")
+
     /// Whether to offer 立即更新 at all.
     ///
-    /// Two questions, and both have to be asked. Finding `brew` says nothing about whether
-    /// *this* app came from it — a drag-installed copy on a machine that also has Homebrew
-    /// is entirely ordinary, and `brew upgrade --cask gitpic` there fails with "not
-    /// installed". Offering a button that cannot work is worse than not offering one, so
-    /// the cask is checked too.
+    /// Three questions now, and each one rules out a way the button could do the wrong
+    /// thing. Finding `brew` says nothing about whether *this* app came from it — a
+    /// drag-installed copy on a machine that also has Homebrew is entirely ordinary, and
+    /// `brew upgrade --cask gitpic` there fails with "not installed". Offering a button that
+    /// cannot work is worse than not offering one, so the cask is checked too.
     ///
-    /// Both halves spawn a process, so both go off the main actor.
+    /// And the cask being installed still does not make *this* bundle the one brew manages,
+    /// which is the question that was missing. A copy running from `dist-app/`, or a second
+    /// one dragged into `~/Applications` while the cask is also installed, would upgrade
+    /// `/Applications/GitPic.app` and then be reopened *at its own path* by the script — an
+    /// old build, still reporting the same update, with brew reporting nothing left to do.
+    /// The user can repeat that forever. So the running bundle has to be somewhere a cask
+    /// installs to, and that question is asked first because it is the only one that is free.
     static func availability() async -> Availability {
-        let probe = await Task.detached { () -> Availability in
-            guard let brew = ToolDiscovery.locateBrew() else {
-                return .unavailable(reason: "brew not found on this machine")
-            }
-            switch ToolDiscovery.brewCaskStatus(Self.caskName, brew: brew) {
-            case .installed:
-                return .ready(brew: brew)
-            case .notInstalled(let status):
-                return .unavailable(
-                    reason: "brew does not manage this app (list --cask exited \(status))")
-            case .unusable(let reason):
-                return .unavailable(reason: reason)
-            }
-        }.value
+        let bundle = Bundle.main.bundleURL
+        let probe: Availability = await withCheckedContinuation { cont in
+            probeQueue.async { cont.resume(returning: Self.probe(bundle: bundle)) }
+        }
         if case .unavailable(let reason) = probe {
             Diagnostics.log("update: no in-app upgrade — \(reason)")
         }
         return probe
+    }
+
+    /// The blocking half of ``availability()``, off the main actor on ``probeQueue``.
+    private nonisolated static func probe(bundle: URL) -> Availability {
+        guard bundleIsWhereACaskInstalls(bundle) else {
+            return .unavailable(
+                reason: "this copy runs from \(bundle.path), which is not where brew installs"
+                    + " a cask — upgrading would replace a different bundle")
+        }
+        guard let brew = ToolDiscovery.locateBrew() else {
+            return .unavailable(reason: "brew not found on this machine")
+        }
+        switch ToolDiscovery.brewCaskStatus(Self.caskName, brew: brew) {
+        case .installed:
+            return .ready(brew: brew)
+        case .notInstalled(let status):
+            return .unavailable(
+                reason: "brew does not manage this app (list --cask exited \(status))")
+        case .unusable(let reason):
+            return .unavailable(reason: reason)
+        }
+    }
+
+    /// Whether `bundle` sits in a directory Homebrew installs casks into: `/Applications`,
+    /// or `~/Applications` for a machine with `HOMEBREW_CASK_OPTS="--appdir=~/Applications"`.
+    ///
+    /// An `--appdir` beyond those two is not recognised, and the cost is worth stating: that
+    /// install sees the release page instead of a button. It is the safe direction to fail
+    /// in — the alternative is spending the user's bandwidth replacing a bundle this process
+    /// cannot show is the one it is running from.
+    private nonisolated static func bundleIsWhereACaskInstalls(_ bundle: URL) -> Bool {
+        let parent = bundle.resolvingSymlinksInPath().deletingLastPathComponent()
+            .standardizedFileURL.path
+        let appDirs = [
+            "/Applications",
+            URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+                .appendingPathComponent("Applications").standardizedFileURL.path,
+        ]
+        return appDirs.contains {
+            URL(fileURLWithPath: $0).resolvingSymlinksInPath().standardizedFileURL.path == parent
+        }
     }
 
     /// `GITPIC_APP_DRY_RUN=1` writes the script and stops there — nothing is spawned and the
@@ -102,13 +151,23 @@ enum Updater {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
         task.arguments = [script.path]
-        // A clean, explicit environment for the same reason `ToolPaths.childPATH` exists —
-        // except that this child needs brew's own prefix on PATH, since brew re-execs
-        // itself and shells out to `curl`, `git` and `ditto`.
-        task.environment = [
-            "PATH": "\(brew.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME": NSHomeDirectory(),
-        ]
+        // Inherited, with `PATH` overridden — the policy `GitpicRunner.run` uses, rather than
+        // the two hand-picked keys this used to build. brew re-execs itself and shells out to
+        // `curl`, `git` and `ditto`, so it needs its own prefix on PATH; but it also needs
+        // whatever proxy configuration the app was launched with, and a two-key environment
+        // silently dropped `HTTPS_PROXY`/`ALL_PROXY` and left every fetch going direct. On a
+        // machine that reaches GitHub only through a local proxy that is the difference
+        // between an upgrade and a stall.
+        //
+        // Necessary rather than sufficient, and worth being honest about: a Finder-launched
+        // `.app` has no shell profile applied, so if the proxy is only exported in one there
+        // is nothing here to inherit. The bound in the script is what makes that survivable.
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "\(brew.deletingLastPathComponent().path):\(ToolPaths.childPATH)"
+        // `HOMEBREW_NO_AUTO_UPDATE` is deliberately *not* set: the tap has to be refreshed
+        // for the new cask to be visible at all, so suppressing that would reliably turn
+        // "upgrade" into "nothing to do".
+        task.environment = env
         try task.run()
 
         Diagnostics.log("update: handed off to \(script.path) (pid \(task.processIdentifier));"
@@ -145,9 +204,39 @@ enum Updater {
           sleep 0.5
         done
 
-        \(q(brew.path)) upgrade --cask \(q(Self.caskName))
+        # Bounded too, and for a sharper reason than the loop above: the reopen at the
+        # bottom runs only after brew returns, so an upgrade that never returns costs the
+        # user the whole app. GitPic is .accessory — once it has quit there is no Dock
+        # icon, no menu-bar icon, and the dialog that named this log went with it — so the
+        # only way back would be `open -a GitPic` typed into a terminal. macOS ships no
+        # timeout(1), hence the watchdog.
+        #
+        # The bound is generous on purpose: a slow-but-progressing download must not be
+        # killed, and brew refreshes its taps over git before it fetches the disk image.
+        # What it buys is that a wedged upgrade is temporary. A killed one can leave the
+        # cask half-installed and the reopen below then falls through to `open -a GitPic`,
+        # which is worse than a clean upgrade and much better than never coming back.
+        \(q(brew.path)) upgrade --cask \(q(Self.caskName)) &
+        brew_pid=$!
+        (
+          sleep \(Self.upgradeBound)
+          kill -TERM "$brew_pid" 2>/dev/null || exit 0
+          echo "watchdog: brew exceeded \(Self.upgradeBound)s, sent SIGTERM"
+          sleep 10
+          kill -KILL "$brew_pid" 2>/dev/null && echo "watchdog: escalated to SIGKILL"
+        ) &
+        watchdog_pid=$!
+        wait "$brew_pid"
         status=$?
-        echo "brew exited $status"
+        kill "$watchdog_pid" 2>/dev/null
+
+        # 143 and 137 are SIGTERM and SIGKILL, so they are the watchdog's verdict rather
+        # than brew's. Worth telling apart in the only report this script can make.
+        case $status in
+          143|137) echo "brew was killed by the watchdog (status $status)" ;;
+          0)       echo "brew exited 0" ;;
+          *)       echo "brew failed (status $status)" ;;
+        esac
 
         # Reopen either way. A failed upgrade must not cost the user their app: the old
         # bundle is still on disk in that case, and this is the only thing that puts the
@@ -159,5 +248,32 @@ enum Updater {
             .appendingPathComponent("gitpic-update-\(UUID().uuidString).sh")
         try script.write(to: url, atomically: true, encoding: .utf8)
         return url
+    }
+
+    /// Delete `gitpic-update-*.sh` left in the temporary directory by past upgrades.
+    ///
+    /// The script cannot delete itself: `bash` reads a script lazily, so `rm "$0"` from
+    /// inside it is a file being unlinked while more of it is still to be parsed. And it
+    /// cannot be deleted by the app it relaunches either, because at that moment it is still
+    /// running — it is the process that called `open -a`. So the cleanup lands one launch
+    /// later, which is what the age bound is for: a day is far longer than any upgrade, so
+    /// nothing still in use can match.
+    ///
+    /// Called at launch. Failures are ignored by design — this is tidying, and a temporary
+    /// directory that refuses a delete is not worth a word to the user.
+    static func sweepStaleScripts() {
+        let tmp = FileManager.default.temporaryDirectory
+        let cutoff = Date().addingTimeInterval(-86_400)
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: tmp, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        var swept = 0
+        for url in entries where url.lastPathComponent.hasPrefix("gitpic-update-")
+            && url.pathExtension == "sh" {
+            let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate
+            guard let modified, modified < cutoff else { continue }
+            if (try? FileManager.default.removeItem(at: url)) != nil { swept += 1 }
+        }
+        if swept > 0 { Diagnostics.log("update: swept \(swept) stale upgrade script(s)") }
     }
 }
