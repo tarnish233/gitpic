@@ -500,19 +500,30 @@ mod tests {
             req.contains(&format!("GET /repos/{RELEASES_REPO}/releases/latest")),
             "unexpected request: {req}"
         );
+        // Header assertions go through one lowercased copy, because HTTP header names are
+        // case-insensitive and nothing here may depend on how they were spelled on the wire.
+        //
+        // Not a style point — this is what CI caught. `hyper` writes them lowercase, so
+        // `contains("User-Agent: ")` is false against a real request; it passed on the
+        // author's machine only because `http_proxy` was set in the environment, `reqwest`
+        // honours that, and the local proxy rewrote the request in title case on its way to
+        // the loopback stub. So the assertions were being made against the proxy's output
+        // rather than gitpic's — including the credential one below, which is the whole
+        // reason this test exists.
+        let headers = req.to_lowercase();
         // GitHub refuses requests without one, so this is a contract and not a courtesy.
-        assert!(req.contains("User-Agent: gitpic/"), "no UA: {req}");
+        assert!(headers.contains("user-agent: gitpic/"), "no UA: {req}");
         // Nothing authenticated: this endpoint is public, and the user's credential has
         // no business on a request to a repository that is not theirs.
         //
-        // This assertion is the reason the request is read through `testutil` rather than
-        // with the single `sock.read` that used to be inlined here. A negative assertion over
-        // a partial read passes because the header block was never read, not because no
+        // This assertion is also why the request is read through `testutil` rather than with
+        // the single `sock.read` that used to be inlined here. A negative assertion over a
+        // partial read passes because the header block was never read, not because no
         // credential was sent — so the one check standing between a future edit and a leaked
         // token would have been reporting success either way. `read_request` reads to the end
         // of the headers before this looks at them.
         assert!(
-            !req.to_lowercase().contains("authorization:"),
+            !headers.contains("authorization:"),
             "the update check must not send a credential: {req}"
         );
     }
