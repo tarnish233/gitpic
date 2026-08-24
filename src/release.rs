@@ -126,6 +126,72 @@ pub struct UpdateReport {
     pub published_at: Option<String>,
 }
 
+impl UpdateReport {
+    /// [`Self::notes`] with the two structural removals a reader of "what changed" wants,
+    /// mirroring `UpdateCheck.summary` in `GitPicCore`.
+    ///
+    /// **Why this exists here at all.** `human()` printed `notes` verbatim under a comment
+    /// claiming it made "the same call" as the app's update sheet. It did not: the sheet
+    /// trims, so the terminal was the only place that showed the `## GitPic.app` appendix —
+    /// fifteen lines telling someone who *downloaded the DMG* to drag it to Applications and
+    /// clear the quarantine flag, printed to a person who already has `gitpic` installed —
+    /// and the `### <theme>` line that is also printed just above as the release name.
+    ///
+    /// `notes` itself stays untrimmed, including in `--json`: a script may want the whole
+    /// body, and the app decodes that field and applies its own rule to it.
+    ///
+    /// **The rule**, kept identical on both sides so the two renderings cannot diverge:
+    ///
+    /// 1. Stop at the first level-2 ATX heading that is not inside a fenced code block.
+    ///    Level, not title — the appendix's wording lives in `release.yml` where this cannot
+    ///    see it, so matching "GitPic.app" would stop trimming the day someone rewords it.
+    /// 2. Drop leading blank lines.
+    /// 3. Drop the first remaining line if it is an ATX heading of any level.
+    ///
+    /// A heading is `#`s **followed by a space**, and fences are skipped. Both halves were
+    /// bugs on the Swift side: `#42 修复剪贴板上传失败` had its first change deleted as a
+    /// heading, and a `## ` quoted inside a ``` block ended the notes there.
+    pub fn summary(&self) -> String {
+        let mut kept: Vec<&str> = Vec::new();
+        let mut in_fence = false;
+        for line in self.notes.lines() {
+            if is_fence_delimiter(line) {
+                in_fence = !in_fence;
+            } else if !in_fence && heading_level(line) == Some(2) {
+                break;
+            }
+            kept.push(line);
+        }
+        let mut first = 0;
+        while kept.get(first).is_some_and(|l| l.trim().is_empty()) {
+            first += 1;
+        }
+        if kept.get(first).is_some_and(|l| heading_level(l).is_some()) {
+            first += 1;
+        }
+        kept[first.min(kept.len())..].join("\n").trim().to_string()
+    }
+}
+
+/// The ATX heading level of `line`, or `None` when it is not a heading.
+///
+/// One or more `#` followed by a space, per CommonMark. The space is what keeps `#42` and
+/// `#hashtag` from being read as headings — see [`UpdateReport::summary`].
+fn heading_level(line: &str) -> Option<usize> {
+    let hashes = line.bytes().take_while(|b| *b == b'#').count();
+    if hashes == 0 || !line[hashes..].starts_with(' ') {
+        return None;
+    }
+    Some(hashes)
+}
+
+/// Whether `line` opens or closes a fenced code block. Info strings are fine — only the run
+/// of delimiters is looked at.
+fn is_fence_delimiter(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("```") || t.starts_with("~~~")
+}
+
 /// Ask GitHub for the latest release and compare it with this build.
 pub async fn check() -> Result<UpdateReport> {
     check_against(API).await
@@ -378,31 +444,48 @@ mod tests {
         assert!(API.starts_with("https://"));
     }
 
+    /// The same rule as `UpdateCheck.summary` in `GitPicCore`, and the same two near-misses
+    /// are pinned here: a heading needs a space after its hashes, and a fenced block is not
+    /// scanned for one. Both sides render release notes to a person, so they have to agree.
+    #[test]
+    fn summary_drops_the_appendix_and_the_theme_line() {
+        let s = |notes: &str| {
+            let mut r = report(CURRENT, release("v9.9.9")).unwrap();
+            r.notes = notes.to_string();
+            r.summary()
+        };
+        // The theme line goes: `release.yml` publishes it as the Release *name*, which
+        // `human()` prints directly above these notes.
+        assert_eq!(s("### 更新检查\n\n- 新增检查更新。"), "- 新增检查更新。");
+        // The `## `-level appendix goes, and everything under it.
+        assert_eq!(
+            s("- a change\n\n## GitPic.app\n\ndrag it to Applications\n"),
+            "- a change"
+        );
+        // A body with no heading at all is left alone.
+        assert_eq!(s("- just this"), "- just this");
+        assert_eq!(s(""), "");
+        // `#42` is an issue reference, not a heading — no space after the hashes. Reading it
+        // as one deleted a real change on the app side before this rule was shared.
+        assert_eq!(
+            s("#42 fixed the clipboard\n- and this"),
+            "#42 fixed the clipboard\n- and this"
+        );
+        // An h2 inside a fence is quoted text. What follows has to survive, and the fence has
+        // to stay balanced or the renderer is handed an unterminated block.
+        let out = s("- changed the changelog\n\n```md\n## [0.19.0]\n```\n\n- and this");
+        assert!(out.contains("and this"), "a fenced h2 truncated: {out}");
+        assert_eq!(out.matches("```").count(), 2, "unbalanced fence: {out}");
+    }
+
     /// End to end over a loopback socket: the URL that gets requested, and a real decode
     /// of a GitHub-shaped reply.
     #[tokio::test]
     async fn fetches_the_latest_release_over_http() {
-        use std::io::{Read, Write};
         let body = r#"{"tag_name":"v9.9.9","name":"GitPic 9.9.9",
             "body":"- a line of notes","html_url":"https://example.invalid/rel",
             "published_at":"2026-08-24T01:02:03Z"}"#;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = format!("http://{}", listener.local_addr().unwrap());
-        let served = std::thread::spawn(move || {
-            let (mut sock, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 8192];
-            let n = sock.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]).to_string();
-            let _ = sock.write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                )
-                .as_bytes(),
-            );
-            req
-        });
+        let (addr, served) = crate::testutil::stub(vec![crate::testutil::http("200 OK", body)]);
 
         let out = check_against(&addr).await.unwrap();
         // 9.9.9 outranks anything this crate will plausibly be, so the comparison is
@@ -412,9 +495,7 @@ mod tests {
         assert_eq!(out.notes, "- a line of notes");
         assert_eq!(out.url, "https://example.invalid/rel");
 
-        let req = served.join().unwrap();
-        // A single read is enough here: this is a GET, so the request line is in the
-        // first segment and there is no body to wait for.
+        let req = served.join().unwrap().remove(0);
         assert!(
             req.contains(&format!("GET /repos/{RELEASES_REPO}/releases/latest")),
             "unexpected request: {req}"
@@ -423,6 +504,13 @@ mod tests {
         assert!(req.contains("User-Agent: gitpic/"), "no UA: {req}");
         // Nothing authenticated: this endpoint is public, and the user's credential has
         // no business on a request to a repository that is not theirs.
+        //
+        // This assertion is the reason the request is read through `testutil` rather than
+        // with the single `sock.read` that used to be inlined here. A negative assertion over
+        // a partial read passes because the header block was never read, not because no
+        // credential was sent — so the one check standing between a future edit and a leaked
+        // token would have been reporting success either way. `read_request` reads to the end
+        // of the headers before this looks at them.
         assert!(
             !req.to_lowercase().contains("authorization:"),
             "the update check must not send a credential: {req}"
