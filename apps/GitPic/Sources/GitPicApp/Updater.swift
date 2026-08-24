@@ -72,6 +72,11 @@ enum Updater {
     /// The decision itself is `SelfUpdate.route`, a pure function in `GitPicCore` so that
     /// every row of it is testable; what is left here is gathering the facts it needs off the
     /// main actor.
+    ///
+    /// `brewOwnership` is written *inside* the call rather than computed into a local because
+    /// `route`'s `brew` parameter is an `@autoclosure`: the location question is free and is
+    /// asked first, so a copy outside the two Applications directories never pays the 8 s
+    /// login-shell probe or the 20 s `brew list --cask` at all.
     static func resolve(report: UpdateReport) async -> SelfUpdate.Route {
         let bundle = Bundle.main.bundleURL
         // The bundle's own version, not `report.current` — that one is the CLI's, and this
@@ -92,9 +97,9 @@ enum Updater {
         switch route {
         case .homebrew:
             Diagnostics.log("update: Homebrew owns this bundle — offering brew upgrade")
-        case .selfInstall(let asset, _):
+        case .selfInstall(let asset, _, let version):
             Diagnostics.log("update: Homebrew does not own this bundle — offering to install"
-                            + " \(asset.name) (\(asset.size) bytes)")
+                            + " \(version) from \(asset.name) (\(asset.size) bytes)")
         case .unavailable(let reason, let retryable):
             Diagnostics.log("update: no in-app upgrade — \(reason)"
                             + (retryable ? " (will ask again)" : ""))
@@ -124,6 +129,13 @@ enum Updater {
     ///
     /// That ordering is the whole reason this path needs no watchdog while the brew one does:
     /// brew goes to the network *after* the app is gone.
+    ///
+    /// **Cancellation is honoured all the way to the handoff**, which it was not: the staging
+    /// step was a bare `withCheckedThrowingContinuation` that nothing could interrupt, so 取消
+    /// pressed after the last byte was accepted by the UI, did nothing for up to the summed
+    /// hdiutil/codesign/ditto/xattr bounds, and then installed the bundle the user had just
+    /// said no to. Three checks now stand between the download and `NSApp.terminate`, and the
+    /// last of them removes the staging directory so a cancelled install leaves nothing behind.
     static func installAndRelaunch(
         asset: ReleaseAsset,
         sha256: String,
@@ -132,18 +144,52 @@ enum Updater {
     ) async throws {
         let dmg = try await SelfUpdate.download(asset: asset, sha256: sha256,
                                                 onProgress: onProgress)
-        // From here the image is verified. It is removed either way — a staged copy is what
-        // gets installed, so keeping five megabytes of disk image afterwards serves nobody.
+        // Removed on every path out of here — a staged copy is what gets installed, so keeping
+        // five megabytes of disk image afterwards serves nobody. `defer` alone was not "either
+        // way" as it claimed: the success path ends in `NSApp.terminate`, which calls `exit()`,
+        // so the `defer` never ran and every successful install leaked the image until the next
+        // launch's sweep, ≥24 h later. Hence the explicit removal below as well.
         defer { try? FileManager.default.removeItem(at: dmg) }
 
+        // Cancellation between the hash and the mount. `download` already deletes its own
+        // partial file, so there is nothing else to undo here.
+        try Task.checkCancellation()
+
         let target = Bundle.main.bundleURL
-        let staged = try await withCheckedThrowingContinuation { cont in
-            probeQueue.async {
-                cont.resume(with: Result {
-                    try SelfUpdate.stage(dmg: dmg, expectedVersion: version, replacing: target)
-                })
+        let cancelled = CancellationFlag()
+        let staged: SelfUpdate.Staged = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                probeQueue.async {
+                    cont.resume(with: Result {
+                        // `probeQueue` is serial and shared with the upgrade-path probe, so
+                        // this block can sit behind a 20 s `brew list --cask` before it runs.
+                        // Nothing has been mounted at this point, so a 取消 that arrived in the
+                        // meantime costs nothing at all.
+                        if cancelled.isSet { throw CancellationError() }
+                        // `stage` is gaining an `isCancelled` parameter in `GitPicCore` so the
+                        // mount and the copy can bail part-way; when it lands, `cancelled.isSet`
+                        // is the thing to hand it. Until then the worst case is one
+                        // hdiutil/ditto sequence that completes and is then thrown away by the
+                        // check below, rather than one that completes and is then installed.
+                        return try SelfUpdate.stage(dmg: dmg, expectedVersion: version,
+                                                    replacing: target)
+                    })
+                }
             }
+        } onCancel: {
+            cancelled.set()
         }
+        try? FileManager.default.removeItem(at: dmg)
+
+        // The last moment cancellation can mean anything, and the only one with something to
+        // undo: a bundle-sized staging directory beside the app. After the handoff below the
+        // script is a detached process this cannot recall.
+        if Task.isCancelled {
+            try? FileManager.default.removeItem(at: staged.directory)
+            Diagnostics.log("update: cancelled after staging — removed \(staged.directory.path)")
+            throw CancellationError()
+        }
+
         let script = try SelfUpdate.handOff(staged: staged, dryRun: dryRun)
         if dryRun {
             Diagnostics.log("update: DRY RUN — staged at \(staged.bundle.path),"
@@ -219,9 +265,19 @@ enum Updater {
         exec >>\(q(log.path)) 2>&1
         echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) upgrade \(Self.caskName) ==="
 
-        # Wait for GitPic to exit so brew is not replacing a running bundle. Bounded:
-        # a hung app must not leave this looping forever, and after the bound brew is
-        # allowed to try anyway — it is the one that can refuse safely.
+        # Wait for GitPic to exit so brew is not replacing a running bundle. Bounded at
+        # 60 s: this script has already been handed off and the app has already been told
+        # to quit, so an app still alive after a minute is wedged mid-shutdown and nothing
+        # here can unwedge it.
+        #
+        # After the bound brew is allowed to try anyway, and the honest reason is not that
+        # it "refuses safely" — measured in this very feature, moving a running bundle's
+        # directory aside gets the process `Killed: 9`, and brew's own install does the
+        # same kind of move. The reason is that the alternative is worse: bailing out here
+        # leaves a wedged .accessory app with no icon, no upgrade, and no explanation,
+        # whereas a killed process that was already quitting loses nothing and the reopen
+        # below still runs. A brew that cannot complete the move reports non-zero and the
+        # old bundle stays.
         for _ in $(seq 1 120); do
           kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null || break
           sleep 0.5
@@ -289,8 +345,13 @@ enum Updater {
     /// removes both on success, but it deliberately keeps the backup until *after* the reopen,
     /// so a crash in between leaves them in `/Applications`.
     ///
-    /// Called at launch. Failures are ignored by design — this is tidying, and a directory
-    /// that refuses a delete is not worth a word to the user.
+    /// Called at launch. A refusal is not worth a word to the *user* — this is tidying — but it
+    /// is worth a line in the log, because one of these entries can refuse forever: a
+    /// `gitpic-mount-*` directory that is still an attached disk image cannot be unlinked at
+    /// all. Measured: `removeItem` on an attached mount point throws
+    /// `NSCocoaErrorDomain 512` wrapping `NSPOSIXErrorDomain 16 "Resource busy"`, and after
+    /// `hdiutil detach` the very same call succeeds. So the failure was silent *and* permanent,
+    /// which is the combination that hides a bug for months.
     static func sweepStaleScripts() {
         let tmp = FileManager.default.temporaryDirectory
         let cutoff = Date().addingTimeInterval(-86_400)
@@ -301,7 +362,20 @@ enum Updater {
                 let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey])
                     .contentModificationDate
                 guard let modified, modified < cutoff else { continue }
-                if (try? FileManager.default.removeItem(at: url)) != nil { swept += 1 }
+                // A mount point has to be detached before it can be removed, and
+                // `SelfUpdate.detachMount(at:)` in `GitPicCore` is where that rule is going to
+                // live — retry, then `-force`, then remove — because `ChildProcess` is internal
+                // to that module and `hdiutil` has no business being spawned from here. Insert
+                // the call on this line when it lands; the log below is what makes its absence
+                // visible in the meantime rather than silent.
+                do {
+                    try FileManager.default.removeItem(at: url)
+                    swept += 1
+                } catch {
+                    Diagnostics.log("update: could not sweep \(url.lastPathComponent):"
+                                    + " \((error as NSError).localizedDescription)"
+                                    + " — \(String(describing: error))")
+                }
             }
         }
         if swept > 0 { Diagnostics.log("update: swept \(swept) stale upgrade file(s)") }
@@ -318,10 +392,39 @@ enum Updater {
     ///
     /// `gitpic-update-*` covers both the old upgrade scripts and an abandoned `.dmg`, because
     /// the download names its file the same way; `gitpic-install-*.sh` is the swap script.
+    ///
+    /// The bundle-sized leftovers — `.GitPic-update-*` staging directories and `.GitPic-old-*`
+    /// backups, beside wherever the app is installed — are deliberately **not** listed here.
+    /// `SelfUpdate.sweepLeftovers` owns that rule, and it is the one that has to be careful
+    /// about not deleting a bundle something is still running from. Two copies of a rule whose
+    /// mistakes are measured in whole applications is one too many.
     private static func isStaleArtefactName(_ name: String) -> Bool {
         guard name.hasPrefix("gitpic-update-") || name.hasPrefix("gitpic-install-")
                 || name.hasPrefix("gitpic-mount-") else { return false }
         return name.hasSuffix(".sh") || name.hasSuffix(".dmg")
             || name.hasPrefix("gitpic-mount-")
+    }
+}
+
+/// A one-way "the user pressed 取消" flag, readable from a `DispatchQueue` block.
+///
+/// `NSLock` over a `Bool`, following `SelfUpdate`'s `DownloadDelegate` and `Auth`'s `LoginChild`:
+/// the setter runs in `withTaskCancellationHandler`'s `onCancel`, which can fire on any thread,
+/// while the reader is a block on `Updater.probeQueue`. `Synchronization.Mutex` would be the
+/// modern answer and is macOS 15; this package targets macOS 14 (`Package.swift`).
+private final class CancellationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return flag
+    }
+
+    func set() {
+        lock.lock()
+        flag = true
+        lock.unlock()
     }
 }

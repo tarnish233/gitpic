@@ -14,6 +14,16 @@ struct UpdateSheet: View {
     @State private var confirmingUpgrade = false
     @State private var confirmingInstall = false
 
+    /// The release notes, parsed once per report rather than once per redraw.
+    ///
+    /// `report.summary` rewrites the body, `UpdateReport.displayMarkdown` rewrites its headings
+    /// and `AttributedString(markdown:)` parses the result — and every one of those used to run
+    /// inside `body`, which SwiftUI re-evaluates on every observed change. A download emits
+    /// hundreds of progress ticks for a five-megabyte image, so the notes were being re-parsed
+    /// hundreds of times to produce a value that cannot have changed. `nil` only for the frames
+    /// before the `.task` below has run, which ``notes`` covers by parsing inline.
+    @State private var renderedNotes: AttributedString?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -27,7 +37,15 @@ struct UpdateSheet: View {
         // is up to 20 s of somebody else's process, and nothing before this moment needs
         // the answer. It also needs the completed report, because which route is available
         // depends on what the release published.
-        .task { await model.resolveUpgradePath() }
+        //
+        // Keyed on the report generation, not on appearance alone: a check that lands while
+        // this sheet is open replaces the report the route was derived from, and a route
+        // computed from the previous one may name an asset this release does not have. See
+        // `AppModel.updateGeneration`.
+        .task(id: model.updateGeneration) {
+            renderedNotes = Self.markdown(UpdateReport.displayMarkdown(report.summary))
+            await model.resolveUpgradePath()
+        }
     }
 
     @ViewBuilder private var header: some View {
@@ -50,19 +68,22 @@ struct UpdateSheet: View {
     /// Rendered through `AttributedString` with `.inlineOnlyPreservingWhitespace`, which
     /// keeps line breaks and `- ` bullets as written while resolving inline syntax. See
     /// ``UpdateReport/displayMarkdown(_:)`` for why the headings are rewritten before they
-    /// get here, and why the full parser is not an option.
+    /// get here, and why the full parser is not an option. Parsed into ``renderedNotes`` rather
+    /// than here, with a one-off inline parse as the fallback for the frames before the `.task`
+    /// has run — so the first render is correct and the next few hundred are free.
     @ViewBuilder private var notes: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
                 if let name = report.name {
                     Text(name).font(.headline)
                 }
-                let body = report.summary
-                if body.isEmpty {
+                let rendered = renderedNotes
+                    ?? Self.markdown(UpdateReport.displayMarkdown(report.summary))
+                if rendered.characters.isEmpty {
                     Text("这个版本没有附更新说明。")
                         .foregroundStyle(.secondary)
                 } else {
-                    Text(markdown(UpdateReport.displayMarkdown(body)))
+                    Text(rendered)
                         .font(.callout)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
@@ -73,7 +94,7 @@ struct UpdateSheet: View {
         }
     }
 
-    private func markdown(_ s: String) -> AttributedString {
+    private static func markdown(_ s: String) -> AttributedString {
         (try? AttributedString(
             markdown: s,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
@@ -96,7 +117,7 @@ struct UpdateSheet: View {
                     case .homebrew:
                         Button("立即更新") { confirmingUpgrade = true }
                             .buttonStyle(.borderedProminent)
-                    case .selfInstall(let asset, _):
+                    case .selfInstall(let asset, _, _):
                         Button("下载并更新") { confirmingInstall = true }
                             .buttonStyle(.borderedProminent)
                         Text(Self.size(asset.size))
@@ -160,25 +181,34 @@ struct UpdateSheet: View {
     }
 
     /// The download's own bar, plus the one action that makes sense while it runs.
+    ///
+    /// **取消 is live for the whole of this row**, and that is a fix rather than an oversight.
+    /// It used to be `.disabled(model.installing)`, which switched it off at the last byte —
+    /// before the hashing, the mount, the version check and the copy, every one of which stops
+    /// when asked. And with 稍后 gone from this branch there was no `.cancelAction` anywhere on
+    /// the sheet, so a running download could not be dismissed even by Escape. It carries the
+    /// shortcut now: Escape stops the install, the row goes back to buttons, and a second Escape
+    /// closes the sheet. Two presses to leave, rather than a dialog that ignores the key.
     @ViewBuilder private func installProgress(_ progress: SelfUpdate.Progress) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 if model.installing {
-                    // Past the last byte: mounting, checking the version, verifying the
-                    // signature, copying. Indeterminate because none of it reports a fraction.
+                    // Past the last byte: hashing, mounting, checking the version, verifying
+                    // the signature, copying. Indeterminate because none of it reports a
+                    // fraction.
                     ProgressView().controlSize(.small)
                     Text("正在校验并安装…").font(.caption).foregroundStyle(.secondary)
                 } else if let fraction = progress.fraction {
                     ProgressView(value: fraction).frame(maxWidth: .infinity)
                 } else {
-                    // No Content-Length, so there is no fraction to draw honestly.
+                    // No size to measure against at all — the release did not report one and
+                    // neither did the response.
                     ProgressView().controlSize(.small)
                     Text("正在下载…").font(.caption).foregroundStyle(.secondary)
                 }
                 Button("取消") { model.cancelInstall() }
                     .controlSize(.small)
-                    // Once the bundle is being replaced there is nothing left to cancel.
-                    .disabled(model.installing)
+                    .keyboardShortcut(.cancelAction)
             }
             if !model.installing, progress.fraction != nil, let total = progress.total {
                 Text("已下载 \(Self.size(progress.received)) / \(Self.size(total))")

@@ -21,6 +21,31 @@ enum AppActivationPolicy {
     }
 }
 
+/// Hands out monotonically increasing tickets to one install's progress callbacks.
+///
+/// The ticket is taken on the URLSession queue the callback arrives on, so it records the order
+/// the *bytes* arrived in — which is the order the UI has to be told about, and the one thing the
+/// `Task { @MainActor in … }` hop per callback does not promise. `AppModel.observeInstall` then
+/// drops anything that arrives out of order, and drops everything once the install's gate has
+/// been let go of.
+///
+/// `NSLock` over a counter, following `SelfUpdate`'s `DownloadDelegate`: the callbacks are not
+/// `async`, so an actor cannot be used without hopping inside every one of them, which is the
+/// hop being made ordering-independent in the first place. `Synchronization.Atomic` is macOS 15;
+/// this package targets macOS 14 (`Package.swift`).
+final class ProgressGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counter: UInt64 = 0
+
+    /// The next ticket. Starts at 1, so 0 can mean "nothing seen yet".
+    func next() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        counter += 1
+        return counter
+    }
+}
+
 /// Shared state for the window UI.
 @MainActor
 @Observable
@@ -733,7 +758,28 @@ final class AppModel {
     // MARK: - Checking for updates
 
     /// The last completed check's answer, or `nil` if none has completed this launch.
-    private(set) var update: UpdateReport?
+    ///
+    /// Every assignment bumps ``updateGeneration``, because ``upgradePath`` is partly derived
+    /// from whatever this held at the time.
+    private(set) var update: UpdateReport? {
+        didSet { updateGeneration += 1 }
+    }
+
+    /// How many reports have landed this launch.
+    ///
+    /// Exists so a route can be tied to the report it came out of. Three of
+    /// ``SelfUpdate/Route``'s refusals — 「读不懂最新版本号」, 「并不比最新发布 X 旧」 and every
+    /// `AssetChoice.none` — are facts about the *release*, not about this install, and
+    /// ``resolveUpgradePath()`` used to cache them as `retryable: false` for the life of the
+    /// process. GitHub computes an asset's digest asynchronously *after* the upload, so a check
+    /// that landed in that window cached 「GitHub 没有报 … 的校验和」 and no later release ever got
+    /// an install button until the app was relaunched — precisely the failure mode `retryable`
+    /// was introduced to eliminate.
+    ///
+    /// A counter rather than comparing reports, because `UpdateReport` is a decoded payload with
+    /// no identity of its own, and "the same latest with a digest that has appeared since" has
+    /// to count as a different report.
+    private(set) var updateGeneration = 0
 
     /// Why the last check could not complete.
     ///
@@ -759,6 +805,12 @@ final class AppModel {
     /// Which upgrade this install can be offered, once asked. `nil` until the sheet asks.
     private(set) var upgradePath: SelfUpdate.Route?
 
+    /// The ``updateGeneration`` ``upgradePath`` was resolved from.
+    ///
+    /// A route outlives repeated sheet openings but never outlives its report — see
+    /// ``updateGeneration``.
+    private var upgradePathGeneration = -1
+
     /// How far the in-app download has got, or `nil` when one is not running.
     ///
     /// A stored property on the model rather than the `AsyncStream` machinery `ThumbnailStore`
@@ -766,11 +818,35 @@ final class AppModel {
     /// multi-watcher stream would be scaffolding around a single assignment.
     private(set) var downloadProgress: SelfUpdate.Progress?
 
-    /// The install is past downloading and is mounting, checking and copying.
+    /// The install is past downloading and is hashing, mounting, checking and copying.
+    ///
+    /// Cosmetic only. It picks the spinner over the bar; it does **not** gate 取消, because
+    /// every one of those steps is cancellable and disabling the button there was the whole of
+    /// one bug.
     private(set) var installing = false
 
     /// The task doing the download, kept only so 取消 can stop it.
     private var installTask: Task<Void, Never>?
+
+    /// Orders and fences the progress callbacks of the install that is running now.
+    ///
+    /// The callback arrives on a URLSession queue and hops to the main actor with a fresh
+    /// `Task` each time — hundreds of them for a five-megabyte image, with no ordering
+    /// guarantee between them. Two things follow, and neither is fixed by hoping:
+    ///
+    /// - a stale tick landing after ``finishInstall()`` would set ``downloadProgress`` non-nil
+    ///   again, and `UpdateSheet` renders the progress row *instead of* the button row — so the
+    ///   sheet would be left showing a frozen bar with no way out;
+    /// - a tick landing out of order would rewind the bar.
+    ///
+    /// Honest about the evidence: an attempt to force the reorder saw the main actor drain FIFO
+    /// across three runs, so this is an unguarded assumption being removed rather than a
+    /// demonstrated reorder. The gate costs one comparison per tick, which is cheaper than
+    /// arguing about it.
+    private var progressGate: ProgressGate?
+
+    /// The highest ticket ``observeInstall`` has acted on, within the current gate.
+    private var lastProgressTicket: UInt64 = 0
 
     /// An upgrade-path probe is in flight. The `upgradePath == nil` guard did not hold across
     /// its own `await`, so two sheet appearances could both spawn one.
@@ -951,31 +1027,63 @@ final class AppModel {
         return true
     }
 
-    /// Ask which upgrade this install can be offered. Called when the sheet appears.
+    /// Ask which upgrade this install can be offered. Called when the sheet appears, and again
+    /// whenever a new report lands under it.
     ///
-    /// Only a definite answer is kept. `guard upgradePath == nil` cached whatever came back,
-    /// including the two failures that say nothing about this install: `brew list --cask`
-    /// hitting its 20 s bound (its own doc comment names Homebrew's housekeeping as a cause)
-    /// and the 8 s login-shell probe timing out. Either one then told a user with a perfectly
-    /// good Homebrew 「这份 GitPic 不是用 Homebrew 装的」 for the rest of the process's life,
-    /// with quitting the app as the only way to ask again.
+    /// **Only a definite answer is kept, and only for the report it came from.** Two separate
+    /// bugs live here, and they pull in the same direction.
+    ///
+    /// `guard upgradePath == nil` cached whatever came back, including the two failures that say
+    /// nothing about this install: `brew list --cask` hitting its 20 s bound (its own doc comment
+    /// names Homebrew's housekeeping as a cause) and the 8 s login-shell probe timing out. Either
+    /// one then told a user with a perfectly good Homebrew 「这份 GitPic 不是用 Homebrew 装的」 for
+    /// the rest of the process's life, with quitting the app as the only way to ask again. That
+    /// is what `retryable` fixed.
+    ///
+    /// But three of the `retryable: false` refusals are computed from the *report* rather than
+    /// from this machine — 「读不懂最新版本号」, 「并不比最新发布 X 旧」 and every
+    /// `AssetChoice.none` — and `update` is reassigned on every check. Caching those for the
+    /// process was the same bug wearing the other hat: a check landing in the window where
+    /// GitHub has not yet computed an asset's digest cached 「GitHub 没有报 … 的校验和」 and no
+    /// later release could ever offer an install again. So `retryable` keeps its narrow meaning
+    /// — "asking the machine again could answer differently" — and the *report* generation
+    /// decides whether the cached route is about the release in front of the user at all.
     func resolveUpgradePath() async {
-        if case .unavailable(_, retryable: false) = upgradePath { return }
-        if case .homebrew = upgradePath { return }
-        if case .selfInstall = upgradePath { return }
+        if upgradePathGeneration == updateGeneration {
+            if case .unavailable(_, retryable: false) = upgradePath { return }
+            if case .homebrew = upgradePath { return }
+            if case .selfInstall = upgradePath { return }
+        }
         // The old guard also did not hold across the `await`, so two sheet appearances could
         // both spawn the probe.
         guard !resolvingUpgradePath else { return }
         // Nothing to resolve without a report: the answer depends on which assets the release
         // published, so it cannot be computed before the check has completed.
-        guard let report = update else { return }
+        guard update != nil else { return }
         resolvingUpgradePath = true
         defer { resolvingUpgradePath = false }
         // Back to `nil` for the duration, because that is what `UpdateSheet` renders as
         // 「正在确认升级方式…」. Leaving the previous retryable failure in place would show the
         // 「不能在这里直接升级」 paragraph while the probe that may contradict it is running.
         upgradePath = nil
-        upgradePath = await Updater.resolve(report: report)
+        // A loop, not one call. A check completing *while* the probe runs moves the generation
+        // on, and `UpdateSheet`'s `.task(id:)` cannot recover from that on its own — it re-enters
+        // and is turned away by the in-flight guard above. So the probe already running is the
+        // one that has to notice, and discard a route it computed from a report the user is no
+        // longer looking at. It converges: `checkForUpdates` allows one check at a time, so each
+        // extra pass is a real new report and not a spin.
+        while true {
+            guard let report = update else { return }
+            let generation = updateGeneration
+            let route = await Updater.resolve(report: report)
+            guard generation == updateGeneration else {
+                Diagnostics.log("update: a newer report landed mid-probe — resolving again")
+                continue
+            }
+            upgradePath = route
+            upgradePathGeneration = generation
+            return
+        }
     }
 
     /// Do whichever upgrade was resolved, and quit.
@@ -989,8 +1097,8 @@ final class AppModel {
                 updateFailure = "启动升级失败：\(error.localizedDescription)"
                 Diagnostics.log("update: handoff failed: \(String(describing: error))")
             }
-        case .selfInstall(let asset, let sha):
-            performSelfInstall(asset: asset, sha256: sha)
+        case .selfInstall(let asset, let sha, let version):
+            performSelfInstall(asset: asset, sha256: sha, version: version)
         case .unavailable, .none:
             return
         }
@@ -1000,10 +1108,24 @@ final class AppModel {
     ///
     /// Everything here can fail while the app is still on screen, which is the point: a failed
     /// download or a digest that does not match costs a message, not the application.
-    private func performSelfInstall(asset: ReleaseAsset, sha256: String) {
-        guard installTask == nil, let version = update?.latest else { return }
+    ///
+    /// The version comes from the route, alongside the asset, rather than from `update?.latest`
+    /// at click time. Those are two different reports whenever a check lands between the sheet
+    /// resolving and the button being pressed, and the mismatch surfaced as far away as
+    /// possible: a full download that verified against the right digest and then died at
+    /// `stage`'s version gate with 「映像里是 0.20.0，不是预期的 0.21.0」 — a message that reads
+    /// like a tampered release.
+    private func performSelfInstall(asset: ReleaseAsset, sha256: String, version: String) {
+        guard installTask == nil else { return }
         updateFailure = nil
+        // Seeded from the release's own `size`, which the sheet has been showing all along, so
+        // there is a total to draw a bar against before a single byte has arrived — and one that
+        // survives a response with no `Content-Length`.
         downloadProgress = SelfUpdate.Progress(received: 0, total: asset.size)
+        installing = false
+        let gate = ProgressGate()
+        progressGate = gate
+        lastProgressTicket = 0
         // `self` strongly, unlike `loginTask` above: this type is a main-actor singleton, and
         // the progress callback arrives on a URLSession queue, so a weak capture inside that
         // `@Sendable` closure is the one thing Swift 6 will not allow here.
@@ -1012,29 +1134,59 @@ final class AppModel {
                 try await Updater.installAndRelaunch(
                     asset: asset, sha256: sha256, version: version,
                     onProgress: { progress in
-                        Task { @MainActor in self.observeInstall(progress) }
+                        // The ticket is taken here, on the URLSession queue, in the order the
+                        // bytes actually arrived. What happens to these `Task`s afterwards is
+                        // then no longer load-bearing.
+                        let ticket = gate.next()
+                        Task { @MainActor in
+                            self.observeInstall(progress, from: gate, ticket: ticket)
+                        }
                     })
-            } catch is CancellationError {
-                Diagnostics.log("update: install cancelled by the user")
-            } catch let failure as SelfUpdate.Failure {
-                self.reportInstallFailure(failure.message, log: String(describing: failure))
-            } catch let failure as SelfUpdate.InstallFailure {
-                self.reportInstallFailure(failure.message, log: String(describing: failure))
             } catch {
-                self.reportInstallFailure(
-                    "安装失败：\((error as NSError).localizedDescription)",
-                    log: String(describing: error))
+                // **取消 is an outcome, not a failure**, and the test is the task's own
+                // cancellation rather than the error's type. Cancellation reaches here as at
+                // least three different things — `CancellationError` from `sha256OfFile` and
+                // from `Updater`'s own checks, `SelfUpdate.Failure.download` when URLSession
+                // reports `.cancelled` first, and a `SelfUpdate.InstallFailure` case for a
+                // staging step that stopped half-way — and every one of them would otherwise
+                // put an orange 「安装失败」 line in front of a user who had just pressed 取消.
+                // `Task.isCancelled` is the one thing all three have in common.
+                if error is CancellationError || Task.isCancelled {
+                    Diagnostics.log("update: install cancelled by the user"
+                                    + " (\(String(describing: error)))")
+                } else if let failure = error as? SelfUpdate.Failure {
+                    self.reportInstallFailure(failure.message, log: String(describing: failure))
+                } else if let failure = error as? SelfUpdate.InstallFailure {
+                    self.reportInstallFailure(failure.message, log: String(describing: failure))
+                } else {
+                    self.reportInstallFailure(
+                        "安装失败：\((error as NSError).localizedDescription)",
+                        log: String(describing: error))
+                }
             }
+            // Either way the sheet goes back to its buttons: nothing was installed, and there is
+            // no half-state left to explain.
             self.finishInstall()
         }
     }
 
-    private func observeInstall(_ progress: SelfUpdate.Progress) {
-        downloadProgress = progress
-        // The mount, the version check, the signature check and the copy all come after the
-        // last byte, and they are not instant — say so rather than leaving a full bar sitting
-        // there looking stuck.
-        if let total = progress.total, progress.received >= total { installing = true }
+    private func observeInstall(_ progress: SelfUpdate.Progress, from gate: ProgressGate,
+                               ticket: UInt64) {
+        // Identity first, then order: a tick from a finished install must not resurrect the
+        // progress row, and a tick that overtook a later one must not rewind the bar.
+        guard gate === progressGate, ticket > lastProgressTicket else { return }
+        lastProgressTicket = ticket
+        // The release's `size` is kept whenever the response does not report one:
+        // `DownloadDelegate` maps `NSURLSessionTransferSizeUnknown` to `nil`, and taking that
+        // `nil` erased the good value seeded above — a chunked or compressed response left the
+        // sheet with no bar and no way to tell the download had finished.
+        let total = progress.total ?? downloadProgress?.total
+        downloadProgress = SelfUpdate.Progress(received: progress.received, total: total)
+        // The hash, the mount, the version check, the signature check and the copy all come
+        // after the last byte, and they are not instant — say so rather than leaving a full bar
+        // sitting there looking stuck. 取消 stays live throughout; every one of those steps
+        // stops when asked.
+        if let total, progress.received >= total { installing = true }
     }
 
     private func reportInstallFailure(_ message: String, log: String) {
@@ -1044,11 +1196,20 @@ final class AppModel {
 
     private func finishInstall() {
         installTask = nil
+        // Closed before the progress row is torn down, so a tick still in flight is dropped by
+        // ``observeInstall(_:from:ticket:)`` rather than putting it back.
+        progressGate = nil
+        lastProgressTicket = 0
         downloadProgress = nil
         installing = false
     }
 
-    /// Stop an in-flight download. The partial file is removed by `SelfUpdate.download`.
+    /// Stop an in-flight download or install.
+    ///
+    /// Honoured at every stage, which is the only thing that makes offering the button honest:
+    /// `SelfUpdate.download` deletes its own partial file, `sha256OfFile` checks every megabyte,
+    /// and `Updater.installAndRelaunch` checks either side of the staging copy and removes the
+    /// staging directory if the answer arrived late.
     func cancelInstall() {
         installTask?.cancel()
     }
