@@ -8,6 +8,7 @@ pub mod doctor;
 pub mod list;
 pub mod repos;
 pub mod skill;
+pub mod update;
 pub mod upload;
 
 use crate::error::{AppError, Result};

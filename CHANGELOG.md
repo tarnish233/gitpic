@@ -6,7 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.19.0] - 2026-08-24
 
-### Launch at login, and a 通用 pane that earns its place
+### Launch at login and update checks
+
+- **Starts itself at login**, optionally: 设置 ▸ 通用 ▸ 开机时自动启动 GitPic. The same switch
+  as 系统设置 ▸ 通用 ▸ 登录项与扩展.
+- The Finder right-click switch moved from 上传 to 通用.
+- Tightened the 图床 copy.
+- New CLI command `gitpic update check`: the latest version and its notes, with `--json`.
+
+<!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file -->
+
+### CLI
+
+- `gitpic update check` reports the latest release of `tarnish233/gitpic` — current version,
+  latest version, and the release notes — with `--json` and `-q`. It reads neither config nor
+  credential: the endpoint is public, so a machine whose config is broken can still ask
+  whether there is a newer version, which may well be where the fix is. The feed is a
+  compile-time constant and cannot be redirected by a config key or an environment variable:
+  this text is rendered inside GitPic's own window, so letting anything else choose its origin
+  would be a way to put attacker-authored prose in front of the user.
+- Versions are compared as three integers, not as strings. `"0.9.0" > "0.10.0"` holds as text,
+  so a string comparison would offer a *downgrade* as an update on the first minor release
+  past `.9`. The historical `app-v*` tags, pre-release suffixes, and anything that is not
+  exactly three numeric components are refused rather than coerced; when a comparison is not
+  possible it is reported as an error instead of answered "up to date", which would hide a
+  real pending update behind a reassuring message.
 
 ### App
 
@@ -40,6 +64,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `kSMErrorJobNotFound`, which `SMAppService.h` documents for redundant calls, are not thrown
   on macOS 26.5: both simply succeed. Since the documentation and the running system disagree,
   the decision rests on the re-read status alone.
+- New `src/release.rs` (version parsing and comparison, the release fetch), with its
+  rules under test.
 - Fixed a flaky test in `src/github.rs`: the stub server did one `read` per connection, but
   TCP is a stream and `reqwest` writes headers and body as separate segments, so a single
   `read` often returned the headers alone. Only

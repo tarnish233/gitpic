@@ -12,6 +12,7 @@ mod link;
 mod naming;
 mod oauth;
 mod output;
+mod release;
 
 use clap::{error::ErrorKind, Parser};
 use cli::{Cli, Command};
@@ -85,6 +86,12 @@ async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
         Some(Command::Repos) => commands::repos::run(mode).await,
         Some(Command::Completion { shell }) => commands::completion::run(*shell).map(|_| 0),
         Some(Command::Skill { action }) => commands::skill::run(action, mode),
+        // Config-free too, and pointedly so: "is there a newer gitpic" is worth answering
+        // on a machine whose config is broken — the fix may well be in the release the
+        // user does not have yet. It reads no credential either; the endpoint is public.
+        Some(Command::Update { action }) => match action {
+            cli::UpdateAction::Check => commands::update::run(mode).await,
+        },
 
         Some(Command::Doctor { .. }) => {
             let cfg = resolve_config(cli)?;

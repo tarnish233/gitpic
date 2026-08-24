@@ -206,6 +206,7 @@ impl Cli {
             | Some(Command::Repos)
             | Some(Command::List { .. })
             | Some(Command::Completion { .. })
+            | Some(Command::Update { .. })
             | Some(Command::Skill { .. }) => None,
         };
         given.filter(|r| !r.trim().is_empty())
@@ -279,6 +280,24 @@ pub enum Command {
         #[command(subcommand)]
         action: SkillAction,
     },
+    /// Check whether a newer gitpic has been released
+    Update {
+        #[command(subcommand)]
+        action: UpdateAction,
+    },
+}
+
+/// A subcommand rather than a bare `gitpic update`, and the shape is a promise.
+///
+/// `gitpic update` on its own would read as "install the update", which this does not do
+/// and — see [`crate::commands::update`] — should not: the app is a Homebrew cask signed
+/// ad-hoc, so there is no signature chain to verify a self-downloaded replacement against.
+/// Requiring the verb keeps the door open for an `apply` later without today's spelling
+/// having promised it.
+#[derive(Debug, Subcommand)]
+pub enum UpdateAction {
+    /// Report the latest release and what changed in it
+    Check,
 }
 
 #[derive(Debug, Subcommand)]
