@@ -166,6 +166,20 @@ struct ReleaseAssetTests {
             .expectedSHA256 == nil)
         #expect(Self.asset(digest: "sha256:").expectedSHA256 == nil)
         #expect(Self.asset(digest: "").expectedSHA256 == nil)
+
+        // Fullwidth hex digits are not hex, though `isHexDigit` says they are (measured:
+        // `"Ａ".allSatisfy(\.isHexDigit) == true`, and `count` is 64 for 64 of them). Such a
+        // digest used to pass validation and then fail the byte comparison, which surfaces a
+        // malformed digest as 「下载内容校验不通过」 — a tampering report for what is really a
+        // field GitHub never sent.
+        #expect(Self.asset(digest: "sha256:\(String(repeating: "Ａ", count: 64))")
+            .expectedSHA256 == nil)
+        #expect(Self.asset(digest: "sha256:\(String(repeating: "０", count: 64))")
+            .expectedSHA256 == nil)
+        // One fullwidth character among 63 ASCII ones: the realistic shape, and the one a
+        // length check alone cannot see.
+        #expect(Self.asset(digest: "sha256:\(String(repeating: "a", count: 63))Ｆ")
+            .expectedSHA256 == nil)
     }
 
     /// The hash the verification actually compares, over a real file on disk.
