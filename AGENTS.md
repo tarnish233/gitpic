@@ -103,6 +103,21 @@ renderer, which a unit test cannot reach. It runs against a temporary
 `XDG_CONFIG_HOME`/`XDG_DATA_HOME` and never touches the network. `cargo test` picks
 it up with everything else.
 
+**The app's update path has its own gate: `scripts/check-self-update.sh`.**
+It installs a deliberately-old build, runs a *real* in-app update against the
+published release, and asserts that the old process exits and a new one comes back
+running the new version from the installed path. No release that changes
+`Updater.swift`, `SelfUpdate*.swift`, `UpdateSheet.swift` or the quit goes out
+until it has passed on a real machine. It exists because 0.20.0 shipped an updater
+that downloaded, verified, staged and handed off correctly and then **did not
+quit**: 243 unit tests, a full dry run and a code review were all green, because
+`GITPIC_APP_DRY_RUN=1` returns before the quit, `GitPicApp` is an executableTarget
+tests cannot import, and AppKit refused the termination ("App termination blocked
+by modal sheet") without consulting our code at all. A real install is the only
+thing that sees that, so a real install is what the gate runs. It touches only
+`~/Applications`, refuses to run if `/Applications/GitPic.app` (this machine's own,
+usually Homebrew's) moves, and needs this terminal to hold an Accessibility grant.
+
 ## Working in Parallel (one agent, one worktree)
 
 Several agents work this repo at once, and `git checkout` is per-*directory* state:

@@ -20,11 +20,19 @@ import GitPicCore
 /// notarisation, which is out of reach for both. See `SelfUpdate` for the full statement.
 ///
 /// **Why neither can happen in this process.** The thing being replaced is the bundle this
-/// code is executing from — measured: renaming a running executable's directory away gets the
-/// process `Killed: 9`. So the work is handed to a detached script that waits for this process
-/// to exit first, and the app quits. Everything else follows: the script cannot report into a
-/// UI that no longer exists, so it logs; and it reopens the app whichever way the install
-/// went, because the alternative is a user left with no GitPic and no explanation.
+/// code is executing from, so the work is handed to a detached script that waits for this
+/// process to exit first, and the app quits. Everything else follows: the script cannot report
+/// into a UI that no longer exists, so it logs; and it reopens the app whichever way the
+/// install went, because the alternative is a user left with no GitPic and no explanation.
+///
+/// This file used to justify that ordering with "measured: renaming a running executable's
+/// directory away gets the process `Killed: 9`". **That measurement was wrong** — re-run twice
+/// against a live install, a `mv` of the bundle directory leaves the process running happily
+/// from the moved-aside copy. The ordering stands on the plainer argument: a half-replaced
+/// bundle is a bundle whose executable, resources and embedded CLI need not be from the same
+/// version, and nothing here can put that back. What the wrong measurement actually cost is
+/// recorded on ``quitForUpdate(_:)`` — it was the excuse for treating the quit as something
+/// that could not fail.
 ///
 /// The two paths differ in what happens *after* the quit, and that is the interesting part.
 /// brew goes to the network with the app already gone, so a stall costs the user everything —
@@ -134,8 +142,8 @@ enum Updater {
     /// step was a bare `withCheckedThrowingContinuation` that nothing could interrupt, so 取消
     /// pressed after the last byte was accepted by the UI, did nothing for up to the summed
     /// hdiutil/codesign/ditto/xattr bounds, and then installed the bundle the user had just
-    /// said no to. Three checks now stand between the download and `NSApp.terminate`, and the
-    /// last of them removes the staging directory so a cancelled install leaves nothing behind.
+    /// said no to. Three checks now stand between the download and the quit, and the last of
+    /// them removes the staging directory so a cancelled install leaves nothing behind.
     static func installAndRelaunch(
         asset: ReleaseAsset,
         sha256: String,
@@ -146,9 +154,9 @@ enum Updater {
                                                 onProgress: onProgress)
         // Removed on every path out of here — a staged copy is what gets installed, so keeping
         // five megabytes of disk image afterwards serves nobody. `defer` alone was not "either
-        // way" as it claimed: the success path ends in `NSApp.terminate`, which calls `exit()`,
-        // so the `defer` never ran and every successful install leaked the image until the next
-        // launch's sweep, ≥24 h later. Hence the explicit removal below as well.
+        // way" as it claimed: the success path ends in `exit()`, so the `defer` never ran and
+        // every successful install leaked the image until the next launch's sweep, ≥24 h later.
+        // Hence the explicit removal below as well.
         defer { try? FileManager.default.removeItem(at: dmg) }
 
         // Cancellation between the hash and the mount. `download` already deletes its own
@@ -197,24 +205,108 @@ enum Updater {
         if dryRun {
             Diagnostics.log("update: DRY RUN — staged at \(staged.bundle.path),"
                             + " script at \(script.path), not quitting")
+            // Everything the real quit does except leaving. `GITPIC_APP_DRY_RUN=1` used to
+            // `return` from here, which is exactly how 0.20.0 shipped an app that would not
+            // quit: not one line below this had ever been executed by a test or by a dry
+            // run, so the only thing that could have caught it was a real install, and no
+            // real install was run before the release. The untestable surface is now the
+            // single `exit` in ``quitForUpdate(_:)`` — see `scripts/check-self-update.sh`
+            // for what covers that.
+            prepareToQuit()
             return
         }
-        // Not `exit()`: `NSApp.terminate` runs the normal shutdown, which is what lets
-        // `windowWillClose` give back the activation policy and stop an in-flight login.
-        NSApp.terminate(nil)
+        quitForUpdate("the install script is waiting for this pid to exit")
+    }
+
+    /// The one piece of shutdown that outlives this process if it is skipped.
+    ///
+    /// `gitpic auth login` is a **child process**: it polls GitHub until the device code
+    /// expires a quarter of an hour later, and `exit()` reaps nothing. So a user who left a
+    /// login half-finished and then took an update would have had it keep polling on behalf of
+    /// a bundle that no longer exists. ``AppModel/cancelLogin()`` cancels the task whose
+    /// `AsyncStream` `onTermination` terminates that child, and is a no-op when no login is
+    /// running.
+    ///
+    /// Honest about how far that is verified: a device-flow login cannot be driven unattended,
+    /// so this half is reasoned rather than measured. It is not weaker than what it replaces —
+    /// `NSApp.terminate` reached this same call through `windowWillClose`, which AppKit only
+    /// runs *after* `applicationWillTerminate` and immediately before its own `exit()`, so the
+    /// cancellation got no more of a turn there than it gets here.
+    ///
+    /// The activation policy is deliberately **not** touched. `windowWillClose` also calls
+    /// `AppActivationPolicy.leave()`, and the comment this fix replaced treated that as
+    /// cleanup worth keeping the normal shutdown for — it is not. An activation policy is
+    /// per-process state that dies with the process, and `Main.main()` sets `.accessory`
+    /// before `run()` on every launch, so the bundle the script reopens comes back a
+    /// menu-bar app either way. `scripts/check-self-update.sh` asserts that rather than
+    /// leaving it as an argument.
+    private static func prepareToQuit() {
+        AppModel.shared.cancelLogin()
+    }
+
+    /// Leave now, so the staged bundle — or brew — can replace the one this is running from.
+    ///
+    /// **`exit()` and not `NSApp.terminate`, and that is a measurement rather than a
+    /// preference.** `NSApp.terminate(nil)` is what 0.20.0 shipped on both update paths, and
+    /// it never quit. AppKit aborts termination *before* it asks the delegate anything when
+    /// any of the app's windows has an attached sheet, and says so in its own log
+    /// (`log show --predicate 'process == "GitPic"' --debug --info`):
+    ///
+    ///     [AppKit:Application] terminate:
+    ///     [AppKit:Application] Attempting sudden termination (1st attempt)
+    ///     [AppKit:Application] Checking whether app should terminate
+    ///     [AppKit:Application] App termination blocked by modal sheet
+    ///     [AppKit:Application] Termination aborted
+    ///
+    /// Reproduced on 0.20.0's own code with no download at all: open 设置, 检查更新 until the
+    /// update sheet is up, then 退出 GitPic. The process survives, and every later quit is
+    /// refused the same way for as long as the sheet is attached.
+    ///
+    /// **Three things follow, and each one closes off a fix that looks plausible.**
+    ///
+    /// - Implementing `applicationShouldTerminate` and returning `.terminateNow` would have
+    ///   changed nothing: it is never consulted. Measured — a probe build logged nothing from
+    ///   it on the failing run, while the same probe fired on the succeeding ones.
+    /// - The activation policy is not the culprit either. Measured on the same build: with the
+    ///   settings window open and no sheet, the app is `.regular` and `windowWillClose` still
+    ///   calls `setActivationPolicy(.accessory)` *inside* the shutdown, and the process exits
+    ///   normally. Only the sheet refuses.
+    /// - Dismissing the sheet first and then terminating would work only if the dismissal
+    ///   completed before `terminate:` ran, which is a SwiftUI animation this code cannot
+    ///   wait on — and it would leave the next sheet anyone adds to reintroduce the bug
+    ///   silently. This path *always* has a sheet up: the install is started from a button
+    ///   inside the update sheet, and that sheet is what draws the progress bar.
+    ///
+    /// `Never` on purpose, so that the compiler holds the invariant that failed rather than a
+    /// comment: 0.20.0 logged 「quitting so the bundle can be replaced」 and then went back to
+    /// serving events. Nothing may return from here.
+    private static func quitForUpdate(_ reason: String) -> Never {
+        prepareToQuit()
+        Diagnostics.log("update: quitting now — \(reason)")
+        // 0 because the handoff succeeded. Nothing reads the status: the script waits for the
+        // pid to disappear, not for a code.
+        exit(0)
     }
 
     /// Quit, upgrade, reopen.
     ///
     /// Returns only if the handoff itself failed; on success this process is on its way
-    /// out. The caller has already confirmed with the user — see `UpdateSheet` — because
-    /// this closes their window and takes the menu-bar icon away for as long as the
-    /// download takes.
+    /// out — see ``quitForUpdate(_:)``, which is `Never` for exactly that reason. The caller
+    /// has already confirmed with the user — see `UpdateSheet` — because this closes their
+    /// window and takes the menu-bar icon away for as long as the download takes.
+    ///
+    /// The quit here had the same defect as the install path's and for the same reason: it is
+    /// reached from a button inside an alert on the update sheet, so `NSApp.terminate` was
+    /// refused here too. Untested against a real Homebrew-managed bundle, because this machine
+    /// has none at a path the app runs from; the code path is shared, and the one thing that
+    /// differs — the script — is the same shape.
     static func upgradeAndRelaunch(brew: URL) throws {
         let script = try writeScript(brew: brew)
         if dryRun {
             Diagnostics.log("update: DRY RUN — script written to \(script.path),"
                             + " not spawned, not quitting")
+            // The same reason as the install path: everything but the `exit`.
+            prepareToQuit()
             return
         }
         // Detached on purpose. The child is reparented when this process exits and keeps
@@ -242,11 +334,8 @@ enum Updater {
         task.environment = env
         try task.run()
 
-        Diagnostics.log("update: handed off to \(script.path) (pid \(task.processIdentifier));"
-                        + " quitting so brew can replace the bundle")
-        // Not `exit()`: `NSApp.terminate` runs the normal shutdown, which is what lets
-        // `windowWillClose` give back the activation policy and stop an in-flight login.
-        NSApp.terminate(nil)
+        Diagnostics.log("update: handed off to \(script.path) (pid \(task.processIdentifier))")
+        quitForUpdate("brew will replace the bundle once this pid is gone")
     }
 
     /// The script, written to a temporary file rather than passed as `bash -c`.
@@ -269,18 +358,19 @@ enum Updater {
         echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) upgrade \(Self.caskName) ==="
 
         # Wait for GitPic to exit so brew is not replacing a running bundle. Bounded at
-        # 60 s: this script has already been handed off and the app has already been told
-        # to quit, so an app still alive after a minute is wedged mid-shutdown and nothing
-        # here can unwedge it.
+        # 60 s: the app calls `exit(0)` immediately after spawning this script — see
+        # `Updater.quitForUpdate` — so the wait is normally a fraction of a second, and an
+        # app still here after a minute is in a state nothing in this script can mend.
         #
-        # After the bound brew is allowed to try anyway, and the honest reason is not that
-        # it "refuses safely" — measured in this very feature, moving a running bundle's
-        # directory aside gets the process `Killed: 9`, and brew's own install does the
-        # same kind of move. The reason is that the alternative is worse: bailing out here
-        # leaves a wedged .accessory app with no icon, no upgrade, and no explanation,
-        # whereas a killed process that was already quitting loses nothing and the reopen
-        # below still runs. A brew that cannot complete the move reports non-zero and the
-        # old bundle stays.
+        # After the bound brew is allowed to try anyway. The reason is *not* that a
+        # surviving process is stopped by the move: this file used to claim that, citing
+        # `Killed: 9`, and the claim is false — re-measured twice, a `mv` of the bundle
+        # directory leaves the process running from the moved-aside copy, which is how
+        # 0.20.0's failed quit turned into `open -a` merely reactivating the old build.
+        # The reason is that the alternative is worse: bailing out here leaves an
+        # .accessory app with no upgrade and no explanation, whereas trying gets the user
+        # the new version and a log line either way. A brew that cannot complete the move
+        # reports non-zero and the old bundle stays.
         for _ in $(seq 1 120); do
           kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null || break
           sleep 0.5
