@@ -10,6 +10,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Starts itself at login**, optionally: 设置 ▸ 通用 ▸ 开机时自动启动 GitPic. The same switch
   as 系统设置 ▸ 通用 ▸ 登录项与扩展.
+- **Checks for updates**, daily on its own or whenever you ask. A new version is presented
+  with its release notes and can be installed from there.
 - The Finder right-click switch moved from 上传 to 通用.
 - Tightened the 图床 copy.
 - New CLI command `gitpic update check`: the latest version and its notes, with `--json`.
@@ -53,6 +55,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   names the keys waiting to be written, and the one case that genuinely needs the instruction
   (nothing configured yet) still says so.
 
+- 设置 ▸ 通用 ▸ 更新 carries the `每天自动检查更新` switch, a status line, and 检查更新.
+  The status line has four states, and "this build is newer than the latest release" is the
+  one that earns its place: every unreleased build of this repository is in it, and calling
+  that "up to date" would be defensible and actively confusing.
+- The status-item menu carries it too. An `.accessory` app has no Dock icon and no app menu,
+  so the place a Mac user looks for "Check for Updates…" does not exist here. The item becomes
+  「有新版本 x.y.z…」 once one is found, so the menu keeps saying so long after a notification
+  banner has been dismissed.
+- The automatic check runs once a day, and due-ness is only evaluated at launch. The cost,
+  stated: a Mac left logged in for a week checks once, when it started. A repeating timer
+  would be the thorough version; the price is a background request on a cadence nobody is
+  watching, and the settings pane checks again whenever it is opened.
+- An automatic check that finds an update posts a notification; only a manual one raises the
+  sheet. A dialog nobody asked for over whatever the window was being used for is an
+  interruption, and the window is usually shut when the daily check lands anyway. 设置 ▸ 通用
+  keeps a 「查看更新内容」 button for as long as the update stands, so nothing is lost.
+- Two structural trims to the notes shown in that sheet, both found by looking at the
+  rendered result: the leading `### <theme>` line is what `release.yml` publishes as the
+  Release *title*, already shown above the body, so keeping it printed the same sentence
+  twice; and the trailing `## `-level sections are install instructions for someone who
+  downloaded the DMG (drag to Applications, clear the quarantine flag), which is of no use to
+  a reader who already has the app open.
+- 立即更新 runs `brew upgrade --cask gitpic` on the user's behalf. The app is a Homebrew cask,
+  signed ad-hoc and not notarised, so a Sparkle-style updater would have no signature chain to
+  verify a download against and would fight Homebrew's manifest. Homebrew cannot replace a
+  running bundle, so the sequence is: write a script, quit, let the script wait for the exit,
+  upgrade, reopen. It reopens on failure too — the old bundle is still there — and logs to
+  `~/Library/Logs/GitPic-update.log`.
+- 立即更新 appears only once brew is confirmed to be managing this app. Finding `brew` says
+  nothing about where this copy came from: a drag-installed app on a machine that also has
+  Homebrew is entirely ordinary, and `brew upgrade --cask` there fails. In that case the sheet
+  offers the release page and the command to run instead of a button that cannot work.
+- Under `GITPIC_APP_DRY_RUN=1`, 立即更新 writes the script and stops — nothing is spawned and
+  the app does not quit. Replacing `/Applications/GitPic.app` is at least as consequential as
+  a commit to the image host, and it is the one action in this app that cannot be undone by
+  deleting something afterwards.
+
 ### Internal
 
 - `LaunchAtLoginState` (`GitPicCore`) owns the status mapping and the copy, so both are
@@ -64,8 +103,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `kSMErrorJobNotFound`, which `SMAppService.h` documents for redundant calls, are not thrown
   on macOS 26.5: both simply succeed. Since the documentation and the running system disagree,
   the decision rests on the re-read status alone.
-- New `src/release.rs` (version parsing and comparison, the release fetch), with its
-  rules under test.
+- New `src/release.rs` (version parsing and comparison, the release fetch) and
+  `GitPicCore/UpdateCheck.swift` (the `--json` decode, the daily due-ness rule, the notes
+  trim), with the rules on both sides under test. A last-check timestamp in the *future*
+  counts as due: a machine whose clock ran ahead and was corrected, or one restored from a
+  backup, holds one, and comparing the signed difference would stop it checking until real
+  time caught up.
 - Fixed a flaky test in `src/github.rs`: the stub server did one `read` per connection, but
   TCP is a stream and `reqwest` writes headers and body as separate segments, so a single
   `read` often returned the headers alone. Only

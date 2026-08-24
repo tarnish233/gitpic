@@ -87,15 +87,20 @@ final class AppModel {
         savedConfig.map(LinkForm.init(config:)) ?? LinkForm()
     }
 
-    /// Called after `savedConfig` changes, so the status-item menu can redraw the
-    /// checkmarks it derives from it.
+    /// Called when something the status-item menu is built from has changed, so it can be
+    /// redrawn.
     ///
     /// A callback rather than the menu observing the model: `rebuildMenu()` replaces
     /// `statusItem.menu` wholesale, which is `AppDelegate`'s business and must not
     /// happen from inside an `@Observable` read. Without it, changing the form in the
     /// window left the menu displaying the previous choice until the next upload
     /// rebuilt it — measured, and the reason this exists.
-    var onConfigChange: (() -> Void)?
+    ///
+    /// Named `onConfigChange` while the config was the only thing the menu derived from.
+    /// The update check is the second: the menu's last item becomes 「有新版本 x.y.z…」 when
+    /// one is found, and a hook named after the config would have had to be called for
+    /// something that is not a config change to keep that label honest.
+    var onMenuNeedsRebuild: (() -> Void)?
 
     var busy = false
     var lastDoctor: DoctorReport?
@@ -535,7 +540,7 @@ final class AppModel {
             guard skillTargetsGeneration == generation else { return }
             skillTargets = []
             skillTargetsLoaded = true
-            skillFailure = Self.skillError(error)
+            skillFailure = Self.cliMessage(error)
             Diagnostics.log("skill targets failed: \(String(describing: error))")
         }
     }
@@ -579,14 +584,21 @@ final class AppModel {
                        body: "已在 \(changed) 个位置写入 gitpic skill v\(report.version)。")
             }
         } catch {
-            let message = Self.skillError(error)
+            let message = Self.cliMessage(error)
             skillFailure = message
             Diagnostics.log("skill install failed: \(String(describing: error))")
             notify(title: "Skill 安装失败", body: message)
         }
     }
 
-    private static func skillError(_ error: Error) -> String {
+    /// A `RunFailure` as a line the user can read: the CLI's own code and message when it
+    /// gave one, the raw error otherwise.
+    ///
+    /// Named for what it does rather than for its first caller. It was `skillError` while
+    /// the skill pane was the only thing that needed it; the update check needs exactly the
+    /// same rendering, and a second copy of four lines whose whole point is *one* place
+    /// deciding how a CLI failure reads would have been the wrong answer.
+    private static func cliMessage(_ error: Error) -> String {
         if case let RunFailure.cli(_, body) = error {
             return "\(body.code)：\(body.message)"
         }
@@ -715,6 +727,151 @@ final class AppModel {
         return "\(ns.localizedDescription) \(hint)"
     }
 
+    // MARK: - Checking for updates
+
+    /// The last completed check's answer, or `nil` if none has completed this launch.
+    private(set) var update: UpdateReport?
+
+    /// Why the last check could not complete.
+    ///
+    /// Shown rather than swallowed: "已是最新" for a check that never reached GitHub is the
+    /// one answer that hides a pending update behind a reassuring message. A failed
+    /// *automatic* check is still recorded here, but ``updateSheetPresented`` stays down —
+    /// a banner about a background failure the user did not ask for is noise.
+    private(set) var updateFailure: String?
+
+    /// A check is in flight. Separate from ``busy``, which is about the CLI calls the
+    /// config panes make: an update check must not grey out 保存 two panes away.
+    private(set) var updateChecking = false
+
+    /// Whether the update sheet is on screen. Raised only by a check that found something
+    /// — a manual check that finds nothing reports in the pane, not in a dialog nobody
+    /// asked for.
+    var updateSheetPresented = false
+
+    /// Whether brew can do the upgrade, once asked. `nil` until the sheet asks.
+    private(set) var upgradePath: Updater.Availability?
+
+    /// When the last check completed, automatic or manual.
+    ///
+    /// **`UserDefaults`, not `config.toml`**, and the same goes for ``autoCheckUpdates``.
+    /// The config file is the CLI's, and `gitpic` itself never checks on a schedule — it has
+    /// no daemon to do it from. A key there that only the app honoured would appear in
+    /// `gitpic config get` as a setting the CLI ignores, which is the "accepted, then
+    /// ignored" shape this project deleted from the upload pane's link settings. This is app
+    /// behaviour, so it lives where app behaviour lives.
+    ///
+    /// A **stored** property mirrored to `UserDefaults` rather than a computed one over it,
+    /// because `@Observable` only tracks stored properties — a computed getter reading
+    /// `UserDefaults` would return the right value and never redraw the view that showed it.
+    private(set) var lastUpdateCheck: Date? = AppModel.defaults
+        .object(forKey: AppModel.lastCheckKey) as? Date {
+        didSet { Self.defaults.set(lastUpdateCheck, forKey: Self.lastCheckKey) }
+    }
+
+    /// Whether to check once a day on our own.
+    ///
+    /// Defaults to **on** for a missing key, which is what a fresh install has. An update
+    /// mechanism that ships switched off helps nobody who does not go looking for it, and
+    /// the check is one unauthenticated GET a day against a public endpoint — it sends
+    /// nothing about the user and reads nothing but the release feed. The switch is here for
+    /// anyone who would still rather it did not.
+    var autoCheckUpdates: Bool = AppModel.defaults
+        .object(forKey: AppModel.autoCheckKey) as? Bool ?? true {
+        didSet {
+            Self.defaults.set(autoCheckUpdates, forKey: Self.autoCheckKey)
+            // Switching it on is itself a reason to look: the user just asked for this, and
+            // making them wait up to a day to see it work would read as broken.
+            if autoCheckUpdates { Task { await checkForUpdates(manual: false) } }
+        }
+    }
+
+    fileprivate static let defaults = UserDefaults.standard
+    fileprivate static let lastCheckKey = "update.lastCheck"
+    fileprivate static let autoCheckKey = "update.autoCheck"
+
+    /// Run the daily check if one is due. Called at launch and whenever the settings
+    /// window is shown.
+    ///
+    /// The due-or-not rule is in ``UpdateSchedule/isDue(lastChecked:now:interval:)`` so it
+    /// can be tested; what is left here is the decision to ask at all.
+    func checkForUpdatesIfDue() async {
+        guard autoCheckUpdates,
+              UpdateSchedule.isDue(lastChecked: lastUpdateCheck, now: Date())
+        else { return }
+        await checkForUpdates(manual: false)
+    }
+
+    /// Ask the CLI what the latest release is.
+    ///
+    /// `manual` decides only how loudly the result is reported: a manual check owes the
+    /// user an answer either way, while an automatic one speaks up only when there is
+    /// something to say.
+    func checkForUpdates(manual: Bool) async {
+        // Same shape as `loadSkillTargets`: a `nil` runner while discovery is still
+        // running is not a failure to report, and only `.missing` is.
+        guard let runner else {
+            if manual, toolState == .missing {
+                updateFailure = "找不到 gitpic 可执行文件，请重新安装 GitPic。"
+            }
+            return
+        }
+        // One check at a time. Unlike the config reads this is not idempotent in the way
+        // that matters — two in flight would both stamp `lastUpdateCheck` and both may
+        // raise the sheet.
+        guard !updateChecking else { return }
+        updateChecking = true
+        defer { updateChecking = false }
+        updateFailure = nil
+        do {
+            let report = try await runner.updateCheck()
+            update = report
+            // Stamped only on a completed check, so a week offline does not silently
+            // count as a week of checking.
+            lastUpdateCheck = Date()
+            Diagnostics.log("update check: current=\(report.current) latest=\(report.latest)"
+                            + " available=\(report.updateAvailable) ahead=\(report.ahead)")
+            // The status item's last row is 「检查更新」 or 「有新版本 x.y.z…」 depending on
+            // this answer, and it is built once and cached — so it has to be told.
+            onMenuNeedsRebuild?()
+            guard report.updateAvailable else { return }
+            if manual {
+                // The user asked, so answer where they are looking.
+                updateSheetPresented = true
+            } else {
+                // A daily check must not throw a sheet in front of whatever the user was
+                // doing — and the window is usually shut when one lands anyway, where a
+                // sheet would be a report nobody sees (the argument `notify` makes about
+                // upload outcomes). The banner tells them; 设置 ▸ 通用 keeps a
+                // 「查看更新内容」 button for as long as the update stands, so nothing is
+                // lost by not interrupting.
+                notify(title: "GitPic \(report.latest) 可以更新了",
+                       body: "当前 \(report.current)。打开设置 ▸ 通用 查看更新内容。")
+            }
+        } catch {
+            updateFailure = Self.cliMessage(error)
+            Diagnostics.log("update check failed: \(String(describing: error))")
+        }
+    }
+
+    /// Ask whether brew can perform the upgrade. Called when the sheet appears.
+    func resolveUpgradePath() async {
+        guard upgradePath == nil else { return }
+        upgradePath = await Updater.availability()
+    }
+
+    /// Hand off to brew and quit. Only reachable when ``upgradePath`` is `.ready`.
+    func performUpgrade() {
+        guard case .ready(let brew) = upgradePath else { return }
+        do {
+            try Updater.upgradeAndRelaunch(brew: brew)
+        } catch {
+            // The handoff itself failed, so this process is still alive to say so.
+            updateFailure = "启动升级失败：\(error.localizedDescription)"
+            Diagnostics.log("update: handoff failed: \(String(describing: error))")
+        }
+    }
+
     // MARK: - Telling the user what happened
 
     /// Post an outcome to Notification Center, and log it.
@@ -801,7 +958,7 @@ final class AppModel {
             // A read that succeeded supersedes the last failure, including one this
             // read just disproved.
             configFailure = nil
-            onConfigChange?()
+            onMenuNeedsRebuild?()
             // What the form is now showing, and whether it came from the file or from
             // an edit the reconcile kept. A form that reads back empty while the file
             // is fine — which is how the late-runner bug looked — is otherwise
@@ -821,7 +978,7 @@ final class AppModel {
         // (root-owned after a `sudo` run is the usual way) set `configFailure`, and
         // both panes render that by replacing the entire editable form with 「读取配置
         // 失败」, so a bad history file made every setting uneditable and named the
-        // wrong file while doing it. It also skipped `onConfigChange?()`, leaving the
+        // wrong file while doing it. It also skipped `onMenuNeedsRebuild?()`, leaving the
         // status-item menu on stale checkmarks. A history that will not load costs
         // the history list and nothing else.
         do {

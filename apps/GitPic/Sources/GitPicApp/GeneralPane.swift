@@ -54,6 +54,46 @@ struct GeneralPane: View {
                 }
             }
 
+            Section("更新") {
+                CaptionedToggle(
+                    label: "每天自动检查更新",
+                    caption: "只读取 GitHub 上的发布信息，不会上传任何内容。",
+                    isOn: Binding(get: { model.autoCheckUpdates },
+                                  set: { model.autoCheckUpdates = $0 }))
+
+                LabeledContent("状态") {
+                    if model.updateChecking {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("正在检查…").foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text(statusText).foregroundStyle(.secondary)
+                    }
+                }
+
+                if let failure = model.updateFailure {
+                    Label(failure, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                }
+
+                HStack(spacing: 8) {
+                    Button("检查更新") {
+                        Task { await model.checkForUpdates(manual: true) }
+                    }
+                    .disabled(model.updateChecking || model.toolState != .ready)
+                    // Present only while an update actually stands. This is the route to
+                    // the notes for one the *daily* check found: that check reports through
+                    // Notification Center rather than raising a sheet over whatever the
+                    // window was being used for, so without this button the banner would be
+                    // the only mention of it.
+                    if model.update?.updateAvailable == true {
+                        Button("查看更新内容") { model.updateSheetPresented = true }
+                    }
+                }
+                .controlSize(.small)
+            }
+
             Section("系统集成") {
                 // The menu title comes from the running bundle's `NSServices` entry, not
                 // from a constant here — `pbs` keys the on/off state by that title, so
@@ -75,5 +115,53 @@ struct GeneralPane: View {
             model.refreshLaunchAtLogin()
             model.refreshFinderService()
         }
+        // Only when one is due. `.task` rather than `.onAppear` so it can await, and
+        // due-ness rather than every appearance so switching panes back and forth is not a
+        // request per visit — see `UpdateSchedule`.
+        .task { await model.checkForUpdatesIfDue() }
+        .sheet(isPresented: $model.updateSheetPresented) {
+            // `report` is passed rather than read inside, so the sheet cannot render a
+            // half-state: nothing raises the flag without an answer in hand, and if the
+            // answer somehow went missing there is nothing worth showing.
+            if let report = model.update {
+                UpdateSheet(model: model, report: report)
+            }
+        }
     }
+
+    /// One line for "where does the update situation stand".
+    ///
+    /// Four states, and the third is the one worth having: a build *newer* than the latest
+    /// release. Every unreleased build of this repository is in it, and calling that
+    /// 「已是最新」 would be technically defensible and actively confusing.
+    ///
+    /// `model.update` is not persisted across launches while `lastUpdateCheck` is, so after
+    /// a relaunch this says when the last check happened without claiming a verdict it no
+    /// longer holds. Storing the verdict too would let it show 「已是最新」 for a release
+    /// that came out overnight, which is the one thing this line must not do.
+    private var statusText: String {
+        if let update = model.update {
+            if update.updateAvailable { return "有新版本 \(update.latest)" }
+            if update.ahead {
+                return "当前 \(update.current) 比最新发布 \(update.latest) 更新（未发布版本）"
+            }
+            return "已是最新 \(update.current)"
+        }
+        if let last = model.lastUpdateCheck {
+            return "上次检查 \(Self.stamp.string(from: last))"
+        }
+        return "还没检查过"
+    }
+
+    /// "今天 10:42" — relative day plus a short time.
+    ///
+    /// `static`, because a `DateFormatter` built in a view body is rebuilt on every redraw
+    /// and it is one of the more expensive objects in Foundation to construct.
+    private static let stamp: DateFormatter = {
+        let f = DateFormatter()
+        f.doesRelativeDateFormatting = true
+        f.dateStyle = .short
+        f.timeStyle = .short
+        return f
+    }()
 }
