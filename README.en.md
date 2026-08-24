@@ -32,8 +32,8 @@ notifications. **You can also select images in Finder and right-click 「GitPic
 test), 上传 (path template, link form, compression), 历史 (history, with thumbnails and
 one-click copy), Agent (per-agent skill installation), and 关于.
 
-To have GitPic waiting in the menu bar from the moment you log in, switch on 「开机时自动启动
-GitPic」 on the 通用 pane. It writes macOS's own login-item registration, so the same switch
+To have GitPic waiting in the menu bar from the moment you log in, switch on 「开机自启动」 on
+the 通用 pane. It writes macOS's own login-item registration, so the same switch
 appears — and can be turned off — in 系统设置 ▸ 通用 ▸ 登录项与扩展; the two are never two
 separate settings.
 

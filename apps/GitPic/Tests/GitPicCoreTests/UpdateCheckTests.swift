@@ -190,7 +190,10 @@ struct UpdateCheckTests {
 
     @Test("the automatic interval is a day")
     func intervalIsDaily() {
-        // Pinned because the switch's label promises it: 「每天自动检查更新」.
+        // Pinned because the 通用 pane promises it. The switch itself is now just
+        // 「自动更新」, so the promise moved into its caption — 「每天检查一次」 — which is
+        // the only place the app still states the cadence. That makes this the test that
+        // keeps the caption honest.
         #expect(UpdateSchedule.interval == 24 * 60 * 60)
     }
 
