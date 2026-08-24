@@ -166,6 +166,20 @@ struct ReleaseAssetTests {
             .expectedSHA256 == nil)
         #expect(Self.asset(digest: "sha256:").expectedSHA256 == nil)
         #expect(Self.asset(digest: "").expectedSHA256 == nil)
+
+        // Fullwidth hex digits are not hex, though `isHexDigit` says they are (measured:
+        // `"Ａ".allSatisfy(\.isHexDigit) == true`, and `count` is 64 for 64 of them). Such a
+        // digest used to pass validation and then fail the byte comparison, which surfaces a
+        // malformed digest as 「下载内容校验不通过」 — a tampering report for what is really a
+        // field GitHub never sent.
+        #expect(Self.asset(digest: "sha256:\(String(repeating: "Ａ", count: 64))")
+            .expectedSHA256 == nil)
+        #expect(Self.asset(digest: "sha256:\(String(repeating: "０", count: 64))")
+            .expectedSHA256 == nil)
+        // One fullwidth character among 63 ASCII ones: the realistic shape, and the one a
+        // length check alone cannot see.
+        #expect(Self.asset(digest: "sha256:\(String(repeating: "a", count: 63))Ｆ")
+            .expectedSHA256 == nil)
     }
 
     /// The hash the verification actually compares, over a real file on disk.
@@ -313,6 +327,131 @@ struct ReleaseAssetTests {
         #expect(!reports.isEmpty, "no progress was reported")
         #expect(reports.allSatisfy { $0.received <= size })
         #expect(reports.last?.received == size)
+    }
+
+    /// **The regression test for the crash.** Cancelling before the download starts must throw,
+    /// not abort the process.
+    ///
+    /// The task is already cancelled when `download` is entered, which is the state that used
+    /// to be fatal: `withTaskCancellationHandler` runs `onCancel` *before* the body in that
+    /// case (measured ordering `["onCancel", "body"]`), so the session was invalidated and
+    /// then a download task was created in it — `NSGenericException`, "Task created in a
+    /// session that has been invalidated", exit 134. An ObjC exception, so no `#expect(throws:)`
+    /// could ever have caught it; the shape of the failure here is the whole test process
+    /// dying, which is why this is worth pinning.
+    ///
+    /// The trigger is real: `AppModel.performSelfInstall` paints the 取消 button synchronously
+    /// before its first `await`, and GitPic is `LSUIElement` — no window, no menu-bar icon —
+    /// so the user saw the app vanish with nothing to report.
+    @Test("cancelling before the download starts throws instead of aborting the process")
+    func cancellingBeforeTheDownloadStarts() async throws {
+        let source = try Self.sourceFile(contents: "bytes nobody is going to wait for")
+        defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
+        let sha = try SelfUpdate.sha256OfFile(at: source)
+        let before = Self.leftoverCount()
+
+        let task = Task {
+            // Enter `download` already cancelled. `Task.sleep` throws the moment cancellation
+            // lands, so this loop is bounded rather than a spin — and if `cancel()` wins the
+            // race to get here first, it does not run at all.
+            while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(1)) }
+            return try await SelfUpdate.download(
+                asset: Self.asset(url: source, digest: "sha256:\(sha)"),
+                sha256: sha, onProgress: { _ in })
+        }
+        task.cancel()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(Self.leftoverCount() == before,
+                "a cancelled download was left in the temporary directory")
+    }
+
+    /// The invariant behind the crash above, pinned where a refactor will trip over it: once
+    /// the gate has been cancelled it must never create a task in that session again.
+    ///
+    /// If the guard is removed, this does not report a failed expectation — the process aborts
+    /// with `NSGenericException` from CFNetwork, because the exception is an ObjC one. That is
+    /// the loudest failure available, and it is the point of testing it here rather than only
+    /// through `download`: the end-to-end test depends on `withTaskCancellationHandler`'s
+    /// ordering, and this one does not depend on anything.
+    @Test("no download task is created in a session cancellation has invalidated")
+    func theGateRefusesAfterCancelling() {
+        let session = URLSession(configuration: .ephemeral)
+        let gate = SessionGate(session)
+        let url = URL(string: "https://example.invalid/GitPic.dmg")!
+
+        gate.cancel()
+        #expect(gate.start(url) == false, "a task must not be created in an invalid session")
+        // Idempotent: `fetch` cancels from its `defer` as well as from the cancellation
+        // handler, so the second call has to be a no-op rather than a second invalidation.
+        gate.cancel()
+        #expect(gate.start(url) == false)
+    }
+
+    /// The first half of the handshake to arrive waits for the second — **in either order**.
+    ///
+    /// Attach-first is the order the shipping code produced before cancellation could settle
+    /// from outside the delegate callbacks. It is still the common one, so it is pinned too.
+    @Test("an outcome that arrives after the waiter is delivered to it")
+    func theWaiterAttachesFirst() async throws {
+        let delegate = Self.delegate()
+        let landed = URL(fileURLWithPath: "/tmp/gitpic-test-landed.dmg")
+
+        let got = try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<URL, Error>) in
+            delegate.attach(continuation)
+            delegate.settle(.success(landed))
+            // Both `didFinishDownloadingTo` and `didCompleteWithError` fire for a successful
+            // download, so a second outcome is the normal path. It must be ignored: a
+            // `CheckedContinuation` resumed twice traps, so a regression here crashes the run
+            // rather than failing an expectation.
+            delegate.settle(.failure(CancellationError()))
+        }
+        #expect(got == landed)
+    }
+
+    /// **The other order, which used to lose the outcome entirely.** `settle` returned early
+    /// when no continuation was stored yet *without* marking itself settled, so the result was
+    /// dropped and the continuation that attached afterwards was never resumed — a download
+    /// stuck forever, with the 取消 button already gone. Worse than the crash, because nothing
+    /// reports it.
+    @Test("an outcome that arrives before the waiter is parked, not dropped")
+    func theOutcomeArrivesFirst() async throws {
+        let delegate = Self.delegate()
+        let landed = URL(fileURLWithPath: "/tmp/gitpic-test-landed.dmg")
+
+        delegate.settle(.success(landed))
+        // And the first outcome wins: this one arrives while the first is still parked.
+        delegate.settle(.failure(SelfUpdate.Failure.download("second outcome")))
+
+        let got = try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<URL, Error>) in
+            delegate.attach(continuation)
+        }
+        #expect(got == landed)
+    }
+
+    /// A failure parked before the waiter arrives reaches it as that failure — cancellation in
+    /// particular, since that is the one `fetch` settles from outside the callbacks and the one
+    /// `AppModel` catches to log 「install cancelled by the user」 rather than showing an error.
+    @Test("a parked failure reaches the waiter as itself")
+    func theParkedFailureIsPreserved() async throws {
+        let delegate = Self.delegate()
+        delegate.settle(.failure(CancellationError()))
+
+        await #expect(throws: CancellationError.self) {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<URL, Error>) in
+                delegate.attach(continuation)
+            }
+        }
+    }
+
+    /// A delegate with a destination that is never created: these tests exercise only the
+    /// handshake, so no callback that would move a file is ever invoked.
+    private static func delegate() -> DownloadDelegate {
+        DownloadDelegate(destination: FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitpic-delegate-\(UUID().uuidString).dmg"),
+                         onProgress: { _ in })
     }
 
     /// A file of `contents` in its own directory, so the caller can delete the directory.
