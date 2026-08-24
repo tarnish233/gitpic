@@ -128,6 +128,22 @@ struct SettingsWindowView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 680, minHeight: 480)
+        // Here rather than inside 通用, which is where it was. `detail` mounts exactly one
+        // pane and destroys it on a tab switch, so a check that completed after the user had
+        // moved to 图床 raised the flag with nothing attached to present it — the answer was
+        // lost, and the flag then stayed up until the next visit to 通用, which opened a
+        // sheet nobody had asked for about whatever `update` held by then. This scope lives
+        // as long as the window, so neither can happen. The remaining case — no window on
+        // screen at all — is `AppModel.presentUpdateSheet()`'s to refuse.
+        .sheet(isPresented: $model.updateSheetPresented) {
+            // `report` is read here rather than passed in from the raising site, but the
+            // sheet still cannot render a half-state: nothing raises the flag without an
+            // answer in hand, and if the answer somehow went missing there is nothing worth
+            // showing.
+            if let report = model.update {
+                UpdateSheet(model: model, report: report)
+            }
+        }
         // A toolbar is what forces NSToolbar to exist, which the liquid-glass
         // title bar treatment depends on. It is also where 保存 lives, now that the
         // window has no bottom bar to put it in.

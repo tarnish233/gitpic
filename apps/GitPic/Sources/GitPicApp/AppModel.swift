@@ -747,10 +747,25 @@ final class AppModel {
     /// Whether the update sheet is on screen. Raised only by a check that found something
     /// — a manual check that finds nothing reports in the pane, not in a dialog nobody
     /// asked for.
+    ///
+    /// Raise it through ``presentUpdateSheet()`` rather than by assignment: the sheet needs a
+    /// window that is actually on screen, and this flag used to be set by a check that could
+    /// finish after the window had gone.
     var updateSheetPresented = false
 
     /// Whether brew can do the upgrade, once asked. `nil` until the sheet asks.
     private(set) var upgradePath: Updater.Availability?
+
+    /// A brew probe is in flight. The `upgradePath == nil` guard did not hold across its
+    /// own `await`, so two sheet appearances could both spawn one.
+    private var resolvingUpgradePath = false
+
+    /// The user asked for a check while one was already running.
+    ///
+    /// The in-flight guard cannot tell a manual request from the automatic check it collided
+    /// with, and dropping the manual one is what made a menu click look inert: the update was
+    /// found, then reported through a banner instead of the sheet that was asked for.
+    private var manualRequested = false
 
     /// When the last check completed, automatic or manual.
     ///
@@ -781,17 +796,43 @@ final class AppModel {
         didSet {
             Self.defaults.set(autoCheckUpdates, forKey: Self.autoCheckKey)
             // Switching it on is itself a reason to look: the user just asked for this, and
-            // making them wait up to a day to see it work would read as broken.
-            if autoCheckUpdates { Task { await checkForUpdates(manual: false) } }
+            // making them wait up to a day to see it work would read as broken. Through
+            // `checkForUpdatesIfDue` rather than straight into a check, because going
+            // straight in bypassed the daily rule altogether — flicking the switch off and
+            // on was an unmetered request every time, and the unauthenticated feed allows
+            // 60 an hour before it starts answering 403 to the checks the user *did* ask
+            // for. When a check already happened today the answer is on the pane already.
+            if autoCheckUpdates { Task { await checkForUpdatesIfDue() } }
         }
+    }
+
+    /// The version a banner has already announced.
+    ///
+    /// `Notifier.post` uses a fresh identifier for every notification, so nothing coalesces:
+    /// without this record, a daily check kept telling the user about the release they had
+    /// already seen and decided against. Persisted, because being quiet only until the next
+    /// launch is not being quiet. Nothing else is suppressed — 设置 ▸ 通用 and the sheet still
+    /// say so for as long as the update stands, which is where someone who wants to act on it
+    /// later goes looking.
+    private(set) var announcedVersion: String? = AppModel.defaults
+        .string(forKey: AppModel.announcedKey) {
+        didSet { Self.defaults.set(announcedVersion, forKey: Self.announcedKey) }
     }
 
     fileprivate static let defaults = UserDefaults.standard
     fileprivate static let lastCheckKey = "update.lastCheck"
     fileprivate static let autoCheckKey = "update.autoCheck"
+    fileprivate static let announcedKey = "update.announced"
 
-    /// Run the daily check if one is due. Called at launch and whenever the settings
-    /// window is shown.
+    /// Run the daily check if one is due. Called at launch, and whenever the settings window
+    /// is put on screen — `SettingsWindowController.showWindow`, which is the call that
+    /// covers reopening, not `GeneralPane`'s `.task`.
+    ///
+    /// That distinction is the whole of one bug: the `.task` fires when the pane is first
+    /// mounted and never again, because `orderOut` emits no `onDisappear` and the window
+    /// survives being closed. So the "once a day" the switch promises was in practice once
+    /// per launch, and `GitPicApp`'s argument for not using a repeating timer — that the
+    /// settings pane checks again whenever it is opened — was not true of the code.
     ///
     /// The due-or-not rule is in ``UpdateSchedule/isDue(lastChecked:now:interval:)`` so it
     /// can be tested; what is left here is the decision to ask at all.
@@ -808,8 +849,22 @@ final class AppModel {
     /// user an answer either way, while an automatic one speaks up only when there is
     /// something to say.
     func checkForUpdates(manual: Bool) async {
+        // Cleared here, above the guards, and again below them. It used to be cleared only
+        // after both early returns, so a click that returned early left the previous
+        // attempt's orange banner standing — indistinguishable from a check that had just
+        // run and failed again.
+        if manual { updateFailure = nil }
+        // A manual request that collides with a check already in flight is remembered rather
+        // than dropped. The guard below cannot tell the two apart, and dropping the manual
+        // one meant the found update reported through a banner instead of the sheet the
+        // click asked for, so the click looked inert.
+        if manual { manualRequested = true }
         // Same shape as `loadSkillTargets`: a `nil` runner while discovery is still
-        // running is not a failure to report, and only `.missing` is.
+        // running is not a failure to report, and only `.missing` is. `.resolving` therefore
+        // falls through to a silent return — which is right here, but was the whole bug at
+        // the status-item entry, where there is no `validateMenuItem` to grey the item out
+        // the way the pane's button is greyed. `AppDelegate` now waits for discovery before
+        // calling in, so this stays as the backstop for every other caller.
         guard let runner else {
             if manual, toolState == .missing {
                 updateFailure = "找不到 gitpic 可执行文件，请重新安装 GitPic。"
@@ -821,7 +876,10 @@ final class AppModel {
         // raise the sheet.
         guard !updateChecking else { return }
         updateChecking = true
-        defer { updateChecking = false }
+        defer {
+            updateChecking = false
+            manualRequested = false
+        }
         updateFailure = nil
         do {
             let report = try await runner.updateCheck()
@@ -835,28 +893,68 @@ final class AppModel {
             // this answer, and it is built once and cached — so it has to be told.
             onMenuNeedsRebuild?()
             guard report.updateAvailable else { return }
-            if manual {
-                // The user asked, so answer where they are looking.
-                updateSheetPresented = true
-            } else {
-                // A daily check must not throw a sheet in front of whatever the user was
-                // doing — and the window is usually shut when one lands anyway, where a
-                // sheet would be a report nobody sees (the argument `notify` makes about
-                // upload outcomes). The banner tells them; 设置 ▸ 通用 keeps a
-                // 「查看更新内容」 button for as long as the update stands, so nothing is
-                // lost by not interrupting.
-                notify(title: "GitPic \(report.latest) 可以更新了",
-                       body: "当前 \(report.current)。打开设置 ▸ 通用 查看更新内容。")
-            }
+            // Read *after* the await, so a manual request that arrived while this check was
+            // running is honoured by the check that was already going.
+            let asked = manual || manualRequested
+            if asked, presentUpdateSheet() { return }
+            // Either nobody asked, or the window went away while the check ran — a manual
+            // answer must not be lost just because its sheet has nowhere to appear.
+            //
+            // A daily check must not throw a sheet in front of whatever the user was doing
+            // either, and the window is usually shut when one lands anyway, where a sheet
+            // would be a report nobody sees (the argument `notify` makes about upload
+            // outcomes). The banner tells them; 设置 ▸ 通用 keeps a 「查看更新内容」 button for
+            // as long as the update stands, so nothing is lost by not interrupting.
+            //
+            // Once per version, unless the user asked: `Notifier.post` uses a fresh
+            // identifier per banner so nothing coalesces, and without that record someone
+            // who saw the notice and stayed on their version got it again every day.
+            guard asked || announcedVersion != report.latest else { return }
+            announcedVersion = report.latest
+            notify(title: "GitPic \(report.latest) 可以更新了",
+                   body: "当前 \(report.current)。打开设置 ▸ 通用 查看更新内容。")
         } catch {
             updateFailure = Self.cliMessage(error)
             Diagnostics.log("update check failed: \(String(describing: error))")
         }
     }
 
+    /// Put the update sheet on screen, reporting whether there was a window to put it on.
+    ///
+    /// Two things went wrong with assigning ``updateSheetPresented`` directly. The sheet was
+    /// attached inside 通用, so a check that completed after the user had switched panes had
+    /// nowhere to present — the answer was simply lost. And the flag stayed raised, so the
+    /// next visit to 通用 opened a sheet nobody had asked for, about whichever report
+    /// ``update`` held by then. It is attached to the window's root view now, which fixes the
+    /// pane switch; this fixes the other half, because a window that is not on screen still
+    /// cannot show a sheet and the caller needs to know so it can answer some other way.
+    @discardableResult
+    func presentUpdateSheet() -> Bool {
+        guard SettingsWindowController.isOnScreen else { return false }
+        updateSheetPresented = true
+        return true
+    }
+
     /// Ask whether brew can perform the upgrade. Called when the sheet appears.
+    ///
+    /// Only a definite answer is kept. `guard upgradePath == nil` cached whatever came back,
+    /// including the two failures that say nothing about this install: `brew list --cask`
+    /// hitting its 20 s bound (its own doc comment names Homebrew's housekeeping as a cause)
+    /// and the 8 s login-shell probe timing out. Either one then told a user with a perfectly
+    /// good Homebrew 「这份 GitPic 不是用 Homebrew 装的」 for the rest of the process's life,
+    /// with quitting the app as the only way to ask again.
     func resolveUpgradePath() async {
-        guard upgradePath == nil else { return }
+        if case .unavailable(_, retryable: false) = upgradePath { return }
+        if case .ready = upgradePath { return }
+        // The old guard also did not hold across the `await`, so two sheet appearances could
+        // both spawn the probe.
+        guard !resolvingUpgradePath else { return }
+        resolvingUpgradePath = true
+        defer { resolvingUpgradePath = false }
+        // Back to `nil` for the duration, because that is what `UpdateSheet` renders as
+        // 「正在确认升级方式…」. Leaving the previous retryable failure in place would show the
+        // 「不是用 Homebrew 装的」 paragraph while the probe that may contradict it is running.
+        upgradePath = nil
         upgradePath = await Updater.availability()
     }
 

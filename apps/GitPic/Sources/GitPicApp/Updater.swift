@@ -43,7 +43,14 @@ enum Updater {
         case ready(brew: URL)
         /// It cannot be offered. The reason is for the log, not the window — the UI just
         /// falls back to the release page.
-        case unavailable(reason: String)
+        ///
+        /// `retryable` separates a fact about this install — the bundle is not where a cask
+        /// puts one, brew answered that it does not manage it — from a probe that simply did
+        /// not get an answer this time. Only the first kind is worth remembering, because
+        /// caching the second told users with a working Homebrew that their app was not
+        /// installed by it, for as long as the process lived. See
+        /// `AppModel.resolveUpgradePath()`.
+        case unavailable(reason: String, retryable: Bool)
     }
 
     /// Its own queue rather than `Task.detached`: the two probes in ``probe(bundle:)`` block
@@ -72,8 +79,9 @@ enum Updater {
         let probe: Availability = await withCheckedContinuation { cont in
             probeQueue.async { cont.resume(returning: Self.probe(bundle: bundle)) }
         }
-        if case .unavailable(let reason) = probe {
-            Diagnostics.log("update: no in-app upgrade — \(reason)")
+        if case .unavailable(let reason, let retryable) = probe {
+            Diagnostics.log("update: no in-app upgrade — \(reason)"
+                            + (retryable ? " (will ask again)" : ""))
         }
         return probe
     }
@@ -81,21 +89,31 @@ enum Updater {
     /// The blocking half of ``availability()``, off the main actor on ``probeQueue``.
     private nonisolated static func probe(bundle: URL) -> Availability {
         guard bundleIsWhereACaskInstalls(bundle) else {
+            // A fact about this process, not a probe that failed: asking again cannot
+            // change where the running bundle lives.
             return .unavailable(
                 reason: "this copy runs from \(bundle.path), which is not where brew installs"
-                    + " a cask — upgrading would replace a different bundle")
+                    + " a cask — upgrading would replace a different bundle",
+                retryable: false)
         }
         guard let brew = ToolDiscovery.locateBrew() else {
-            return .unavailable(reason: "brew not found on this machine")
+            // Retryable, and deliberately so even though "no brew on this machine" is the
+            // common reading: `locateBrew()` also returns nil when its 8 s login-shell probe
+            // times out, and the two are indistinguishable from here. Being wrong in the
+            // other direction is the expensive one.
+            return .unavailable(reason: "brew not found on this machine", retryable: true)
         }
         switch ToolDiscovery.brewCaskStatus(Self.caskName, brew: brew) {
         case .installed:
             return .ready(brew: brew)
         case .notInstalled(let status):
+            // brew answered. That answer does not change until something is installed.
             return .unavailable(
-                reason: "brew does not manage this app (list --cask exited \(status))")
+                reason: "brew does not manage this app (list --cask exited \(status))",
+                retryable: false)
         case .unusable(let reason):
-            return .unavailable(reason: reason)
+            // The bound was hit or the command could not be read — no answer was obtained.
+            return .unavailable(reason: reason, retryable: true)
         }
     }
 
