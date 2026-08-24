@@ -25,17 +25,31 @@ public struct UpdateReport: Decodable, Equatable, Sendable {
     public let notes: String
     public let url: String
     public let publishedAt: String?
+    /// The release's downloadable files, or `nil` from a CLI too old to report them.
+    ///
+    /// **Optional on purpose, and it is the cheapest insurance in this type.** A
+    /// non-Optional property whose key is missing makes the whole decode throw, and
+    /// `GitpicRunner.runJSON` swallows that with `try?` and reports 「看不懂 gitpic 的回答」 —
+    /// so one absent field would take down the entire update check, not just the install
+    /// path. The skew is reachable: `locateGitpic` prefers the CLI inside the bundle but
+    /// falls back to PATH for a source build, which is exactly how an app once met a 0.18.x
+    /// `gitpic` that had no `update` subcommand at all.
+    ///
+    /// Read it through ``installableAsset()``, which turns `nil` into a stated reason.
+    public let assets: [ReleaseAsset]?
 
     enum CodingKeys: String, CodingKey {
         case ok, current, latest, tag
         case updateAvailable = "update_available"
         case ahead, name, notes, url
         case publishedAt = "published_at"
+        case assets
     }
 
     public init(ok: Bool, current: String, latest: String, tag: String,
                 updateAvailable: Bool, ahead: Bool, name: String?,
-                notes: String, url: String, publishedAt: String?) {
+                notes: String, url: String, publishedAt: String?,
+                assets: [ReleaseAsset]? = nil) {
         self.ok = ok
         self.current = current
         self.latest = latest
@@ -46,6 +60,7 @@ public struct UpdateReport: Decodable, Equatable, Sendable {
         self.notes = notes
         self.url = url
         self.publishedAt = publishedAt
+        self.assets = assets
     }
 
     /// The part of ``notes`` worth showing to someone updating from inside the app.
