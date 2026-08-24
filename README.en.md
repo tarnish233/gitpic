@@ -38,10 +38,11 @@ appears — and can be turned off — in 系统设置 ▸ 通用 ▸ 登录项�
 separate settings.
 
 **Update checks** run once a day by default, and can be run on demand from the 通用 pane or the
-menu bar. A new version is shown with its release notes, and 立即更新 installs it — through
-`brew upgrade --cask gitpic` when Homebrew owns this copy, and by downloading the release's
-disk image when it does not. Either way GitPic quits first (nothing can replace a running
-bundle) and reopens when the install finishes.
+menu bar. A new version is shown with its release notes, and the button matches how GitPic was
+installed: 立即更新 when Homebrew owns this copy, which runs `brew upgrade --cask gitpic`, and
+下载并更新 when it does not, which fetches the release's disk image and replaces the bundle.
+Either way GitPic quits first (nothing can replace a running bundle) and reopens when the
+install finishes.
 
 A downloaded image is verified against the SHA-256 GitHub publishes for that file before
 anything is replaced, which is the same check Homebrew makes against a cask — **no checksum, no
