@@ -42,12 +42,12 @@ anyone who wants no app.
 first cannot be trusted alone:
 
 1. `release.yml`'s `publish` job fires a `repository_dispatch` (`gitpic-released`) at
-   the tap the moment the release is up, carrying the version in `client_payload`. The
-   tap follows within seconds. It needs `secrets.TAP_DISPATCH_TOKEN` — a fine-grained
-   PAT limited to the tap with Contents: write, because `GITHUB_TOKEN` cannot reach
-   another repository. The step is guarded on the secret being non-empty and is
-   `continue-on-error`, so a missing or expired token cannot fail a release that has
-   already published.
+   the tap the moment the release is up, carrying the version in `client_payload`. With
+   a valid token the tap follows within seconds. It needs `secrets.TAP_DISPATCH_TOKEN` —
+   a fine-grained PAT limited to the tap with Contents: write, because `GITHUB_TOKEN`
+   cannot reach another repository. The step is guarded on the secret being non-empty
+   and is `continue-on-error`, so a missing or expired token cannot fail a release that
+   has already published.
 2. The tap's six-hourly cron (`17 */6 * * *`) still polls `releases/latest`. **Keep it.**
    It is what catches whatever the dispatch missed, and it does not alarm on failure —
    so renaming a release asset here breaks the tap silently, with up to six hours before
@@ -57,6 +57,28 @@ The tap asserts that `releases/latest` matches the version the dispatch named, a
 loudly when they disagree: publishing and `latest` moving are not one atomic act, and a
 run that started a moment early would pin the tap to the *previous* release and report
 success.
+
+**The token expires, and path 1 dies quietly when it does — so check the tap after every
+release.** Measured: the dispatch worked for eleven releases and then returned `Bad
+credentials (HTTP 401)` on every one from 0.20.0 on, the token having stopped working
+between 09:32 and 14:41 on 2026-08-24. `continue-on-error` did exactly what it is there
+for and the release runs stayed green, so three releases fell back to the cron with
+nothing anywhere saying so. The step now tells the two cases apart — no token versus a
+token the tap refused — and raises a `::warning::` plus a step-summary line for either,
+which shows on the run page rather than two clicks down. That helps only if someone
+looks, so confirm the tap moved:
+
+```bash
+gh api repos/tarnish233/gitpic/releases/tags/vX.Y.Z \
+  --jq '.assets[]|select(.name|endswith(".dmg")).digest'
+gh api repos/tarnish233/homebrew-tap/contents/Casks/gitpic.rb --jq .content \
+  | base64 -d | grep -E 'version |sha256'
+```
+
+Disagreeing means the dispatch did not land. Push it by hand with `gh workflow run
+update-gitpic.yml --repo tarnish233/homebrew-tap`, and fix the cause: a new fine-grained
+PAT scoped to `tarnish233/homebrew-tap` alone with Contents: write, then `gh secret set
+TAP_DISPATCH_TOKEN --repo tarnish233/gitpic`.
 
 `apps/GitPic/` is a macOS menu-bar app (SwiftUI) that drives the CLI over its
 `--json` contract; `scripts/build-app.sh` builds the bundle with the `gitpic`

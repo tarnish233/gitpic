@@ -564,7 +564,8 @@ jobs:
       # The tap finds out by polling `releases/latest` on a six-hourly cron, so a
       # release was real but not yet installable for up to six hours — measured the
       # hard way: 0.13.0 was published at 05:17Z while the tap still pinned 0.11.5,
-      # and `brew upgrade` had nothing to offer. This makes it seconds.
+      # and `brew upgrade` had nothing to offer. This makes it seconds — while the
+      # token is good, which is a condition worth reading the last paragraph about.
       #
       # **The cron on the tap stays.** This is the fast path, not the only path: a
       # missing secret, an expired token or a GitHub hiccup drops back to the poll
@@ -591,6 +592,20 @@ jobs:
       # a tap that read one second too early would pin the *previous* version and
       # then sit on it until the next cron — a silent wrong answer, which is the one
       # outcome worth failing loudly over.
+      #
+      # **A rejected token has to be said out loud, and that is what this step got
+      # wrong.** `continue-on-error` was doing its job for the release and hiding a
+      # regression at the same time: the dispatch worked for eleven releases and then
+      # started returning `Bad credentials (HTTP 401)` somewhere between 09:32 and
+      # 14:41 on 2026-08-24, and 0.20.0, 0.20.1 and 0.20.2 each fell back to the
+      # six-hourly cron with nothing reporting it. A red step inside a green run is not
+      # a report; three releases went by. So the two cases are now told apart — no
+      # token (expected, fine) versus a token the tap refused (broken, needs a human) —
+      # and both are raised as a `::warning::` annotation and written to the step
+      # summary, where they show up on the run page instead of two clicks down. Neither
+      # fails the release, because by this point it is already published and marking a
+      # good release failed is its own harm. `continue-on-error` stays for genuinely
+      # unexpected failures only; the expected ones now exit 0 deliberately.
       - name: Tell the tap a release landed
         if: startsWith(github.ref, 'refs/tags/')
         continue-on-error: true
@@ -599,13 +614,21 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
+          note() {
+            echo "::warning title=Tap not notified::$1"
+            echo "⚠️ **The Homebrew tap was not notified.** $1" >> "$GITHUB_STEP_SUMMARY"
+          }
           if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "TAP_DISPATCH_TOKEN is not set; leaving the tap to its cron." >&2
+            note "TAP_DISPATCH_TOKEN is not set, so brew users get ${VERSION} whenever the tap's six-hourly cron next runs."
             exit 0
           fi
           # `--input -` with real JSON rather than `-f client_payload[version]=…`,
           # so the nesting is unambiguous and the version is never shell-interpolated
           # into a URL or a query string.
-          printf '{"event_type":"gitpic-released","client_payload":{"version":"%s"}}' \
+          if printf '{"event_type":"gitpic-released","client_payload":{"version":"%s"}}' \
             "$VERSION" | gh api repos/tarnish233/homebrew-tap/dispatches --input -
-          echo "dispatched gitpic-released for $VERSION"
+          then
+            echo "dispatched gitpic-released for $VERSION"
+          else
+            note "TAP_DISPATCH_TOKEN was rejected — see the error above. Renew the fine-grained PAT (scope: tarnish233/homebrew-tap, Contents: write) with \`gh secret set TAP_DISPATCH_TOKEN\`. Until then every release waits up to six hours for the tap's cron."
+          fi
