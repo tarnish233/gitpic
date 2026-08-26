@@ -455,8 +455,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         update.target = self
         menu.addItem(update)
 
-        menu.addItem(Self.item("退出 GitPic", "power",
-                               #selector(NSApplication.terminate(_:))))
+        let quit = Self.item("退出 GitPic", "power", #selector(quitByUser))
+        quit.target = self
+        menu.addItem(quit)
 
         statusItem.menu = menu
     }
@@ -837,5 +838,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showUpdate() {
         SettingsWindowController.show(tab: .general)
         AppModel.shared.presentUpdateSheet()
+    }
+
+    /// 「退出 GitPic」 and ⌘Q, both of them.
+    ///
+    /// Not `NSApplication.terminate`: AppKit refuses to terminate while any window has an
+    /// attached sheet, which made the app unquittable whenever the update sheet or 图床's
+    /// move-the-config alert was up. ``Updater/quit(_:)`` carries the measurement.
+    ///
+    /// Deliberately **not** `private`: `MainMenu` builds the ⌘Q item with no target so the
+    /// action travels the responder chain to `NSApp`, which forwards what it cannot handle to
+    /// its delegate — this method. A `private` one would not be nameable from that file.
+    @objc func quitByUser() {
+        Updater.quitByUser()
     }
 }

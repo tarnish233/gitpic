@@ -38,6 +38,308 @@ extension SelfUpdate {
         public let version: String
     }
 
+    /// The process-wide registry. One install at a time, guaranteed twice over: `AppModel`
+    /// refuses a second while `installTask` is non-`nil`, and `stage` only ever runs on
+    /// `Updater.probeQueue`, which is serial.
+    static let inFlightWork = InFlightWork()
+
+    /// Undo whatever an install left in flight, because this process is about to leave.
+    ///
+    /// Called from ``Updater/quit(_:)`` — the single `exit(0)` — and deliberately not from
+    /// `prepareToQuit()`, which has two callers that return instead of exiting.
+    ///
+    /// **What covers this, and what does not.** Each piece is tested for real in
+    /// `SelfUpdateInstallTests`: an image is genuinely attached and this genuinely detaches it, a
+    /// staging directory and a download are genuinely removed, the handover to the install script
+    /// is exercised in both orders, and `quitDuringStagingLeavesNothing` runs `stage` on another
+    /// thread and drains from underneath it. That last one is what caught the registrations
+    /// needing to be able to answer "has a quit happened" rather than just record — see
+    /// ``InFlightWork/hold(mount:since:)``.
+    ///
+    /// What is **not** covered anywhere is the whole path in one piece: a real install, a real
+    /// 「退出 GitPic」 half way through it, and nothing left behind afterwards.
+    /// `scripts/check-self-update.sh` drives a real install but reaches the quit through
+    /// 下载并更新, i.e. ``Updater/quitForUpdate(_:)``, so it never presses the affordance this
+    /// exists for. `GITPIC_APP_DRY_RUN=1` returns before the quit, and `GitPicApp` is an
+    /// `executableTarget` tests cannot import. That gap is the same shape as the one 0.20.0
+    /// shipped through, so it is stated here rather than left to be discovered: verifying this
+    /// end to end means clicking 「退出 GitPic」 during a real install and then looking for
+    /// `gitpic-mount-*` in `$TMPDIR` and `.GitPic-update-*` beside the installed bundle.
+    public static func undoInFlightWork() {
+        let abandoned = inFlightWork.drain()
+        guard !abandoned.isEmpty else { return }
+        var reclaimed: [String] = []
+
+        // The child first: `exit(0)` reaps nothing, so a `ditto` mid-copy is reparented to
+        // launchd and goes on recreating the directory removed just below. SIGKILL rather than
+        // `terminate()`, the same escalation `ChildProcess` ends with.
+        //
+        // **No wait afterwards, on purpose.** `kill(pid, 0)` cannot tell a live process from a
+        // zombie, so polling it would spin its whole bound on an already-dead child; and
+        // `waitpid` here would race `Process`'s own reaper. SIGKILL cannot be caught or blocked,
+        // so the child stops executing without another turn in user space — at worst one
+        // in-flight write lands, and the retry below covers what that can cost.
+        if let child = abandoned.child {
+            kill(child.processIdentifier, SIGKILL)
+            reclaimed.append("killed pid \(child.processIdentifier)")
+        }
+
+        // The staging directory before the mount, the order `stage`'s own `defer`s unwind in. The
+        // disk image goes with them: it is a file rather than a directory, but it is the same
+        // question — something this process made and nothing else will remove.
+        for leftover in [abandoned.staging, abandoned.download].compactMap({ $0 }) {
+            do {
+                try FileManager.default.removeItem(at: leftover)
+                reclaimed.append(leftover.lastPathComponent)
+            } catch {
+                // One retry, for the single write the SIGKILL above may not have beaten.
+                Thread.sleep(forTimeInterval: 0.05)
+                if (try? FileManager.default.removeItem(at: leftover)) != nil {
+                    reclaimed.append(leftover.lastPathComponent)
+                } else {
+                    Diagnostics.log("quit: could not remove \(leftover.path):"
+                                    + " \((error as NSError).localizedDescription)."
+                                    + " Left for the launch sweep.")
+                }
+            }
+        }
+
+        if let mount = abandoned.mount {
+            detachInBackground(mount)
+            reclaimed.append("detaching \(mount.lastPathComponent)")
+        }
+        // Only when something was actually reclaimed: every failure above has already said so in
+        // its own words, and a summary listing nothing would read as if it had worked.
+        if !reclaimed.isEmpty {
+            Diagnostics.log("quit: undid work an install left in flight — "
+                            + reclaimed.joined(separator: ", "))
+        }
+    }
+
+    /// Register the downloaded disk image, so a quit taken before the install finishes removes it.
+    ///
+    /// Public because the download's owner is `Updater.installAndRelaunch`, in the app target,
+    /// while the registry is internal to this one. Three verbs is all the app needs; the type
+    /// itself stays internal so nothing outside can invent a fourth.
+    ///
+    /// Unlike `stage`'s two registrations this has no epoch to answer against and does not need
+    /// one: the image is removed by an explicit `removeItem` *and* a `defer` on every path the app
+    /// stays alive for, so the registry is only the belt for the one path that runs neither — the
+    /// `exit(0)`. A drain landing in between simply means there is nothing left to register.
+    public static func holdDownload(_ url: URL) {
+        _ = inFlightWork.hold(download: url, since: inFlightWork.generation)
+    }
+
+    /// The disk image is gone or is no longer this process's to remove.
+    public static func releaseDownload(_ url: URL) { inFlightWork.release(download: url) }
+
+    /// Take the staging directory out of the registry before handing it to the install script.
+    ///
+    /// `false` means a quit already claimed it and is deleting it — the caller must not hand off.
+    /// See ``InFlightWork/claim(staging:)`` for what spawning the script anyway would cost.
+    public static func claimStaged(_ url: URL) -> Bool { inFlightWork.claim(staging: url) }
+
+    /// Detach a mount point without waiting for it, on the way out.
+    ///
+    /// **Fire and forget, and both halves of that are deliberate.**
+    ///
+    /// *Forget*, because ``detachMount(at:)`` is the wrong tool on this path even bounded down.
+    /// It decides what to do from ``isMountPoint(_:)``, and an `hdiutil attach` this quit did not
+    /// wait for may not have landed yet — `stage` records at its own `defer` that an attach the
+    /// kernel has committed to survives `hdiutil` being killed. `detachMount` would then see no
+    /// mount, fall through to `removeItem`, and *unlink the mount point out from under an image
+    /// about to arrive on it*: still attached, invisible in Finder because of `-nobrowse`, and no
+    /// longer reachable by the `gitpic-mount-` branch of `Updater.sweepStaleScripts`, which can
+    /// only enumerate names that still exist. That is strictly worse than the leak this whole
+    /// mechanism exists to stop, so the quit path does not call it. The retry loop below covers
+    /// the same late arrival instead, and the launch sweep remains the backstop.
+    ///
+    /// *Fire*, because waiting buys nothing. `hdiutil detach` is bounded at 60 s per attempt in
+    /// `detachMount`, and `ChildProcess` adds a 2 s `terminate` and a 1 s SIGKILL on top of any
+    /// timeout — seconds of frozen main thread whose failure outcome is identical to not having
+    /// waited. A detached child is reparented when this process exits and runs to completion,
+    /// which is the same property ``handOff(staged:dryRun:)`` already depends on.
+    ///
+    /// The path is passed as `$1` and never interpolated into the script text, so no quoting
+    /// question arises; both commands are absolute, so `PATH` does not either.
+    private static func detachInBackground(_ mount: URL) {
+        let sh = Process()
+        sh.executableURL = URL(fileURLWithPath: "/bin/sh")
+        sh.arguments = ["-c", detachScript, "gitpic-detach", mount.path]
+        do {
+            try sh.run()
+        } catch {
+            Diagnostics.log("quit: could not spawn the detach for \(mount.path):"
+                            + " \(error.localizedDescription). Left for the launch sweep.")
+        }
+    }
+
+    /// Quoted once, so the test can assert on the same text that runs.
+    static let detachScript = """
+        for i in 1 2 3; do /usr/bin/hdiutil detach -force "$1" >/dev/null 2>&1 && break; \
+        /bin/sleep 1; done
+        /bin/rmdir "$1" 2>/dev/null || true
+        """
+
+    /// What an install has in flight, so that a quit can undo it.
+    ///
+    /// ``Updater/quit(_:)`` ends in `exit(0)`, which runs no `defer`. So everything
+    /// ``stage(dmg:expectedVersion:replacing:isCancelled:)`` would have unwound — the attached
+    /// image, the bundle-sized staging directory, the disk image — survives a quit taken while
+    /// staging is running, invisibly and until a sweep on a launch a day later.
+    ///
+    /// **This was unreachable until 0.20.1, by accident.** Both user quits went through
+    /// `NSApplication.terminate`, which AppKit refuses while any window has a sheet attached —
+    /// and the install is started from a button inside the update sheet, which stays attached for
+    /// the whole download-mount-copy sequence. So every quit during an install was silently
+    /// refused. Routing those two affordances to a real `exit` fixed an app that could not be
+    /// quit and, in the same move, made this reachable for the first time.
+    ///
+    /// Resources are registered as they are created and released as they are unwound, so on
+    /// every ordinary path the registry is empty by the time `stage` has returned. The drain is
+    /// therefore a no-op unless the process is leaving in the middle of something, which is
+    /// exactly the shape wanted: nothing about the ordinary paths changes.
+    ///
+    /// **Released against the value that was registered, never blindly cleared.** The URLs all
+    /// carry a fresh UUID, so the URL *is* the token — the same discipline as
+    /// `gate === progressGate` in `AppModel`. It is what stops a release arriving after a drain
+    /// from resurrecting a slot, and, more importantly, what makes ``claim(staging:)`` an atomic
+    /// handover rather than a check followed by a hope.
+    ///
+    /// `NSLock` and `@unchecked Sendable` rather than an actor or a `Mutex`: every caller is
+    /// non-`async` (`stage` on a serial `DispatchQueue`, the drain on the main actor), and
+    /// `Synchronization.Mutex` is macOS 15 while this package targets macOS 14. The same shape as
+    /// ``SessionGate``, and for the same reason — two paths reach the cleanup in either order and
+    /// only one may act.
+    final class InFlightWork: @unchecked Sendable {
+
+        /// What a drain took, to be acted on outside the lock.
+        struct Abandoned {
+            var child: Process?
+            var mount: URL?
+            var staging: URL?
+            var download: URL?
+
+            var isEmpty: Bool {
+                child == nil && mount == nil && staging == nil && download == nil
+            }
+        }
+
+        private let lock = NSLock()
+        private var epoch: UInt64 = 0
+        private var child: Process?
+        private var mount: URL?
+        private var staging: URL?
+        private var download: URL?
+
+        /// How many drains have happened. A caller that captured this before it started can tell
+        /// whether a quit has intervened.
+        ///
+        /// Counted rather than latched, because a latch would be permanent: the registry is
+        /// process-wide, and `swift test` runs every suite in one process, so a sticky
+        /// "we are leaving" flag set by one test would refuse every registration after it.
+        var generation: UInt64 {
+            lock.lock()
+            defer { lock.unlock() }
+            return epoch
+        }
+
+        /// The mount an install is currently working with, if any. For tests: it is how a test
+        /// can tell that `stage` has reached the window this mechanism is about.
+        var mountInFlight: URL? {
+            lock.lock()
+            defer { lock.unlock() }
+            return mount
+        }
+
+        /// Register a resource, unless a quit has already drained since `epoch`.
+        ///
+        /// **The refusal is the point, and it is why these are not plain setters.** A drain takes
+        /// what is registered *at that moment*; anything `stage` created afterwards would be
+        /// registered into a table nobody will read again, and then leaked by the `exit(0)` a
+        /// moment later. That window is not theoretical — `quit` does a blocking
+        /// `UserDefaults.synchronize()` between the drain and the exit, which is easily long
+        /// enough for `stage` to create its staging directory. Measured by
+        /// `quitDuringStagingLeavesNothing`, which failed exactly this way when these were plain
+        /// setters: the drain took the mount, `stage` went on to stage a whole bundle, and nothing
+        /// ever removed it.
+        ///
+        /// So registering and asking "has a quit happened" are one atomic step, and a `false`
+        /// answer means the caller must undo what it just made and stop.
+        func hold(mount url: URL, since epoch: UInt64) -> Bool {
+            claimSlot(epoch) { self.mount = url }
+        }
+
+        func hold(staging url: URL, since epoch: UInt64) -> Bool {
+            claimSlot(epoch) { self.staging = url }
+        }
+
+        func hold(download url: URL, since epoch: UInt64) -> Bool {
+            claimSlot(epoch) { self.download = url }
+        }
+
+        func hold(child process: Process) { under { self.child = process } }
+
+        func release(mount url: URL) { under { if self.mount == url { self.mount = nil } } }
+        func release(download url: URL) {
+            under { if self.download == url { self.download = nil } }
+        }
+
+        /// Take the staging directory out of the registry, and say whether it was still there.
+        ///
+        /// Both the failure unwind and the handover to the install script go through this. The
+        /// answer matters only to the handover: `false` means a drain has already taken the
+        /// directory and is deleting it, so the caller must **not** spawn the script. Spawning it
+        /// anyway is the one way this mechanism could make a *successful* install fail — the
+        /// script would find no staged bundle, log that, and its `trap reopen EXIT` would put the
+        /// old bundle back, turning every quit that lost this race into a silent rollback.
+        func claim(staging url: URL) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard staging == url else { return false }
+            staging = nil
+            return true
+        }
+
+        /// Clear the child slot whatever is in it.
+        ///
+        /// Not compared, unlike the rest, because `ChildProcess.run` reports the live child
+        /// through an escaping `onSpawn` and hands nothing back afterwards to compare against.
+        /// Safe on the strength of `stage` being strictly sequential — one child at a time — and
+        /// the cost if that ever stopped holding is that a quit fails to kill a child, which is
+        /// what happened before any of this existed.
+        func releaseAnyChild() { under { self.child = nil } }
+
+        /// Take everything, under the lock, and leave the registry empty.
+        ///
+        /// Snapshot-and-clear rather than acting slot by slot while holding the lock: the drain
+        /// goes on to spawn and delete, and `stage`'s unwind must not be stalled behind that.
+        /// ``SessionGate/cancel()`` takes its resource out the same way and for the same reason.
+        func drain() -> Abandoned {
+            lock.lock()
+            defer { lock.unlock() }
+            let taken = Abandoned(child: child, mount: mount, staging: staging,
+                                  download: download)
+            (child, mount, staging, download) = (nil, nil, nil, nil)
+            epoch += 1
+            return taken
+        }
+
+        private func claimSlot(_ expected: UInt64, _ body: () -> Void) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard epoch == expected else { return false }
+            body()
+            return true
+        }
+
+        private func under(_ body: () -> Void) {
+            lock.lock()
+            body()
+            lock.unlock()
+        }
+    }
+
     /// Mount `dmg`, check what is inside it, and copy it in beside `target`.
     ///
     /// Blocking — it spawns `hdiutil`, `ditto`, `xattr` and `codesign`. Call it off the main
@@ -64,9 +366,21 @@ extension SelfUpdate {
         isCancelled: @escaping @Sendable () -> Bool = { false }
     ) throws -> Staged {
         try stopIfCancelled(isCancelled)
+        // Captured before anything exists to clean up, so that every registration below can ask
+        // one question atomically: "has a quit drained since I started?" A `false` from any of
+        // them means this process is on its way out and nothing new may be left behind.
+        let epoch = inFlightWork.generation
         let mount = FileManager.default.temporaryDirectory
             .appendingPathComponent("gitpic-mount-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
+        // Registered before the attach for the same reason the detach below is installed before
+        // it, and released inside that same `defer` rather than on the way out of the success
+        // path: `defer`s run *after* the last statement, so releasing it at `staged = true` would
+        // leave a window in which a quit could see no mount to detach.
+        guard inFlightWork.hold(mount: mount, since: epoch) else {
+            try? FileManager.default.removeItem(at: mount)
+            throw InstallFailure.cancelled
+        }
         // The detach is installed before the attach — and before the identity check below — on
         // purpose. A timed-out `attach` is not a failed one: `ChildProcess` terminates and then
         // `SIGKILL`s the `hdiutil` it spawned, and the attach the kernel had already committed
@@ -74,7 +388,10 @@ extension SelfUpdate {
         // failed. `detachMount` is a no-op plus an `rmdir` when nothing is mounted, so it costs
         // nothing on the ordinary refusals, and it is what removes the directory just created
         // when this returns before ever attaching.
-        defer { detachMount(at: mount) }
+        defer {
+            detachMount(at: mount)
+            inFlightWork.release(mount: mount)
+        }
         // The digest was taken through one descriptor; `hdiutil` is about to open the path
         // again. Between those two opens sits a `Task.checkCancellation` and a hop onto
         // `probeQueue`, which is serial and shared with a 20 s `brew list --cask` — so the
@@ -132,18 +449,33 @@ extension SelfUpdate {
                     + "或 GitPic.app 带了不可变标志。"
                     + "可以改为把 GitPic 装在 ~/Applications，那里不需要额外权限。")
         }
+        // Registered as soon as it exists, and — unlike the mount — *not* released on the success
+        // path here. A staged bundle outlives `stage`: the caller hands it to the install script,
+        // and only that handover ends this function's claim on it. See
+        // ``InFlightWork/claim(staging:)``.
+        //
+        // A refusal here is a quit that drained while the directory was being created. Removing
+        // it and stopping is the whole reason the registration answers rather than just records:
+        // the drain has already been and gone, so anything left now is left for good.
+        guard inFlightWork.hold(staging: directory, since: epoch) else {
+            try? FileManager.default.removeItem(at: directory)
+            throw InstallFailure.cancelled
+        }
         var staged = false
-        defer { if !staged { try? FileManager.default.removeItem(at: directory) } }
+        defer {
+            if !staged {
+                try? FileManager.default.removeItem(at: directory)
+                _ = inFlightWork.claim(staging: directory)
+            }
+        }
 
         let bundle = directory.appendingPathComponent("GitPic.app")
         // `ditto`, not `cp -R`: `man ditto` says it preserves resource forks, extended
         // attributes and ACLs, and an ad-hoc signature lives in extended attributes — `cp -R`
         // would break it. `--noqtn` because the same page says quarantine bits are preserved
         // too, and a quarantined ad-hoc bundle is one Gatekeeper refuses outright.
-        let copy = try? ChildProcess.run(
-            executable: URL(fileURLWithPath: "/usr/bin/ditto"),
-            args: ["--noqtn", source.path, bundle.path],
-            timeout: 300)
+        let copy = try? runWritingStep(
+            "/usr/bin/ditto", ["--noqtn", source.path, bundle.path], timeout: 300)
         guard let copy, copy.status == 0, !copy.timedOut else {
             throw InstallFailure.staging("复制新版本失败："
                 + (copy?.timedOut == true ? "超时" : "ditto 退出码 \(copy?.status ?? -1)"))
@@ -153,10 +485,8 @@ extension SelfUpdate {
         // the top level does not, and one quarantined item inside the bundle is enough.
         // Ignored on failure — there is usually nothing to remove, and `xattr` exits non-zero
         // when there is not.
-        _ = try? ChildProcess.run(
-            executable: URL(fileURLWithPath: "/usr/bin/xattr"),
-            args: ["-dr", "com.apple.quarantine", bundle.path],
-            timeout: 60)
+        _ = try? runWritingStep(
+            "/usr/bin/xattr", ["-dr", "com.apple.quarantine", bundle.path], timeout: 60)
 
         // Verified *here*, on the copy, and last — after `ditto` made it and after `xattr`
         // mutated it. This used to run against the read-only mount thirty lines above, where
@@ -188,6 +518,29 @@ extension SelfUpdate {
     /// same and none of them can quietly leave out the throw.
     private static func stopIfCancelled(_ isCancelled: () -> Bool) throws {
         if isCancelled() { throw InstallFailure.cancelled }
+    }
+
+    /// `ChildProcess.run` for a staging step that *writes into* the staging directory.
+    ///
+    /// The only thing this adds is registering the live child, so a quit can SIGKILL it before
+    /// deleting what it is writing into: `exit(0)` reaps nothing, so a `ditto` half way through a
+    /// copy is reparented to launchd and goes on recreating the directory the quit just removed.
+    ///
+    /// Used for `ditto` and `xattr`, and deliberately for neither of the other two spawns in
+    /// `stage`. `hdiutil attach` must **not** be killed — ``undoInFlightWork()`` and
+    /// ``detachInBackground(_:)`` carry why at length: an attach the kernel has committed to
+    /// outlives the process that asked for it, and racing it produces a mount nothing can find
+    /// again. `codesign` only reads, so deleting the directory under it is already safe and it
+    /// exits on its own once this process is gone.
+    private static func runWritingStep(
+        _ executable: String, _ args: [String], timeout: TimeInterval
+    ) throws -> ProcessOutcome {
+        defer { inFlightWork.releaseAnyChild() }
+        return try ChildProcess.run(
+            executable: URL(fileURLWithPath: executable),
+            args: args,
+            timeout: timeout,
+            onSpawn: { inFlightWork.hold(child: $0) })
     }
 
     /// `codesign --verify --deep --strict` on a bundle, as a yes or no.

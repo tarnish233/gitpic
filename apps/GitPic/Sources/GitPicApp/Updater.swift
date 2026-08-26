@@ -152,12 +152,19 @@ enum Updater {
     ) async throws {
         let dmg = try await SelfUpdate.download(asset: asset, sha256: sha256,
                                                 onProgress: onProgress)
+        // Registered for the quit, which runs no `defer` at all: the user can ask to leave at any
+        // point between here and the handoff, and until 0.20.1 could not — AppKit refused every
+        // termination while the update sheet was attached, which is the whole time this runs.
+        SelfUpdate.holdDownload(dmg.url)
         // Removed on every path out of here — a staged copy is what gets installed, so keeping
         // five megabytes of disk image afterwards serves nobody. `defer` alone was not "either
         // way" as it claimed: the success path ends in `exit()`, so the `defer` never ran and
         // every successful install leaked the image until the next launch's sweep, ≥24 h later.
         // Hence the explicit removal below as well.
-        defer { try? FileManager.default.removeItem(at: dmg.url) }
+        defer {
+            try? FileManager.default.removeItem(at: dmg.url)
+            SelfUpdate.releaseDownload(dmg.url)
+        }
 
         // Cancellation between the hash and the mount. `download` already deletes its own
         // partial file, so there is nothing else to undo here.
@@ -191,16 +198,33 @@ enum Updater {
             cancelled.set()
         }
         try? FileManager.default.removeItem(at: dmg.url)
+        SelfUpdate.releaseDownload(dmg.url)
 
         // The last moment cancellation can mean anything, and the only one with something to
         // undo: a bundle-sized staging directory beside the app. After the handoff below the
         // script is a detached process this cannot recall.
         if Task.isCancelled {
             try? FileManager.default.removeItem(at: staged.directory)
+            _ = SelfUpdate.claimStaged(staged.directory)
             Diagnostics.log("update: cancelled after staging — removed \(staged.directory.path)")
             throw CancellationError()
         }
 
+        // The staging directory changes hands here: from this process, which would delete it on
+        // the way out, to the script, which needs it to still be there. Claimed *before* the
+        // spawn and not after, because the gap between the two is where a quit would delete the
+        // bundle the script is about to move — leaving `installScript` to log that the staged
+        // bundle is gone and its `trap reopen EXIT` to put the old one back. A quit that lost
+        // that race would read as a silent rollback of a successful install.
+        //
+        // `false` means the quit got there first and the directory is already going, so there is
+        // nothing left to hand off. Nothing will show this: `undoInFlightWork` only runs from the
+        // single `exit(0)`, so losing the claim means the process is already leaving.
+        guard SelfUpdate.claimStaged(staged.directory) else {
+            Diagnostics.log("update: quitting mid-install, so the staged bundle was reclaimed"
+                            + " instead of handed off")
+            throw SelfUpdate.InstallFailure.cancelled
+        }
         let script = try SelfUpdate.handOff(staged: staged, dryRun: dryRun)
         if dryRun {
             Diagnostics.log("update: DRY RUN — staged at \(staged.bundle.path),"
@@ -281,11 +305,57 @@ enum Updater {
     /// comment: 0.20.0 logged 「quitting so the bundle can be replaced」 and then went back to
     /// serving events. Nothing may return from here.
     private static func quitForUpdate(_ reason: String) -> Never {
+        quit("update: \(reason)")
+    }
+
+    /// The way out for everything in this app that decides to leave.
+    ///
+    /// Why this is centralised rather than left at each call site: 0.20.0 shipped
+    /// `NSApp.terminate` on three paths, the fix changed one of them, and the two the user
+    /// actually clicks — 「退出 GitPic」 in the status menu and ⌘Q — kept the defect for two
+    /// releases. The mechanism is not specific to updating: AppKit refuses termination
+    /// whenever any window has an attached sheet, so 图床's 「把这个配置文件移开？」 alert and
+    /// the update sheet both made the app unquittable. See ``quitForUpdate(_:)`` for the
+    /// measurement, including why `applicationShouldTerminate` cannot be the fix.
+    ///
+    /// **Not every route out of the process comes through here, and the earlier claim that it did
+    /// was wrong.** The Dock icon's contextual-menu Quit and the Apple Event a logout or restart
+    /// sends are synthesised by AppKit and still arrive as `terminate:`, so they are still refused
+    /// while a sheet is attached — and the app has a Dock icon precisely when the settings window
+    /// is up (`AppActivationPolicy.enter`), which is the only way to get a sheet in the first
+    /// place. What is true is narrower and is what the tripwire checks: every affordance *this
+    /// code owns* ends here. Closing the rest means
+    /// `NSWindow.preventsApplicationTerminationWhenModal = false` on the sheet window, which
+    /// defaults to `true`; it is not done here because nothing has measured it yet.
+    ///
+    /// `QuitPathContractTests` asserts that no `NSApplication.terminate` selector comes back
+    /// into `GitPicApp/`, so the next person to add a quit affordance cannot reintroduce it
+    /// quietly.
+    static func quit(_ reason: String) -> Never {
         prepareToQuit()
-        Diagnostics.log("update: quitting now — \(reason)")
-        // 0 because the handoff succeeded. Nothing reads the status: the script waits for the
-        // pid to disappear, not for a code.
+        // `exit(0)` runs no `defer`, so an install still staging would leave an attached disk
+        // image, a bundle-sized staging directory beside the app and the download behind it — for
+        // a day, until a launch sweep. Undone here rather than in `prepareToQuit()` because that
+        // one has two callers that return instead of exiting: the `GITPIC_APP_DRY_RUN` branches.
+        // A destructive drain there would delete an install the app is still running.
+        SelfUpdate.undoInFlightWork()
+        // `exit()` skips AppKit's ordinary shutdown, so anything that saves at quit would be
+        // lost here. Almost nothing does: settings are mirrored into `UserDefaults` on every
+        // change rather than at the end (`AppModel.swift:864-914`). The exception is the window
+        // frame — `SettingsWindowController` sets a frame autosave name, and AppKit writes that
+        // through `UserDefaults` too, so the flush below covers it. The flush is worth one line
+        // because the store writes back asynchronously and `exit()` can outrun it: the setting
+        // that would be lost is the one toggled a moment before quitting.
+        UserDefaults.standard.synchronize()
+        Diagnostics.log("quitting now — \(reason)")
+        // 0 because this is a deliberate exit, not a failure. On the update path nothing reads
+        // the status either: the script waits for the pid to disappear, not for a code.
         exit(0)
+    }
+
+    /// The user asked to leave — the status menu's 「退出 GitPic」 or ⌘Q.
+    static func quitByUser() -> Never {
+        quit("user asked to quit")
     }
 
     /// Quit, upgrade, reopen.
