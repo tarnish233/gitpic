@@ -56,15 +56,16 @@ extension SelfUpdate {
     /// needing to be able to answer "has a quit happened" rather than just record — see
     /// ``InFlightWork/hold(mount:since:)``.
     ///
-    /// What is **not** covered anywhere is the whole path in one piece: a real install, a real
-    /// 「退出 GitPic」 half way through it, and nothing left behind afterwards.
-    /// `scripts/check-self-update.sh` drives a real install but reaches the quit through
-    /// 下载并更新, i.e. ``Updater/quitForUpdate(_:)``, so it never presses the affordance this
-    /// exists for. `GITPIC_APP_DRY_RUN=1` returns before the quit, and `GitPicApp` is an
-    /// `executableTarget` tests cannot import. That gap is the same shape as the one 0.20.0
-    /// shipped through, so it is stated here rather than left to be discovered: verifying this
-    /// end to end means clicking 「退出 GitPic」 during a real install and then looking for
-    /// `gitpic-mount-*` in `$TMPDIR` and `.GitPic-update-*` beside the installed bundle.
+    /// The whole path in one piece — a real install, a real 「退出 GitPic」 half way through it,
+    /// nothing left behind — is `scripts/check-self-update.sh`'s 「退出 GitPic」 while an update
+    /// is installing, which asserts the absence of the mount, the staging directory and the
+    /// download. Two things about it stay true and are worth knowing before trusting it: the
+    /// install is a 5 MB download plus a `ditto` of a small bundle, so the quit can land after
+    /// the handoff rather than inside staging — the script says which of the two it got instead
+    /// of claiming the harder one — and ⌘Q is not driven there at all, because `keystroke` needs
+    /// the app frontmost and making it frontmost poisons the accessibility tree for the rest of
+    /// the run. ⌘Q and the menu item share one selector and reach here through
+    /// ``Updater/quitByUser()``, so the menu item is the half that can be asserted.
     public static func undoInFlightWork() {
         let abandoned = inFlightWork.drain()
         guard !abandoned.isEmpty else { return }
