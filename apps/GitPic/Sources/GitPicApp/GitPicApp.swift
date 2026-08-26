@@ -56,6 +56,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Before anything can open a window: without a main menu the standard
         // shortcuts are dead inside it — see `MainMenu`.
         MainMenu.install()
+        // Also before any window, because it works by watching sheets begin and a sheet it
+        // never saw begin keeps AppKit's refusal. See `Updater.allowTerminationWithSheets`:
+        // a logout or a Dock-menu Quit arrives as `terminate:`, which a sheet refuses, and
+        // `applicationShouldTerminate` below is what catches it once it stops being refused.
+        Updater.allowTerminationWithSheets()
         setUpStatusItem()
         // Before the first turn of the run loop: a right-click that launched the app
         // is delivered as soon as one comes round, and a service message that
@@ -850,6 +855,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// action travels the responder chain to `NSApp`, which forwards what it cannot handle to
     /// its delegate — this method. A `private` one would not be nameable from that file.
     @objc func quitByUser() {
+        Updater.quitByUser()
+    }
+
+    /// Everything AppKit asks about rather than everything the user clicks: the Dock icon's
+    /// contextual-menu Quit, and the Apple Event a logout or a restart sends.
+    ///
+    /// Nothing in this app calls `terminate:` — the tripwire in `QuitPathContractTests` holds
+    /// that — so this is only ever reached from outside, and it exists to make those outside
+    /// routes end where the inside ones do. Returning `.terminateNow` instead would let AppKit
+    /// tear the process down its own way, running neither `prepareToQuit()` nor
+    /// `SelfUpdate.undoInFlightWork()`, so a logout during an install would leave the attached
+    /// image and the bundle-sized staging directory that 0.20.1 was released to stop leaking.
+    ///
+    /// It is deliberately unreachable *without* `Updater.allowTerminationWithSheets()`: a
+    /// sheet's refusal happens before the delegate is consulted, measured on 0.20.0 with a
+    /// probe build that logged nothing from here on the failing run. Those two changes are one
+    /// change, and neither is correct alone — lifting the refusal without this leaks, and this
+    /// without lifting the refusal is dead code.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         Updater.quitByUser()
     }
 }
