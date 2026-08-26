@@ -4,6 +4,96 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.3] - 2026-08-26
+
+### Logging out is no longer blocked while an update is on screen
+
+- **A logout, a restart, or Quit from the Dock icon used to be refused while the update window was open — Force Quit was the only way past it.** macOS refuses to terminate an app while a window has a sheet attached, and the update window is a sheet that stays up for the whole download; 0.20.2 fixed the app's own 「退出 GitPic」 and ⌘Q, but the routes macOS synthesises never went through that code and stayed broken. They now quit, and they run the same cleanup, so a logout mid-install still leaves no mounted image, no half-prepared copy of the app and no download behind.
+
+<!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file. Keep each bullet above on one line — the app's update sheet renders with .inlineOnlyPreservingWhitespace, which keeps newlines verbatim, so a wrapped line breaks mid-sentence at 480pt -->
+
+### App
+
+- Two changes, and neither is correct on its own.
+  `Updater.allowTerminationWithSheets()` clears
+  `preventsApplicationTerminationWhenModal` on each sheet as it begins, so `terminate:` stops
+  being refused; `AppDelegate.applicationShouldTerminate` then routes what gets through into
+  the one quit path. Lifting the refusal alone would let AppKit tear the process down its own
+  way, running neither the login-child reap nor the staging undo — the leak 0.20.2 shipped to
+  close, reopened through a different door. The delegate alone is dead code, because a sheet's
+  refusal happens before the delegate is consulted, measured on 0.20.0 with a probe build that
+  logged nothing from it.
+- A `willBeginSheetNotification` observer rather than a fix at each presentation. There are
+  five sheet-shaped presentations today — the update sheet, 图床's 「把这个配置文件移开？」,
+  「升级前需要退出 GitPic」, 「下载并安装」 and the agent-integration confirmation — and the
+  source already recorded why per-sheet fixes are the wrong shape: they leave the next sheet
+  anyone adds to reintroduce the bug silently. The flag is read a turn later and set across
+  every sheet, because `willBeginSheet` fires before AppKit populates `attachedSheet`.
+- `QuitPathContractTests` asserts the two halves as a pair, since either alone is a defect
+  rather than half a fix. Checked by reverting each independently, plus swapping the
+  notification for the wrong one: all three turn it red.
+- `scripts/check-self-update.sh` gains the phase that settles it, because no unit test can —
+  `swift test` cannot import `GitPicApp`, and the behaviour is AppKit's with a real sheet on a
+  real window. It sends the same `kAEQuitApplication` a logout sends, mid-install, and asserts
+  both that the process is gone and that nothing is left behind. The second assertion is what
+  separates quitting from quitting correctly: had the delegate returned `.terminateNow` the
+  process would still have exited and only the debris check would have caught it.
+- Measured on the run that gated this release: the process exited, nothing was left, and the
+  mid-install quit phase won its race — the interruption landed inside staging rather than
+  after the handoff, which is the harder of the two cases it can get.
+- `tell application id … to quit` rather than clicking the Dock icon's menu, because it needs
+  no accessibility tree and does not have to make the app frontmost — which the script's own
+  comment records as poisoning the accessibility tree for the rest of the run.
+
+### Testing
+
+- The contract test built the expected skill path as
+  `agent_home.join("skills/gitpic/SKILL.md")`. On Windows `Path::join` appends that literal,
+  slashes and all, while the binary builds the path it reports one component at a time, so the
+  assertion compared `skills\gitpic\SKILL.md` against `skills/gitpic/SKILL.md`. The binary was
+  right and the test was wrong.
+- It had been wrong since the per-agent skill work landed: every push to main from 2026-08-23
+  failed the `windows-latest` leg, and 0.18.0 through 0.20.2 — six releases — all published on
+  top of that red run. Nothing noticed because a tag does not trigger `ci.yml` and nothing on
+  the tag path ran `cargo test` at all, so the two defects hid each other.
+- The gate's PASS line asserted a process it had itself killed: it named the pid of the last
+  relaunch rather than the one the update replaced, and claimed the reopened app was running
+  after a later phase had torn it down. Found by running the gate rather than by reading it.
+
+### CI
+
+- A tag now runs the test suite before anything can publish, on Linux and Windows. macOS
+  resolves the same `#[cfg(unix)]` as Linux and is genuinely redundant; Windows is the leg
+  neither can stand in for, and it is a target this release ships. Stated plainly in the
+  workflow: this gate would have blocked those six releases, over a bug in a test rather than
+  in a binary.
+- `cargo fmt --check` and `cargo clippy -- -D warnings` come along as advisory steps that
+  annotate instead of blocking. `-D warnings` on a floating `@stable` is the one check here
+  that can turn a *good* release into a failed one — a lint that did not exist when the tag
+  was cut, failing code that never saw it — and it would make re-running an old tag
+  impossible. Nothing ships worse for being unlinted.
+- The tag-path cache key matched nothing. `Swatinem/rust-cache` derives it from the job id, so
+  a job called `tests` produced `v0-rust-tests-…` where CI writes `v0-rust-test-…`: a
+  guaranteed miss on every release, followed by a 234 MB save. It now declares
+  `shared-key: test` explicitly, so renaming either job cannot silently reintroduce the miss.
+- Caches are saved only on `main`. A tag's cache is scoped to a ref recorded as
+  `refs/heads/refs/tags/vX.Y.Z`, which only a re-run of that same tag can restore, while the
+  tag run restores main's copy anyway. The repo sat at 10.7 GB against a 10 GB cap with a
+  142 MB floor per entry, so every save was evicting something a pull request depended on;
+  eleven tags were holding 6.16 GB of it.
+- `ci.yml`'s MSRV job keeps its exemption from the release path, now with the reason written
+  down rather than left as an asymmetry. Every consumer was checked: `Cargo.toml` says the
+  field only affects building from source, the crate is not on crates.io, and the Homebrew
+  formula installs a prebuilt archive and never compiles it.
+- The tap dispatch stopped working between 09:32 and 14:41 on 2026-08-24 and returned
+  `Bad credentials` for three releases, each falling back silently to the six-hourly cron.
+  `continue-on-error` was doing its job for the release and hiding a regression at the same
+  time, because a red step inside a green run is not a report. The step now tells a missing
+  token from a rejected one and raises a warning annotation and a step-summary line for
+  either.
+
+
+
 ## [0.20.2] - 2026-08-26
 
 ### The update's checksum now covers the file that actually gets installed

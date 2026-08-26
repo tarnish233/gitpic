@@ -4,6 +4,81 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.20.3] - 2026-08-26
+
+### 更新窗口开着时不再挡住注销
+
+- **在更新窗口开着的时候注销、重启、或者从 Dock 图标退出，此前都会被拒绝——唯一的出路是强制退出。**macOS 在任何窗口挂着 sheet 时都会拒绝终止 App，而更新窗口就是一个在整个下载过程中一直挂着的 sheet；0.20.2 修好的是 App 自己的「退出 GitPic」和 ⌘Q，而 macOS 自己合成的那几条路径从不经过那段代码，因此一直是坏的。现在它们能退出了，并且走的是同一套清理，所以安装中途注销同样不会留下已挂载的磁盘映像、准备了一半的应用副本和下载文件。
+
+<!-- release-notes-end: 以上是 GitHub Release 与 App 内更新弹窗共用的文案；以下只留在本文件。上面每条保持一行——App 的更新弹窗用 .inlineOnlyPreservingWhitespace 渲染，换行会保留，折行会在 480pt 处断句 -->
+
+### App
+
+- 两处改动，单独任何一处都是错的。`Updater.allowTerminationWithSheets()` 在每个 sheet 开始时
+  清掉 `preventsApplicationTerminationWhenModal`，让 `terminate:` 不再被拒；随后
+  `AppDelegate.applicationShouldTerminate` 把放行进来的请求接到唯一那条退出路径上。只做前者
+  会让 AppKit 按自己的方式拆掉进程，既不回收登录子进程也不撤销暂存——那正是 0.20.2 发布出去
+  要堵的泄漏，从另一道门又回来了。只做后者是死代码，因为 sheet 的拒绝发生在 delegate 被询问
+  之前，这一点在 0.20.0 上用探针构建实测过：失败的那次运行里它一行日志都没有。
+- 用 `willBeginSheetNotification` 观察者，而不是在每个弹出点各修一遍。今天有五处 sheet 形状的
+  呈现——更新弹窗、图床的「把这个配置文件移开？」、「升级前需要退出 GitPic」、「下载并安装」，
+  以及 agent 集成的确认框——而源码里早就记下了为什么逐点修是错的形状：它会让下一个人加的第六个
+  弹窗静默地把这个 bug 带回来。这个标记是隔一轮再读、并且对所有 sheet 都设一遍，因为
+  `willBeginSheet` 在 AppKit 填好 `attachedSheet` 之前就触发了。
+- `QuitPathContractTests` 把这两半当成一对来断言，因为任何一半单独存在都是缺陷而不是「修了一
+  半」。验证方式是分别回退每一半、再加上把 notification 换成错的那个：三种都会让它变红。
+- `scripts/check-self-update.sh` 新增了能给出结论的那个阶段，因为没有任何单元测试能——
+  `swift test` 导不进 `GitPicApp`，而这个行为是 AppKit 在真窗口上的真 sheet 上的行为。它在安装
+  进行中发出与注销完全相同的 `kAEQuitApplication`，然后同时断言进程消失了、以及没有任何残留。
+  第二条断言才是区分「退出了」和「正确地退出了」的那一条：如果 delegate 返回 `.terminateNow`，
+  进程一样会退出，只有残留检查能抓到。
+- 门控本次发布的那次运行实测：进程退出了、没有残留，并且安装中途退出的那个阶段赢下了竞态——
+  中断落在暂存过程之中而不是交接之后，那是它可能遇到的两种情况里更难的一种。
+- 用 `tell application id … to quit` 而不是去点 Dock 图标的菜单，因为它不需要辅助功能树、也不
+  必把 App 置于最前台——脚本自己的注释记着，把它置于最前台会让辅助功能树在本次运行剩下的部分
+  里失效。
+
+### 测试
+
+- 那个契约测试把期望的 skill 路径写成 `agent_home.join("skills/gitpic/SKILL.md")`。Windows 上
+  `Path::join` 会把这一整串当字面量接上去、斜杠原样保留，而二进制那边是逐分量拼出它上报的
+  路径，于是断言拿 `skills\gitpic\SKILL.md` 去比 `skills/gitpic/SKILL.md`。二进制是对的，测试
+  是错的。
+- 它从 per-agent skill 那次改动起就一直是错的：从 2026-08-23 起每一次推送到 main 都会让
+  `windows-latest` 那条腿失败，而 0.18.0 到 0.20.2 六个版本全部发布在那个红色运行之上。没人
+  发现，是因为 tag 触发不到 `ci.yml`，而 tag 路径上根本没有任何东西跑 `cargo test`——两个缺陷
+  互相掩护。
+- 门的 PASS 那行在陈述一个它自己杀掉的进程：它报的是最后一次重启的 pid 而不是更新替换掉的那
+  个，并且声称重新回来的 App 正在运行，而后面的阶段早已把它拆掉了。这是靠真跑一遍发现的，读
+  代码读不出来。
+
+### 发布方式
+
+- 一条 tag 现在会在任何东西能发布之前跑测试套件，在 Linux 和 Windows 上。macOS 和 Linux 解析
+  同一套 `#[cfg(unix)]`，是真冗余；Windows 是另外两者顶不上的那条腿，而且是这个版本真在发的
+  target。工作流里如实写着：这道门本来会挡住上面那六个发布，而挡的原因是一个测试自己的 bug，
+  不是坏二进制。
+- `cargo fmt --check` 和 `cargo clippy -- -D warnings` 一起带上，但作为只留注解、不阻塞的步骤。
+  浮动 `@stable` 上的 `-D warnings` 是这里唯一能把一个**本来没问题的**发布变成失败的检查——一
+  条 tag 被切出来时还不存在的 lint，去判一段从没见过它的代码——而且会让重跑旧 tag 变得不可能。
+  没被 lint 过的代码不会因此发得更差。
+- tag 路径上的缓存 key 谁都对不上。`Swatinem/rust-cache` 从 job id 推导它，所以叫 `tests` 的
+  job 产生 `v0-rust-tests-…`，而 CI 写的是 `v0-rust-test-…`：每次发布必然 miss，然后写入
+  234MB。现在显式声明 `shared-key: test`，于是改任何一边的 job 名都不会静默地把 miss 带回来。
+- 缓存只在 `main` 上保存。tag 写出的缓存被记在形如 `refs/heads/refs/tags/vX.Y.Z` 的 ref 上，
+  只有同一条 tag 的重跑能读到，而 tag 运行本来就能读 main 的那一份。仓库当时是 10.7 GB 顶着
+  10 GB 上限、最小的一条 142MB，所以每一次保存都在挤掉某个 pull request 依赖的东西；十一条 tag
+  一共占着 6.16 GB。
+- `ci.yml` 的 MSRV job 继续不作为发布门，但现在理由是写下来的，而不是留成一处不对称。每一个
+  消费者都核实过：`Cargo.toml` 自己写着这个字段只影响从源码构建，这个 crate 不在 crates.io 上，
+  而 Homebrew 的 formula 装的是预编译产物、从不编译它。
+- tap 的通知在 2026-08-24 的 09:32 到 14:41 之间失效，之后连续三个版本返回 `Bad credentials`，
+  每次都静默退回六小时一次的 cron。`continue-on-error` 一边在为发布做它该做的事，一边掩盖了一
+  次回归，因为绿色运行里的一个红色步骤不是报告。现在这一步会区分「没配 token」和「token 被
+  拒」，两种都会抬出一条警告注解和一行 step summary。
+
+
+
 ## [0.20.2] - 2026-08-26
 
 ### 更新的校验和现在覆盖真正被安装的那个文件
