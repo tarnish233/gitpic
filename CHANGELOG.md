@@ -57,10 +57,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   earlier slash and turning a column-0 `///` into a failure; and its file list swallowed
   a failed directory read into an empty one, so the scan could report green having read
   nothing.
-- Still uncovered, and recorded in the source rather than implied: nothing exercises a
-  real install plus a real 「退出 GitPic」 half way through it. `swift test` cannot import
-  `GitPicApp`, and `scripts/check-self-update.sh` reaches the quit through 下载并更新,
-  which is the update path's own quit and not either affordance the user presses.
+- `scripts/check-self-update.sh` now drives the quits a user presses, which it never did:
+  it reached the quit through 下载并更新, i.e. the update path's own, so 「退出 GitPic」 and
+  ⌘Q were held by a source grep alone. Two phases were added after the existing ones —
+  quitting with the update sheet attached and nothing installing, which is verbatim the
+  0.20.0 repro, and quitting while an install is genuinely in flight, followed by
+  asserting no attached image, no staging directory and no download are left.
+- That second phase is honest about a race it cannot reliably win: a 5 MB download plus a
+  `ditto` of a small bundle can finish in a couple of seconds, so the quit may land after
+  the handoff rather than inside staging. The absence assertions hold either way and the
+  run reports which of the two it got. ⌘Q is still not driven, because `keystroke` needs
+  the app frontmost and making it frontmost poisons the accessibility tree for the rest of
+  the run; it shares one selector with the menu item, which is what the unit test checks.
+- The same script used to report success while leaving the repository broken. When the
+  Cargo.toml restore did not take it warned and then ran `cargo build --release` anyway,
+  baking the fake 0.0.1 version into the shared target directory — the exact thing that
+  rebuild exists to prevent — and still exited 0 with `PASS` already printed. It now skips
+  the rebuild, fails the run, and keeps its pristine copies to restore from instead of
+  deleting them and pointing at `git checkout --`, which its own header explains it must
+  not use in a checkout worked by several agents at once.
 
 ## [0.20.1] - 2026-08-25
 

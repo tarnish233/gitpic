@@ -14,12 +14,14 @@ import Testing
 ///
 /// **Being honest about what a grep can and cannot hold.** It cannot see whether `quitByUser`
 /// is *reachable* — a cleared target, a reordered menu, a `validateMenuItem` returning false
-/// would all leave this green. Nothing else covers that either, and it is worth naming rather
-/// than implying: `scripts/check-self-update.sh` drives the real app, but it reaches the quit
-/// through 检查更新 → 下载并更新, which is `Updater.quitForUpdate` — **not** the two affordances
-/// this suite is about. So 「退出 GitPic」 and ⌘Q are held by this source scan alone. What the scan
-/// is genuinely good for is the half that has already gone wrong twice: a spelling of `terminate`
-/// coming back into a file nobody re-read.
+/// would all leave this green. That half is `scripts/check-self-update.sh`'s two 「退出 GitPic」
+/// phases, which drive the real menu item on a real app: once with the update sheet attached,
+/// which is verbatim the 0.20.0 repro, and once during a real install. ⌘Q is not driven even
+/// there — `keystroke` needs the app frontmost and making it so poisons the accessibility tree
+/// for the rest of the run — so ⌘Q rests on sharing one selector with the menu item, which is
+/// what `bothAffordancesRouteToTheOnePath` below checks. What the scan is genuinely good for is
+/// the half that has already gone wrong twice: a spelling of `terminate` coming back into a file
+/// nobody re-read.
 @Suite("Quit path contract")
 struct QuitPathContractTests {
 
