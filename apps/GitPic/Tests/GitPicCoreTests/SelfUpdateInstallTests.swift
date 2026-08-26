@@ -157,9 +157,30 @@ struct SelfUpdateInstallTests {
     private struct Fixture {
         let root: URL
         let target: URL
-        let dmg: URL
+        let dmg: SelfUpdate.VerifiedImage
         /// The stand-in for `/Applications`: the directory the swap and the sweep work in.
         var apps: URL { target.deletingLastPathComponent() }
+    }
+
+    /// A `VerifiedImage` for a file on disk, without going through a download.
+    ///
+    /// `stage` takes a `VerifiedImage` so that no unverified path can reach it in production —
+    /// see the type's own comment. These suites are the legitimate exception: they build their
+    /// image locally, so its digest is not in question, and what they exercise is everything
+    /// `stage` does *after* the identity check. `measured` therefore records the identity the
+    /// file actually has, which is what makes the check pass here and fail in
+    /// `refusesAnImageSwappedAfterVerification`, where the file is swapped on purpose.
+    ///
+    /// `lstat` and not `stat`, to match what `confirmUnchanged` asks: for a regular file the two
+    /// are identical, and `refusesAnImageBehindASymlink` is the case where they are not.
+    private static func measured(_ url: URL) throws -> SelfUpdate.VerifiedImage {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return SelfUpdate.VerifiedImage(
+            url: url, sha256: try SelfUpdate.sha256OfFile(at: url),
+            dev: info.st_dev, ino: info.st_ino)
     }
 
     private static func fixture(installed: String = "0.18.0") throws -> Fixture {
@@ -173,7 +194,7 @@ struct SelfUpdateInstallTests {
         try FileManager.default.createDirectory(at: apps, withIntermediateDirectories: true)
         let target = apps.appendingPathComponent("GitPic.app")
         try makeApp(at: target, version: installed)
-        return Fixture(root: root, target: target, dmg: dmg)
+        return Fixture(root: root, target: target, dmg: try Self.measured(dmg))
     }
 
     /// Names in a directory starting with `prefix`.
@@ -192,6 +213,118 @@ struct SelfUpdateInstallTests {
         let tmp = FileManager.default.temporaryDirectory.path
         return Set(((try? FileManager.default.contentsOfDirectory(atPath: tmp)) ?? [])
             .filter { $0.hasPrefix("gitpic-mount-") })
+    }
+
+    /// The digest has to cover the bytes that get mounted, not a path that once held them.
+    ///
+    /// `download` hashes through one descriptor and `hdiutil` opens the path again, with a
+    /// `Task.checkCancellation` and a hop onto a serial queue shared with a 20 s
+    /// `brew list --cask` in between — so this window is tens of seconds wide, not instants.
+    /// Before the identity check existed, the image swapped in here is the one that would have
+    /// been copied to `/Applications`, de-quarantined and launched, with `codesign --verify`
+    /// passing on it because anyone can ad-hoc sign a bundle.
+    ///
+    /// The swap is by `replaceItem`, i.e. a rename — a new inode at the same path, which is how
+    /// this is actually done. Rewriting the same inode in place is deliberately *not* caught;
+    /// see `confirmUnchanged`.
+    ///
+    /// **The substitute is a byte-identical copy of the image, and that is the whole point.** It
+    /// used to be 31 bytes of ASCII, which made this test prove nothing at all: `hdiutil attach`
+    /// refuses garbage on its own, with the same `InstallFailure.image` case, so the test passed
+    /// verbatim with `confirmUnchanged` deleted — assertion for assertion identical to
+    /// `refusesGarbage` below. A valid image makes the guard load-bearing: remove it and the
+    /// attach succeeds, the version gate passes, `ditto` runs and the assertions below about
+    /// nothing having been staged are what fail. Byte-identical rather than merely valid because
+    /// it is the strongest premise available — the digest cannot tell the two files apart, so the
+    /// only thing that can is the inode, which is exactly the property under test.
+    @Test("an image swapped after verification is refused, not installed")
+    func refusesAnImageSwappedAfterVerification() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let mountsBefore = Self.mountLeftovers()
+
+        // A private copy, because `fixture()` hands every test in this suite the *same* image
+        // (`sharedImage`) and this test is going to destroy the one it is given.
+        let mine = f.root.appendingPathComponent("GitPic-0.19.0-macos-arm64.dmg")
+        try FileManager.default.copyItem(at: f.dmg.url, to: mine)
+        let verified = try Self.measured(mine)
+
+        // Now something else takes its place at that path, keeping the name. Same bytes, so the
+        // digest still matches; different inode, which is all the guard has to go on.
+        let impostor = f.root.appendingPathComponent("impostor.dmg")
+        try FileManager.default.copyItem(at: f.dmg.url, to: impostor)
+        _ = try FileManager.default.replaceItemAt(verified.url, withItemAt: impostor)
+        // Same path, different inode — the premise of the test.
+        var now = stat()
+        #expect(lstat(verified.url.path, &now) == 0)
+        #expect(now.st_ino != verified.ino, "the swap did not change the inode")
+
+        do {
+            _ = try SelfUpdate.stage(dmg: verified, expectedVersion: "0.19.0",
+                                     replacing: f.target)
+            Issue.record("a swapped image must be refused, not installed")
+        } catch let failure as SelfUpdate.InstallFailure {
+            // The exact case, not just the type: a valid substitute would otherwise install, and
+            // an invalid one throws the same case from `hdiutil` for an unrelated reason.
+            #expect(failure == .image("下载的磁盘映像在校验之后被替换过，已中止安装"),
+                    "expected the identity refusal, got \(failure)")
+        }
+
+        // Nothing was installed: the target is still the 0.18.0 bundle the fixture put there,
+        // and no staging directory was left beside it.
+        #expect(Self.entries(in: f.apps, prefix: ".GitPic-update-").isEmpty)
+        #expect(SelfUpdate.bundleVersion(of: f.target) == "0.18.0")
+        // And the refusal happened before the attach, so there is no mount to clean up.
+        #expect(Self.mountLeftovers() == mountsBefore)
+    }
+
+    /// A symlink at the download path is a substitution too, and `stat` cannot see it.
+    ///
+    /// `stat` follows symlinks, so against it the check proves only that the path *resolves to*
+    /// the verified inode. But a symlink does not replace the file, it replaces the **name** —
+    /// and the name is what `hdiutil` is handed. Measured before the fix: move the verified image
+    /// aside and leave a symlink to it at the download path, and the compare passes, because a
+    /// rename preserves the inode the digest was taken from. That turns the check's subject into
+    /// an indirection someone else controls, so only re-pointing the link has to land inside the
+    /// race window rather than the whole substitution.
+    ///
+    /// `lstat` reports the link's own inode and refuses. Reverting `confirmUnchanged` to `stat`
+    /// fails exactly here.
+    @Test("an image reached through a symlink is refused")
+    func refusesAnImageBehindASymlink() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let mountsBefore = Self.mountLeftovers()
+
+        let mine = f.root.appendingPathComponent("GitPic-0.19.0-macos-arm64.dmg")
+        try FileManager.default.copyItem(at: f.dmg.url, to: mine)
+        let verified = try Self.measured(mine)
+
+        // The bytes move aside — a rename, so they keep the inode the digest was taken from —
+        // and the path the installer will use becomes a link to them.
+        let real = f.root.appendingPathComponent("really-here.dmg")
+        try FileManager.default.moveItem(at: mine, to: real)
+        try FileManager.default.createSymbolicLink(at: mine, withDestinationURL: real)
+
+        // The premise: `stat` cannot tell this apart from the honest case, `lstat` can.
+        var followed = stat(), link = stat()
+        #expect(stat(mine.path, &followed) == 0)
+        #expect(followed.st_ino == verified.ino, "the rename should have kept the inode")
+        #expect(lstat(mine.path, &link) == 0)
+        #expect(link.st_ino != verified.ino, "the symlink has an inode of its own")
+
+        do {
+            _ = try SelfUpdate.stage(dmg: verified, expectedVersion: "0.19.0",
+                                     replacing: f.target)
+            Issue.record("an image behind a symlink must be refused")
+        } catch let failure as SelfUpdate.InstallFailure {
+            #expect(failure == .image("下载的磁盘映像在校验之后被替换过，已中止安装"),
+                    "expected the identity refusal, got \(failure)")
+        }
+
+        #expect(Self.entries(in: f.apps, prefix: ".GitPic-update-").isEmpty)
+        #expect(SelfUpdate.bundleVersion(of: f.target) == "0.18.0")
+        #expect(Self.mountLeftovers() == mountsBefore)
     }
 
     @Test("staging copies the image's app beside the target, signature and all")
@@ -628,7 +761,7 @@ struct SelfUpdateInstallTests {
         try Data("this is not a disk image".utf8).write(to: notAnImage)
 
         #expect(throws: SelfUpdate.InstallFailure.self) {
-            _ = try SelfUpdate.stage(dmg: notAnImage, expectedVersion: "0.19.0",
+            _ = try SelfUpdate.stage(dmg: Self.measured(notAnImage), expectedVersion: "0.19.0",
                                      replacing: root.appendingPathComponent("GitPic.app"))
         }
         // Nothing was mounted, so the mount point was removed by the plain `rmdir` path — no

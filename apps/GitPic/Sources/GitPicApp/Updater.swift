@@ -157,7 +157,7 @@ enum Updater {
         // way" as it claimed: the success path ends in `exit()`, so the `defer` never ran and
         // every successful install leaked the image until the next launch's sweep, ≥24 h later.
         // Hence the explicit removal below as well.
-        defer { try? FileManager.default.removeItem(at: dmg) }
+        defer { try? FileManager.default.removeItem(at: dmg.url) }
 
         // Cancellation between the hash and the mount. `download` already deletes its own
         // partial file, so there is nothing else to undo here.
@@ -190,7 +190,7 @@ enum Updater {
         } onCancel: {
             cancelled.set()
         }
-        try? FileManager.default.removeItem(at: dmg)
+        try? FileManager.default.removeItem(at: dmg.url)
 
         // The last moment cancellation can mean anything, and the only one with something to
         // undo: a bundle-sized staging directory beside the app. After the handoff below the

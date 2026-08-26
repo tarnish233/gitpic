@@ -257,10 +257,13 @@ struct ReleaseAssetTests {
         let file = try await SelfUpdate.download(
             asset: Self.asset(url: source, digest: "sha256:\(sha)"),
             sha256: sha, onProgress: { _ in })
-        defer { try? FileManager.default.removeItem(at: file) }
+        defer { try? FileManager.default.removeItem(at: file.url) }
 
-        #expect(FileManager.default.fileExists(atPath: file.path))
-        #expect(try SelfUpdate.sha256OfFile(at: file) == sha)
+        #expect(FileManager.default.fileExists(atPath: file.url.path))
+        #expect(try SelfUpdate.sha256OfFile(at: file.url) == sha)
+        // The digest is reported back rather than left for the caller to recompute, and it is
+        // the one that was actually checked.
+        #expect(file.sha256 == sha)
     }
 
     /// **The test this file exists for.** A download whose hash does not match must be
@@ -321,7 +324,7 @@ struct ReleaseAssetTests {
         let file = try await SelfUpdate.download(
             asset: Self.asset(url: source, digest: "sha256:\(sha)"),
             sha256: sha, onProgress: { progress in seen.withLock { $0.append(progress) } })
-        defer { try? FileManager.default.removeItem(at: file) }
+        defer { try? FileManager.default.removeItem(at: file.url) }
 
         let reports = seen.value
         #expect(!reports.isEmpty, "no progress was reported")

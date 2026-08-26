@@ -58,7 +58,7 @@ extension SelfUpdate {
     ///   exactly like a failure, through the same two `defer`s: image detached, staging
     ///   directory gone, installed bundle untouched.
     public static func stage(
-        dmg: URL,
+        dmg: VerifiedImage,
         expectedVersion: String,
         replacing target: URL,
         isCancelled: @escaping @Sendable () -> Bool = { false }
@@ -67,20 +67,32 @@ extension SelfUpdate {
         let mount = FileManager.default.temporaryDirectory
             .appendingPathComponent("gitpic-mount-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
+        // The detach is installed before the attach — and before the identity check below — on
+        // purpose. A timed-out `attach` is not a failed one: `ChildProcess` terminates and then
+        // `SIGKILL`s the `hdiutil` it spawned, and the attach the kernel had already committed
+        // to survives that — so the one path that must not skip the detach is the one that
+        // failed. `detachMount` is a no-op plus an `rmdir` when nothing is mounted, so it costs
+        // nothing on the ordinary refusals, and it is what removes the directory just created
+        // when this returns before ever attaching.
+        defer { detachMount(at: mount) }
+        // The digest was taken through one descriptor; `hdiutil` is about to open the path
+        // again. Between those two opens sits a `Task.checkCancellation` and a hop onto
+        // `probeQueue`, which is serial and shared with a 20 s `brew list --cask` — so the
+        // window is not instants, it is tens of seconds. Without this the digest would prove
+        // something about bytes that are never installed.
+        //
+        // Placed as late as possible, immediately before the attach, because everything this
+        // rules out is a race: the less code between the check and the use, the less there is
+        // to race with.
+        try confirmUnchanged(dmg)
         // `-mountpoint` rather than letting it land in `/Volumes`: the name there is chosen
         // from the volume label and gets a numeric suffix when it collides, so the path this
         // reads from would be decided by whatever else happens to be mounted.
         let attach = try? ChildProcess.run(
             executable: URL(fileURLWithPath: "/usr/bin/hdiutil"),
-            args: ["attach", dmg.path, "-nobrowse", "-readonly",
+            args: ["attach", dmg.url.path, "-nobrowse", "-readonly",
                    "-mountpoint", mount.path],
             timeout: 120)
-        // The detach is installed before the guard on purpose. A timed-out `attach` is not a
-        // failed one: `ChildProcess` terminates and then `SIGKILL`s the `hdiutil` it spawned,
-        // and the attach the kernel had already committed to survives that — so the one path
-        // that must not skip the detach is the one that failed. `detachMount` is a no-op plus
-        // an `rmdir` when nothing is mounted, so it costs nothing on the ordinary refusals.
-        defer { detachMount(at: mount) }
         guard let attach, attach.status == 0, !attach.timedOut else {
             let detail = attach?.timedOut == true
                 ? "打开磁盘映像超时"
@@ -775,6 +787,44 @@ extension SelfUpdate {
             }
         }
         return swept
+    }
+
+    /// Refuse unless the path still names the inode whose bytes were hashed.
+    ///
+    /// What this catches is the practical attack: anything that *replaces* the file — a
+    /// `rename` over it, an unlink and recreate — gives the path a new inode, and the compare
+    /// fails. What it does not catch is a process rewriting the same inode in place. That is
+    /// deliberate and worth stating rather than implying: `$TMPDIR` is mode 0700 for this user
+    /// and the name carries a fresh UUID, so a process able to rewrite that file in place is
+    /// already running as this user — and can write `/Applications` directly, without any of
+    /// this. So the honest claim is narrow: the digest now covers the bytes that get mounted.
+    ///
+    /// Origin is a separate question this does not answer, and cannot: the release is ad-hoc
+    /// signed and unnotarised, so there is no identity to pin. `codesign --verify` below proves
+    /// the bundle is internally intact, not who made it. The digest is the only authentication
+    /// on this path, which is exactly why it has to actually bind.
+    ///
+    /// **`lstat` and not `stat`, and that is the difference between the claim above being true
+    /// and being decorative.** `stat` follows symlinks, so against it this proves only "the path
+    /// *resolves to* this inode" — and a symlink is not a replacement of the file, it is a
+    /// replacement of the *name*, which is the thing `hdiutil` is handed. Measured: move the
+    /// verified image aside and drop a symlink at the download path pointing at it, and `stat`
+    /// reports the target's `dev`/`ino` so the compare **passes**; `lstat` reports the link's own
+    /// and it fails. Passing turns the check's subject into an indirection someone else controls
+    /// and `hdiutil` will follow, so the half of the race that has to be set up in advance
+    /// becomes free and only re-pointing the link has to land inside the window. `lstat` is
+    /// strictly stronger here and costs nothing: `fetch` builds the destination itself as
+    /// `temporaryDirectory/gitpic-update-<UUID>.dmg` and the delegate creates it with
+    /// `moveItem`, so on the honest path the last component is always a regular file. The
+    /// sibling ``isMountPoint(_:)`` already uses raw `lstat` for the same reason.
+    private static func confirmUnchanged(_ dmg: VerifiedImage) throws {
+        var now = stat()
+        guard lstat(dmg.url.path, &now) == 0 else {
+            throw InstallFailure.image("下载的磁盘映像已经不在原处")
+        }
+        guard now.st_dev == dmg.dev, now.st_ino == dmg.ino else {
+            throw InstallFailure.image("下载的磁盘映像在校验之后被替换过，已中止安装")
+        }
     }
 
     /// Whether `inner` is `outer` or sits inside it.
