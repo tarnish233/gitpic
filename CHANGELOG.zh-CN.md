@@ -4,6 +4,40 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.20.5] - 2026-08-26
+
+### 更新检查现在会用你已有的 GitHub 凭据，绕开共享 IP 的限流
+
+- **未认证的 GitHub API 每小时只给 60 次，而这个额度是按 IP 算的、不是按人算的。**在共享出口（公司网络、运营商 NAT）后面，这 60 次属于出口后面所有人 —— 实测一台当天只检查过一次的机器，GitHub 回的是 `API rate limit exceeded`、`x-ratelimit-used: 60`，而同一个请求换一条出口还剩 52 次。对这些用户来说匿名路径不是慢，是**根本不能用**。
+- **所以更新检查现在会带上 `gitpic auth login` 存下的那个凭据**，额度从共享 IP 的 60 次/小时变成你账号的 5000 次/小时 —— 这正是 GitHub 那条错误信息自己建议的做法。不需要任何权限，一个没有任何 scope 的 token 也一样能提额。
+- **没登录过的人一切不变**：没有凭据就不发，还是原来的匿名请求。而如果凭据被 GitHub 拒绝（过期、撤销），它会退回匿名再试一次而不是直接失败 —— 图床凭据过期不该连「有新版本」都告不了你。
+
+<!-- release-notes-end: 以上是 GitHub Release 与 App 内更新弹窗共用的文案；以下只留在本文件。上面每条保持一行——App 的更新弹窗用 .inlineOnlyPreservingWhitespace 渲染，换行会保留，折行会在 480pt 处断句 -->
+
+### CLI
+
+- `release.rs` 的模块文档原本明确写着不发凭据：「would put the user's token on a request that
+  has no business carrying it」。这一半被实测推翻了，理由记在模块头里：60 次/小时是按地址算的，
+  而地址不等于人。另一半（两个模块各有自己的错误映射，因为同样的状态码含义不同）仍然成立，也是
+  这两个模块继续分开的原因。
+- 让出的和没让的都写下来了。凭据发往 `api.github.com` —— 与 `gitpic auth login` 本来就把它发去
+  的同一个主机、同一个 token —— 只有 GitHub 看得到它，本项目的仓库作者看不到。它是**可选的**：
+  没凭据就不发 header。被拒绝时退回匿名，所以过期的图床 token 不会破坏更新检查。并且这个请求
+  **完全不跟随重定向**（`redirect::Policy::none()`），header 没有别处可去。
+- 原先那条断言「更新检查绝不发凭据」的测试是**收紧而不是删掉**。空泛的禁令现在是假的，而关于凭据
+  的假注释比没有注释更糟；仍然成立且仍然值得守的是三条：没凭据时不发（`sends_no_credential_when_there_is_none`）、
+  有凭据时只以 bearer 形式发往编译期常量的 base（`sends_the_credential_only_to_the_fixed_base`）、
+  以及绝不跟随重定向（`does_not_follow_a_redirect_with_a_credential`）。三条都做过「回退即红」验证。
+- 凭据改成参数而不是在 `check_against` 里读文件。否则那条安全断言在 CI 上通过、在任何跑过
+  `gitpic auth login` 的开发机上失败 —— 一条判决取决于机器状态的安全断言不算断言。
+- 重定向那个测试第一版是空过的，这一点写在它自己的文档注释里：它把 `Location` 指向
+  `example.invalid`，那个域名解析不到，于是「跟随」和「拒绝跟随」产生完全相同的两个可观察事实
+  （一个请求、一个错误），把 `Policy::none()` 删掉它照样绿。现在 `Location` 指回 stub 自己，
+  跟随就会产生第二个请求。
+- 实测确认了这段代码依赖的两个前提：坏 token 在这个端点上 GitHub 回 **401**（不是 403），所以
+  回退分支真的会触发；以及带凭据跑一次检查之后**未认证配额一动不动**（47 → 47），所以它确实是
+  认证过去的。
+
 ## [0.20.4] - 2026-08-26
 
 ### 被拒绝的更新检查现在会说清是哪一种拒绝
