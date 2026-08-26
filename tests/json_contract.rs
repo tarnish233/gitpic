@@ -728,7 +728,15 @@ fn skill_install_never_replaces_differing_content_without_force() {
 fn generic_agent_installs_under_agent_home() {
     let sb = Sandbox::new("generic-agent");
     let agent_home = sb.dir.join(".agent");
-    let installed = agent_home.join("skills/gitpic/SKILL.md");
+    // Component by component, and this is the one place in this file where that matters:
+    // the value below is compared *as a string* against `/installed/0/path`, while every
+    // other `join("skills/gitpic/SKILL.md")` here only feeds `is_file` or `read_to_string`,
+    // which take a forward slash on Windows without complaint. `skill.rs` builds the path
+    // it reports one component at a time, so on Windows it says `skills\gitpic\SKILL.md`
+    // while a single joined literal keeps the slashes it was written with. Measured: the
+    // one-literal version failed the `windows-latest` leg on every push from 2026-08-23
+    // for three days, and six releases went out over the red run.
+    let installed = agent_home.join("skills").join("gitpic").join("SKILL.md");
     let env: &[(&str, &str)] = &[(
         "AGENT_HOME",
         agent_home.to_str().expect("utf-8 generic agent path"),
