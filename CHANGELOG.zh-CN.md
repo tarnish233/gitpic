@@ -4,6 +4,36 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.20.6] - 2026-08-26
+
+### 窗口已经开着时，「打开设置」不再毫无反应
+
+- 之前窗口开着又被别的 App 挡住时，点「打开设置」不会把它带到前面，看着像没反应
+- 「连通性测试」「检查更新」也一样 —— 它们照跑了，只是把结果画在了一个你看不见的窗口里
+
+<!-- release-notes-end: 以上是 GitHub Release 与 App 内更新弹窗共用的文案；以下只留在本文件。上面每条保持一行——App 的更新弹窗用 .inlineOnlyPreservingWhitespace 渲染，换行会保留，折行会在 480pt 处断句 -->
+
+### App
+
+- 原因是激活被写成了引用计数的副作用。`AppActivationPolicy.enter()` 既升 `.regular` 又调
+  `NSApp.activate`，而 `SettingsWindowController.showWindow` 为了不让计数泄漏（关窗必须把 Dock
+  图标还回去）用 `holdingActivation` 把 `enter()` 挡在 guard 里 —— 窗口已经开着时，那个 guard
+  就把激活一起挡掉了。
+- `showWindow` 里没有别的东西顶得上这一半。`makeKeyAndOrderFront` 只把窗口排到**本进程自己**那些
+  窗口的前面；一个没被激活的 App，它的窗口一个也不会排到当前活跃 App 的前面。
+- 于是两件事拆成两个调用：`enter()` 只管策略（每个窗口一次，所以继续计数），新增 `comeForward()`
+  只管激活（每次都要，所以放在 guard 外面）。`pickFiles` 的文件面板原来靠的是同一个副作用，现在
+  也把两句都写出来。
+- 实测，只差这一处代码：同一个 accessibility 脚本分别驱动已发布的 0.20.5 和这个构建 —— 窗口已开、
+  Finder 占着屏幕、各 5 次，每次都先确认 Finder 真的拿到了屏幕。0/5，然后 5/5。前面每个阶段
+  （冷启动打开、关闭、重开、再关、再重开、切走）两边完全一致。
+- `WindowFocusContractTests` 守住这个形状。用源码扫描，因为 `GitPicApp` 是 executableTarget、测试
+  导入不了，而行为在 AppKit 手里 —— 和 `QuitPathContractTests` 同一个理由。它断言激活能从 guard
+  **外面**走到，且 `enter()` 不是激活的那个；三种回退都验证过会让它变红。
+- 修掉一条假注释：`activateIgnoringOtherApps:` **还没有**被废弃。SDK 标的是
+  `API_TO_BE_DEPRECATED`（「将在未来版本废弃」），所以编译不报警告。它在 macOS 14 的替代品是严格的
+  协作式激活，这里没有任何实测支持那一个。
+
 ## [0.20.5] - 2026-08-26
 
 ### 更新检查不再被共享 IP 的限流卡住
