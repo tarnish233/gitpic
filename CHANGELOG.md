@@ -4,6 +4,64 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.2] - 2026-08-26
+
+### The update's checksum now covers the file that actually gets installed
+
+- **The checksum was verified on one open of the download, and the disk image was mounted through another.** Nothing proved the two were the same file, so the bytes that were checked were not provably the bytes that got installed. The identity of what was hashed is now recorded and re-checked immediately before mounting, and a mismatch aborts the install.
+- **A symlink left at the download path is refused too.** The old check followed the link, so pointing it at the verified image passed — which handed the subject of the check to whoever made the link.
+- **Quitting GitPic while an update is installing no longer leaves anything behind.** Quitting during an install used to be impossible, because macOS refused it while the update window was open; now that it works, it also removes the mounted disk image, the half-prepared copy of the app and the download, instead of leaving them on disk until the next day's cleanup.
+
+<!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file. Keep each bullet above on one line — the app's update sheet renders with .inlineOnlyPreservingWhitespace, which keeps newlines verbatim, so a wrapped line breaks mid-sentence at 480pt -->
+
+### App
+
+- The digest and the `dev`/`ino` of the bytes it covers are now taken through a single
+  descriptor — `fstat` on the handle that was hashed, never a second path lookup — and
+  `stage` re-asserts that the path still names that inode immediately before `hdiutil
+  attach`. The window between the two opens is not instants: a `Task.checkCancellation`
+  and a hop onto a serial queue shared with a 20 s `brew list --cask` sit inside it.
+- That re-assertion uses `lstat`, not `stat`. `stat` follows symlinks, so against it the
+  check proves only that the path *resolves to* the verified inode — and a symlink does
+  not replace the file, it replaces the name, which is what `hdiutil` is handed.
+  Measured: move the image aside and leave a symlink to it at the download path, and the
+  compare passes, because a rename keeps the inode the digest was taken from.
+- The test for that refusal now substitutes a byte-identical copy of the image rather
+  than 31 bytes of ASCII. With garbage it asserted nothing: `hdiutil attach` refuses
+  garbage on its own and throws the same case, so the test passed with the check deleted.
+  Byte-identical is the strongest premise there is — the digest cannot tell the two files
+  apart, so only the inode can.
+- 「退出 GitPic」 and ⌘Q used `NSApplication.terminate`, which AppKit refuses while any
+  window has a sheet attached, so 图床's move-the-config alert and the update sheet each
+  made the app unquittable. Both now route to the same real `exit` the update path uses.
+- Fixing that removed a protection nothing had noticed: AppKit's refusal was the only
+  thing preventing a quit *during* an install, since the install is started from a button
+  inside the update sheet and that sheet stays attached throughout. `exit` runs no
+  cleanup handlers, so `stage` now registers what it creates and the quit undoes it —
+  killing the child still writing, removing the staging directory and the image, and
+  handing the mount to a detached `hdiutil detach -force` that outlives the process.
+- Three things about that undo are load-bearing, and each was wrong first. `hdiutil
+  attach` is deliberately never killed, because an attach the kernel has committed to
+  survives its process and racing it unlinks the mount point out from under an arriving
+  image — unrecoverable rather than merely leaked. The staging directory is claimed
+  atomically before the install script is spawned, or a quit landing in between would
+  delete the bundle the script is about to move and its rollback trap would put the old
+  one back, turning a successful install into a silent rollback. And registering answers
+  rather than records: a drain takes what is registered at that moment, and the quit does
+  a blocking `UserDefaults.synchronize()` before exiting — ample time for `stage` to
+  create a directory nothing would read again.
+- The quit-path tripwire now looks for every spelling AppKit accepts. It looked for the
+  literal `NSApplication.terminate`, which does not match `NSApp.terminate(nil)` — the
+  form 0.20.0 actually shipped, and the form the source names five times when explaining
+  the defect. Its comment stripper split on a single `/`, hiding real code after any
+  earlier slash and turning a column-0 `///` into a failure; and its file list swallowed
+  a failed directory read into an empty one, so the scan could report green having read
+  nothing.
+- Still uncovered, and recorded in the source rather than implied: nothing exercises a
+  real install plus a real 「退出 GitPic」 half way through it. `swift test` cannot import
+  `GitPicApp`, and `scripts/check-self-update.sh` reaches the quit through 下载并更新,
+  which is the update path's own quit and not either affordance the user presses.
+
 ## [0.20.1] - 2026-08-25
 
 ### Fixes an update that installed and then kept running the old build
