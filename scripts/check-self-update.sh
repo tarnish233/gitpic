@@ -116,6 +116,9 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/gitpic-selfupdate-check.XXXXXX")"
 cp "$ROOT/Cargo.toml" "$WORK/Cargo.toml.orig"
 cp "$ROOT/Cargo.lock" "$WORK/Cargo.lock.orig"
 RESTORED=0
+# Set by the restore check in `cleanup` when it could not put Cargo.toml back: the
+# pristine copies have to outlive the run so there is something to restore from.
+KEEP_WORK=0
 TEST_PID=""
 
 cleanup() {
@@ -126,11 +129,37 @@ cleanup() {
     step "restoring Cargo.toml/Cargo.lock and the shared release binary"
     cp "$WORK/Cargo.toml.orig" "$ROOT/Cargo.toml"
     cp "$WORK/Cargo.lock.orig" "$ROOT/Cargo.lock"
-    # The release binary lives in a CARGO_TARGET_DIR shared with every other worktree
-    # (AGENTS.md), so leaving it built at $OLD_VERSION would make the next agent's
-    # build-app.sh fail its version guard on a "stale binary" that this script staled.
-    ( cd "$ROOT" && cargo build --release >/dev/null 2>&1 ) \
-      || echo "    warning: could not rebuild $REAL_VERSION; run 'cargo build --release'" >&2
+    # Checked, not announced. This message used to print unconditionally while the copies
+    # above were unchecked (`set +e` is on, and neither had a `||`), so a restore that did
+    # not happen was indistinguishable from one that did — and the repository was left at
+    # $OLD_VERSION with the script claiming otherwise. Observed once, on 2026-08-25.
+    local back
+    back="$(cargo_version)"
+    if [[ "$back" != "$REAL_VERSION" ]]; then
+      # An error and not a warning-on-the-way-past. This used to warn and then fall straight
+      # into the rebuild below, which would bake $OLD_VERSION into the shared
+      # CARGO_TARGET_DIR — the exact outcome that rebuild exists to prevent — and then exit 0
+      # with `PASS` already printed above. So: skip the rebuild, keep $WORK so the pristine
+      # copies are still there to restore *from*, and fail the run.
+      KEEP_WORK=1
+      code=1
+      echo "    ERROR: Cargo.toml is at ${back:-<unreadable>}, not $REAL_VERSION." >&2
+      echo "    Restore from the copies this run saved, not from git — 'git checkout --'" >&2
+      echo "    would also discard whatever else this working tree had in flight, and the" >&2
+      echo "    repo is worked by several agents at once (AGENTS.md):" >&2
+      echo "      cp $WORK/Cargo.toml.orig $ROOT/Cargo.toml" >&2
+      echo "      cp $WORK/Cargo.lock.orig $ROOT/Cargo.lock" >&2
+      echo "      (cd $ROOT && cargo build --release)" >&2
+    else
+      # The release binary lives in a CARGO_TARGET_DIR shared with every other worktree
+      # (AGENTS.md), so leaving it built at $OLD_VERSION would make the next agent's
+      # build-app.sh fail its version guard on a "stale binary" that this script staled.
+      if ! ( cd "$ROOT" && cargo build --release >/dev/null 2>&1 ); then
+        code=1
+        echo "    ERROR: could not rebuild $REAL_VERSION, so the shared release binary may" >&2
+        echo "    still be at $OLD_VERSION. Run 'cargo build --release'." >&2
+      fi
+    fi
   fi
   if [[ $KEEP -eq 0 ]]; then
     if [[ -n "$TEST_PID" ]] && kill -0 "$TEST_PID" 2>/dev/null; then kill "$TEST_PID"; fi
@@ -144,7 +173,7 @@ cleanup() {
   else
     echo "    --keep: left $TEST_APP in place"
   fi
-  rm -rf "$WORK"
+  if [[ $KEEP_WORK -eq 0 ]]; then rm -rf "$WORK"; else echo "    left $WORK in place" >&2; fi
   if (( code != 0 )) && [[ -f "$APP_LOG" ]]; then
     echo
     echo "--- $APP_LOG (this run) ---"
@@ -179,10 +208,21 @@ BUILT="$WORK/dist-app/GitPic.app"
 # rather than after the install means a release feed that cannot be reached fails the run
 # with a clear message instead of as a UI timeout.
 step "asking the CLI what the latest release is"
+# The CLI's own error is kept rather than sent to /dev/null. It used to be discarded and the
+# failure reported as "no network, or the release feed is unreachable" — a guess, and on the
+# run that prompted this an actively wrong one: the feed was reachable and the real cause was
+# an exhausted unauthenticated rate limit (60/hr, shared with anything else on the machine
+# touching api.github.com). `update check` already answers precisely — RATE_LIMITED vs
+# REMOTE_NOT_FOUND vs NETWORK — so the gate's job is to pass that answer on, not to invent one.
+UPDATE_JSON="$("$BUILT/Contents/Resources/gitpic" update check --json 2>"$WORK/update-check.err")" \
+  || fail "gitpic update check exited non-zero:
+$(cat "$WORK/update-check.err")
+${UPDATE_JSON:-（stdout 为空）}"
 TARGET_VERSION="$(
-  "$BUILT/Contents/Resources/gitpic" update check --json 2>/dev/null \
-    | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["latest"])'
-)" || fail "gitpic update check failed — no network, or the release feed is unreachable"
+  printf '%s' "$UPDATE_JSON" \
+    | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["latest"])' 2>/dev/null
+)" || fail "update check returned no \"latest\"; its own answer was:
+$UPDATE_JSON"
 [[ -n "$TARGET_VERSION" ]] || fail "could not read the latest version from update check"
 echo "    latest release is $TARGET_VERSION; the test copy will start at $OLD_VERSION"
 
@@ -350,6 +390,203 @@ step "asserting the machine's own GitPic was not touched"
 SYSTEM_AFTER="$(system_fingerprint)"
 [[ "$SYSTEM_AFTER" == "$SYSTEM_BEFORE" ]] \
   || fail "/Applications/GitPic.app changed: '$SYSTEM_BEFORE' -> '$SYSTEM_AFTER'"
+
+# ------------------------------------------------- the quits the user presses
+#
+# Everything above drives 检查更新 → 下载并更新, which reaches the quit through
+# `Updater.quitForUpdate`. It therefore says nothing at all about the two affordances a user
+# actually presses — 「退出 GitPic」 and ⌘Q — and those are the ones that shipped broken in
+# 0.20.0 and stayed broken for two releases. They were held by a source grep alone
+# (`QuitPathContractTests`), which cannot see whether the menu item is reachable.
+#
+# ⌘Q is deliberately not driven here: `keystroke` needs the app frontmost, and the comment
+# on `ax` above records that `set frontmost to true` poisons the process into answering
+# -1719 to every later `window 1`. The menu item and ⌘Q share one selector and one
+# `Updater.quitByUser`, so the menu item is the honest half to assert.
+
+# Whatever is running from the test path, gone, so the next launch is unambiguous.
+kill_test_app() {
+  pkill -f "^$HOME/Applications/GitPic.app/Contents/MacOS/GitPic$" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    pgrep -f "^$HOME/Applications/GitPic.app/Contents/MacOS/GitPic$" >/dev/null || return 0
+    sleep 0.5
+  done
+  fail "could not stop the app running from $TEST_APP"
+}
+
+# The same install the run started with. Factored out rather than repeated because each of
+# the phases below needs a fresh old bundle: the app under test has to have an update to
+# offer, and the phase before it may have consumed one.
+install_old_bundle() {
+  rm -rf "$TEST_APP"
+  rm -rf "$HOME"/Applications/.GitPic-old-* "$HOME"/Applications/.GitPic-update-*
+  mkdir -p "$HOME/Applications"
+  ditto "$BUILT" "$TEST_APP"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $TEST_BUNDLE_ID" \
+    "$TEST_APP/Contents/Info.plist" >/dev/null
+  codesign --force --sign - "$TEST_APP/Contents/Resources/gitpic" 2>/dev/null
+  codesign --force --sign - "$TEST_APP" 2>/dev/null
+  codesign --verify --deep --strict "$TEST_APP" \
+    || fail "the re-signed test copy does not verify"
+}
+
+# Launch, and leave $TEST_PID pointing at it — `ax` reads that global, so every helper below
+# addresses whichever copy was launched last.
+launch_and_wait() {
+  open "$TEST_APP"
+  TEST_PID=""
+  for _ in $(seq 1 40); do
+    TEST_PID="$(pgrep -f "^$HOME/Applications/GitPic.app/Contents/MacOS/GitPic$" | head -1 || true)"
+    [[ -n "$TEST_PID" ]] && break
+    sleep 0.5
+  done
+  [[ -n "$TEST_PID" ]] || fail "the test copy did not start"
+  echo "    pid $TEST_PID"
+  for _ in $(seq 1 40); do
+    [[ "$(ax 'get exists menu bar 2' 2>/dev/null)" == "true" ]] && return 0
+    sleep 0.5
+  done
+  fail "the status item never appeared in the accessibility tree"
+}
+
+# 打开设置 → 检查更新 → the sheet, with the route resolved. Same click idiom and the same
+# waits-not-sleeps as the main flow above; see those comments for why each one is a poll.
+open_update_sheet() {
+  ax "click menu bar item 1 of menu bar 2" >/dev/null
+  sleep 1
+  ax "click (first menu item of $(status_menu) whose name is \"打开设置\")" >/dev/null
+  sleep 2
+  ax "click menu bar item 1 of menu bar 2" >/dev/null
+  sleep 1
+  ax "click (first menu item of $(status_menu) whose name starts with \"检查更新\" or name starts with \"有新版本\")" >/dev/null
+  for _ in $(seq 1 60); do
+    [[ "$(ax 'get exists sheet 1 of window 1' 2>/dev/null)" == "true" ]] && break
+    sleep 1
+  done
+  [[ "$(ax 'get exists sheet 1 of window 1' 2>/dev/null)" == "true" ]] \
+    || fail "the update sheet never appeared"
+  for _ in $(seq 1 60); do
+    [[ "$(ax 'get count of buttons of group 1 of sheet 1 of window 1' 2>/dev/null || true)" == "3" ]] \
+      && return 0
+    sleep 1
+  done
+  fail "the sheet's action row never settled"
+}
+
+quit_via_status_menu() {
+  ax "click menu bar item 1 of menu bar 2" >/dev/null
+  sleep 1
+  ax "click (first menu item of $(status_menu) whose name is \"退出 GitPic\")" >/dev/null
+}
+
+# $1 pid, $2 what it was asked to do, $3 seconds to allow.
+expect_gone() {
+  local pid="$1" what="$2" limit="$3"
+  for _ in $(seq 1 "$limit"); do
+    kill -0 "$pid" 2>/dev/null || { echo "    exited"; return 0; }
+    sleep 1
+  done
+  echo "    pid $pid is still alive; what it is running now:" >&2
+  lsof -p "$pid" 2>/dev/null | awk '$4 == "txt" { print "      " $NF }' | head -3 >&2
+  fail "$what"
+}
+
+# The per-user temp directory the app writes to. Asked of the system rather than inherited,
+# because a GUI process launched by `open` does not get this shell's environment.
+USER_TMP="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo "${TMPDIR:-/tmp}")"
+# Both spellings carry a trailing slash, which would make every path below read
+# `…/T//gitpic-mount-…`. Harmless to the compare, since one function produces both
+# sides of it, but the paths end up in a failure message a person has to read.
+USER_TMP="${USER_TMP%/}"
+# Compared before and after rather than asserted empty, so unrelated leftovers on this
+# machine cannot fail the run — and so a leak here cannot hide among them.
+install_debris() {
+  {
+    hdiutil info 2>/dev/null | grep -o 'gitpic-mount-[0-9A-Fa-f-]*' || true
+    ls -d "$USER_TMP"/gitpic-mount-* 2>/dev/null || true
+    ls -d "$USER_TMP"/gitpic-update-*.dmg 2>/dev/null || true
+    ls -d "$HOME"/Applications/.GitPic-update-* 2>/dev/null || true
+  } | sort -u
+}
+
+step "退出 GitPic with the update sheet attached (the 0.20.0 repro)"
+# No install started: this is exactly the recipe `Updater.quit` documents — open 设置, run
+# 检查更新 until the sheet is up, then quit. AppKit refuses `NSApplication.terminate` while a
+# sheet is attached, so before the fix this quit did nothing at all, every time.
+kill_test_app
+install_old_bundle
+launch_and_wait
+open_update_sheet
+QUIT_PID="$TEST_PID"
+quit_via_status_menu
+expect_gone "$QUIT_PID" \
+  "「退出 GitPic」 did nothing with the update sheet attached — the 0.20.0 bug on the path the
+      user actually presses, which no unit test can see" 30
+# Nothing should have come back: the user asked to leave, not to update.
+sleep 2
+BACK="$(pgrep -f "^$HOME/Applications/GitPic.app/Contents/MacOS/GitPic$" | head -1 || true)"
+[[ -z "$BACK" ]] || fail "a user quit reopened the app (pid $BACK) — only the update path may"
+
+step "退出 GitPic while an update is installing"
+# What this covers: `exit(0)` runs no `defer`, so a quit taken between `hdiutil attach` and
+# the handoff has to undo the mount, the staging directory and the download itself.
+#
+# **Honest about the race.** The install is a 5 MB download plus a `ditto` of a small
+# bundle, so it can finish in a couple of seconds and the quit may land after the handoff
+# instead of inside staging. The absence assertions below hold either way, and the run
+# reports which of the two happened rather than claiming the harder one.
+kill_test_app
+install_old_bundle
+# Captured after the reinstall, not before it: `install_old_bundle` clears any
+# `.GitPic-update-*` itself, so a snapshot taken earlier would list one that the reinstall
+# then removed and read as a leak having been cleaned rather than never made.
+DEBRIS_BEFORE="$(install_debris)"
+launch_and_wait
+open_update_sheet
+QUIT_PID="$TEST_PID"
+ax 'click button 1 of group 1 of sheet 1 of window 1' >/dev/null
+for _ in $(seq 1 30); do
+  [[ "$(ax 'get exists sheet 1 of sheet 1 of window 1' 2>/dev/null)" == "true" ]] && break
+  sleep 1
+done
+ax 'click button 2 of sheet 1 of sheet 1 of window 1' >/dev/null
+# The progress row replaces the button row as soon as the first bytes arrive, which is the
+# earliest observable moment the install is genuinely in flight.
+INSTALLING=""
+for _ in $(seq 1 60); do
+  if [[ "$(ax 'get count of buttons of group 1 of sheet 1 of window 1' 2>/dev/null || true)" != "3" ]]; then
+    INSTALLING=yes; break
+  fi
+  sleep 0.2
+done
+[[ -n "$INSTALLING" ]] || fail "the install never started (the sheet still shows its buttons)"
+quit_via_status_menu
+expect_gone "$QUIT_PID" "「退出 GitPic」 did nothing while an update was installing" 60
+
+# Whether the quit landed inside the install or lost the race to it, said plainly.
+sleep 3
+AFTER_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+  "$TEST_APP/Contents/Info.plist" 2>/dev/null || echo '?')"
+if [[ "$AFTER_VERSION" == "$OLD_VERSION" ]]; then
+  echo "    the quit landed inside the install; the bundle is still $OLD_VERSION"
+else
+  echo "    NOTE: the install completed before the quit landed (bundle is $AFTER_VERSION)," >&2
+  echo "    so this run exercised the handoff rather than the mid-install undo. The" >&2
+  echo "    absence checks below still apply." >&2
+fi
+
+step "asserting the interrupted install left nothing behind"
+# `.GitPic-old-*` is deliberately excluded: a completed install keeps one as rollback
+# material and removing it is the next launch's job, not this one's.
+DEBRIS_AFTER="$(install_debris)"
+if [[ "$DEBRIS_AFTER" != "$DEBRIS_BEFORE" ]]; then
+  echo "    before:" >&2; echo "${DEBRIS_BEFORE:-      (none)}" | sed 's/^/      /' >&2
+  echo "    after:"  >&2; echo "${DEBRIS_AFTER:-      (none)}"  | sed 's/^/      /' >&2
+  fail "a quit during an install left an attached image, a staging directory or the download
+      behind. An attached image is invisible in Finder (-nobrowse) and survives until
+      reboot; the launch sweep only reclaims these after 24 h."
+fi
+echo "    no mount, no staging directory, no download left"
 
 echo
 echo "PASS  $OLD_VERSION -> $TARGET_VERSION"
