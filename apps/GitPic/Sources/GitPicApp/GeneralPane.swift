@@ -147,7 +147,14 @@ struct GeneralPane: View {
             return "已是最新 \(update.current)"
         }
         if let last = model.lastUpdateCheck {
-            return "上次检查 \(Self.stamp.string(from: last))"
+            // 「成功」 is load-bearing, not padding. `lastUpdateCheck` is stamped only on a
+            // check that completed — see `AppModel`, where that is deliberate so a week
+            // offline does not count as a week of checking — so after a failed check this
+            // line and the failure row below it describe two different moments. Labelled
+            // 「上次检查」 they read as one, and a stale 「RATE_LIMITED」 next to a two-day-old
+            // timestamp says "it was rate-limited two days ago" when the truth is "it
+            // succeeded two days ago and failed at some later time this line cannot name".
+            return "上次成功检查 \(Self.stamp.string(from: last))"
         }
         return "还没检查过"
     }

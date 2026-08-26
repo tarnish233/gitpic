@@ -271,7 +271,13 @@ async fn check_against(api: &str) -> Result<UpdateReport> {
 
     let status = resp.status();
     if !status.is_success() {
-        return Err(status_error(status));
+        // Headers and body before the response is dropped. The old code passed the status
+        // alone, which is why the mapping below could not tell a rate limit from any other
+        // 403 and could not say when to retry — `x-ratelimit-remaining` is the authoritative
+        // signal, and `AppError::with_retry_hint` existed unused for want of a number.
+        let headers = resp.headers().clone();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(status_error(status, &headers, &body));
     }
     let latest: LatestRelease = resp
         .json()
@@ -331,14 +337,74 @@ fn report(current: &str, latest: LatestRelease) -> Result<UpdateReport> {
     })
 }
 
+/// Seconds to wait, from whichever header the server used to say so.
+///
+/// `retry-after` is what a *secondary* rate limit sends and it is already a count of seconds.
+/// `x-ratelimit-reset` is what a primary limit sends and it is an absolute epoch second, so it
+/// has to be turned into a delta here. A reset in the past — a clock skewed either way, or a
+/// response that sat in a proxy — yields `None` rather than `0`, because "retry after 0s" reads
+/// as advice and is not.
+fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    if let Some(secs) = headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        return (secs > 0).then_some(secs);
+    }
+    let reset = headers
+        .get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let delta = reset.checked_sub(now)?;
+    (delta > 0).then_some(delta)
+}
+
+/// Whether this refusal is GitHub saying "too many requests" rather than "no".
+///
+/// Three signals, because GitHub uses three shapes. A primary limit answers 403 **or** 429
+/// with `x-ratelimit-remaining: 0`; a secondary limit answers 403 with `retry-after` and a
+/// remaining count that may be anything; and both name it in the body. The status code alone
+/// says nothing — 403 is also how GitHub refuses a blocked user agent, and how an intercepting
+/// proxy refuses the request before GitHub ever sees it.
+fn is_rate_limited(status: u16, headers: &reqwest::header::HeaderMap, body: &str) -> bool {
+    let exhausted = headers
+        .get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim() == "0")
+        .unwrap_or(false);
+    // The body last, and deliberately: it is the fallback for a middlebox that stripped the
+    // headers, and it is the same test `crate::github` applies to the same statuses.
+    exhausted
+        || status == 429
+        || headers.contains_key("retry-after")
+        || body.to_ascii_lowercase().contains("rate limit")
+}
+
 /// Map a non-2xx from the releases endpoint.
 ///
 /// Its own mapping rather than [`crate::github`]'s, because the same statuses mean
 /// different things here. Nothing is sent authenticated, so a 401 is not "your credential
 /// was rejected"; and a 404 is about *this project* having no releases, not about the
 /// user's repository being missing — advice to run `gitpic config set` would be nonsense.
-fn status_error(status: reqwest::StatusCode) -> AppError {
-    match status.as_u16() {
+///
+/// **The one difference that mattered was the one this got wrong.** It used to map `403 | 429`
+/// to `RATE_LIMITED` on the status code alone, while the module it deliberately diverged from
+/// tested the body first. So every 403 was reported as "try again later" — a remedy that never
+/// arrives when the refusal came from a blocked user agent or a proxy that answered before
+/// GitHub did — and a real rate limit could not say how long, because the caller had thrown
+/// the headers away before getting here.
+fn status_error(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: &str,
+) -> AppError {
+    let code = status.as_u16();
+    match code {
         404 => AppError::new(
             ErrorCode::RemoteNotFound,
             format!("{RELEASES_REPO} has published no releases yet"),
@@ -346,9 +412,24 @@ fn status_error(status: reqwest::StatusCode) -> AppError {
         // Unauthenticated api.github.com allows 60 requests an hour per address. One
         // daily check cannot reach that alone, but it shares the quota with everything
         // else on the network, so this is a state real users will meet.
-        403 | 429 => AppError::new(
+        _ if is_rate_limited(code, headers, body) => AppError::new(
             ErrorCode::RateLimited,
             "GitHub rate-limited the update check; try again later".to_string(),
+        )
+        .with_retry_hint(retry_after_secs(headers)),
+        // A 403 that is not a rate limit. Named as itself rather than dressed up as one:
+        // waiting will not fix a blocked user agent, and hiding GitHub's own words behind
+        // "try again later" leaves nothing to act on.
+        403 => AppError::new(
+            ErrorCode::General,
+            format!("check for updates: GitHub refused the request (403){}", {
+                let detail = body.trim();
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", detail.chars().take(200).collect::<String>())
+                }
+            }),
         ),
         _ => AppError::new(
             ErrorCode::General,
@@ -474,25 +555,159 @@ mod tests {
         assert_eq!(out.name, None, "a blank title is no title");
     }
 
+    /// A header map from pairs, so each case below reads as the response it stands for.
+    fn headers(pairs: &[(&str, &str)]) -> reqwest::header::HeaderMap {
+        let mut map = reqwest::header::HeaderMap::new();
+        for (k, v) in pairs {
+            map.insert(
+                reqwest::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        map
+    }
+
     #[test]
     fn statuses_map_to_the_codes_a_caller_can_act_on() {
         use reqwest::StatusCode;
+        let none = headers(&[]);
         assert_eq!(
-            status_error(StatusCode::NOT_FOUND).code,
+            status_error(StatusCode::NOT_FOUND, &none, "").code,
             ErrorCode::RemoteNotFound
         );
         assert_eq!(
-            status_error(StatusCode::FORBIDDEN).code,
-            ErrorCode::RateLimited
-        );
-        assert_eq!(
-            status_error(StatusCode::TOO_MANY_REQUESTS).code,
-            ErrorCode::RateLimited
-        );
-        assert_eq!(
-            status_error(StatusCode::INTERNAL_SERVER_ERROR).code,
+            status_error(StatusCode::INTERNAL_SERVER_ERROR, &none, "").code,
             ErrorCode::General
         );
+        // 429 is a rate limit whatever else it carries.
+        assert_eq!(
+            status_error(StatusCode::TOO_MANY_REQUESTS, &none, "").code,
+            ErrorCode::RateLimited
+        );
+    }
+
+    /// A 403 is only a rate limit when something in the response says so.
+    ///
+    /// This is the case that used to be wrong in the direction that costs the user the most:
+    /// every 403 was reported as `RATE_LIMITED` with "try again later", so a refusal that
+    /// waiting cannot fix — a blocked user agent, an intercepting proxy answering before
+    /// GitHub — sent them away to wait for something that was never going to change, with
+    /// GitHub's own explanation dropped on the floor.
+    #[test]
+    fn a_bare_403_is_not_called_a_rate_limit() {
+        let err = status_error(
+            reqwest::StatusCode::FORBIDDEN,
+            &headers(&[]),
+            "Request forbidden by administrative rules",
+        );
+        assert_eq!(err.code, ErrorCode::General, "{}", err.message);
+        assert!(
+            err.message.contains("administrative rules"),
+            "GitHub's own words have to survive: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("try again later"),
+            "advice that cannot work must not be given: {}",
+            err.message
+        );
+    }
+
+    /// The three shapes GitHub uses to say "too many requests", each recognised.
+    #[test]
+    fn every_shape_of_rate_limit_is_recognised() {
+        let cases: [(&str, reqwest::header::HeaderMap, &str); 3] = [
+            // Primary: 403 with the budget spent.
+            (
+                "exhausted budget",
+                headers(&[("x-ratelimit-remaining", "0")]),
+                "",
+            ),
+            // Secondary: 403 with a wait, and a remaining count that says nothing.
+            (
+                "secondary limit",
+                headers(&[("retry-after", "60"), ("x-ratelimit-remaining", "37")]),
+                "",
+            ),
+            // Headers stripped by a middlebox; the body is the fallback, as in `crate::github`.
+            (
+                "body only",
+                headers(&[]),
+                "API rate limit exceeded for 1.2.3.4",
+            ),
+        ];
+        for (what, hdrs, body) in cases {
+            let err = status_error(reqwest::StatusCode::FORBIDDEN, &hdrs, body);
+            assert_eq!(err.code, ErrorCode::RateLimited, "{what}: {}", err.message);
+        }
+    }
+
+    /// A real limit says how long, because the number is the whole remedy.
+    #[test]
+    fn a_rate_limit_carries_the_wait_when_the_server_gave_one() {
+        // `retry-after` is already seconds.
+        let err = status_error(
+            reqwest::StatusCode::FORBIDDEN,
+            &headers(&[("retry-after", "90")]),
+            "",
+        );
+        assert!(
+            err.message.contains("retry after 90s"),
+            "expected the wait in the message: {}",
+            err.message
+        );
+
+        // `x-ratelimit-reset` is an absolute epoch second and has to become a delta.
+        let soon = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600;
+        let err = status_error(
+            reqwest::StatusCode::FORBIDDEN,
+            &headers(&[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", &soon.to_string()),
+            ]),
+            "",
+        );
+        assert_eq!(err.code, ErrorCode::RateLimited);
+        let secs: u64 = err
+            .message
+            .rsplit("retry after ")
+            .next()
+            .and_then(|s| s.trim_end_matches("s").parse().ok())
+            .unwrap_or_else(|| panic!("no wait in {}", err.message));
+        assert!(
+            about_ten_minutes().contains(&secs),
+            "600s away should read as about 600s, got {secs} from {}",
+            err.message
+        );
+    }
+
+    /// A reset already in the past is no advice at all, so it is not offered as any.
+    #[test]
+    fn a_reset_in_the_past_yields_no_wait() {
+        let err = status_error(
+            reqwest::StatusCode::FORBIDDEN,
+            &headers(&[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "1000000000"),
+            ]),
+            "",
+        );
+        assert_eq!(err.code, ErrorCode::RateLimited);
+        assert!(
+            !err.message.contains("retry after"),
+            "a wait of zero or less must be omitted, not printed: {}",
+            err.message
+        );
+    }
+
+    /// The tolerance for the delta test above: the clock moves between building the header
+    /// and reading it back, so the assertion is a window rather than an equality.
+    fn about_ten_minutes() -> std::ops::RangeInclusive<u64> {
+        595..=600
     }
 
     /// The update feed is fixed at compile time. A config key or an environment variable
