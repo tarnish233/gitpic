@@ -9,6 +9,12 @@
 # scripts/new-worktree.sh deliberately uses a sibling directory instead.
 /.claude/worktrees/
 /.local/
+# `release.yml` generates this from the changelog on the tag path and feeds it to
+# `body_path`. Nothing local writes it on its own — `release_notes.py` prints to stdout
+# and the only `> RELEASE_NOTES.md` in the repo is the one inside that job. This is here
+# for the person who reproduces that redirect by hand to see what a Release body will
+# say, so the build product they end up with cannot be committed as if it were source.
+/RELEASE_NOTES.md
 # `check_manifests.py` imports `release_notes`, so running it locally byte-compiles
 # that module. CI does not care, but an untracked directory appearing in everyone's
 # `git status` after every manifest check would be noise.
