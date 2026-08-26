@@ -28,6 +28,26 @@ jobs:
       - name: Check the release-notes rules
         run: python3 .github/scripts/release_notes.py --self-test
 
+  # Deliberately **not** a gate on the release path, unlike `test` — and the asymmetry
+  # is worth writing down, because `release.yml` grew a `test` job of its own precisely
+  # on the grounds that a tag cannot trigger this workflow. The same sentence would
+  # seem to apply here, and does not.
+  #
+  # The difference is who consumes the promise. Publishing untested code ships a broken
+  # binary. Publishing code whose dependency graph wants a newer rustc than
+  # `rust-version` claims ships nothing wrong at all — `Cargo.toml` says as much
+  # directly above the field: "Only affects building from source; the Homebrew and
+  # release binaries are built by CI on stable." Checked, rather than assumed: `gitpic`
+  # is not on crates.io, so `cargo install gitpic` is not a consumer, and the tap's
+  # `Formula/gitpic_cli.rb` installs a prebuilt `.tar.gz` with `bin.install` and never
+  # compiles the crate. The only consumer is somebody who clones and builds, who finds
+  # out in the first second and can raise the floor.
+  #
+  # So putting this on `publish`'s `needs` would trade five perfectly good prebuilt
+  # artifacts for a refusal to release — and the floor is already flush, since the note
+  # in `Cargo.toml` records `image 0.25.10` declaring 1.88.0. One `cargo update` would
+  # be enough. Failing here, on main, makes the answer a commit instead of an
+  # unshippable tag.
   msrv:
     name: builds on the declared MSRV
     runs-on: ubuntu-latest

@@ -107,10 +107,26 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Saved only on `main`, and this is measured. A cache written by a tag run is
+      # scoped to a ref GitHub records as `refs/heads/refs/tags/v0.16.0`, which only a
+      # re-run of that same tag can ever restore from — while the tag run restores
+      # `main`'s entry perfectly well already (v0.20.2 logged `full match: true`
+      # against `…-build-Linux-x64-…` on `refs/heads/main`). So the write buys a re-run
+      # of one tag and charges everybody else for it: this repo sits at 10.7 GB across
+      # 62 entries against a 10 GB cap and its smallest entry is 142 MB, so **every
+      # save from here on evicts something** — usually a `main` entry every PR depends
+      # on. Eleven tags were holding 6.16 GB of precisely this.
+      #
+      # `main` rather than a flat `false`, so a `workflow_dispatch` on main can still
+      # repair a divergence; nothing else in this repo writes these `build` keys, so
+      # `false` would eventually leave them unwarmed forever. The cost, plainly: after
+      # a release that moves the dependency hash, these jobs go cold on the tag and
+      # stay cold across re-runs until someone dispatches this workflow on main.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build release
         run: cargo build --release --locked --target ${{ matrix.target }}
@@ -175,8 +191,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Only on main — see the `build` job's cache step for the measurement. This one's
+      # key is byte-identical to `ci.yml`'s `app` job, so main keeps it warm anyway.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build the CLI that gets embedded
         run: cargo build --release --locked
@@ -275,6 +295,112 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # `cargo test` on the tag path, with the two lints beside it as advisory steps.
+  #
+  # `ci.yml` triggers on `push: branches: [main]` and `pull_request` — and a
+  # `refs/tags/v*` push matches neither, so before this job existed a tag ran no
+  # `cargo test`, no `clippy` and no `cargo fmt` at all. `swift test` in `app` was the
+  # only test on the whole path. `git push --follow-tags` starts this workflow on the
+  # tag while ci.yml starts on main, with no dependency between them, so a Release
+  # could publish while the suite was still running — or after it went red.
+  #
+  # Not hypothetical, and not a scheduling nicety: measured, `main` was red on the
+  # `windows-latest` leg for every push from 2026-08-23, and 0.18.0, 0.18.1, 0.19.0,
+  # 0.20.0, 0.20.1 and 0.20.2 — six releases — all published on top of that red run
+  # without anything noticing. This is the same fix, and the same reasoning, as the
+  # manifest guard in `version`: a check that must block a publish has to live on the
+  # edge `publish` depends on. It just has to stop making an exception for the tests.
+  #
+  # **`cargo test` blocks; the two lints only annotate.** `-D warnings` on a floating
+  # `@stable` is the one thing here that can turn a *good* release into a failed one —
+  # a lint that did not exist when the tag was cut fails code that never saw it, and
+  # re-running an old tag, which the release-notes extraction below is written to keep
+  # working, stops being possible. Nothing ships worse for being unlinted, so the lints
+  # get `continue-on-error` and speak through annotations instead: the same trade the
+  # tap step at the bottom of this file makes, for the same stated reason.
+  #
+  # Note what that argument is *not*. It is not "keep only the deterministic checks":
+  # `cargo test` runs on the same floating `@stable`, and `--locked` deliberately holds
+  # the dependencies old, which is how an old proc-macro meets a new rustc. The actual
+  # asymmetry is that `build` and `app` already put `@stable` on the publish edge, so
+  # the suite adds no new *class* of hostage while `-D warnings` adds one outright.
+  # Pinning toolchains is not the fix for anything here.
+  #
+  # Linux and Windows, not all three. macOS and Linux resolve the same `#[cfg(unix)]`
+  # in `src/` and really are redundant; Windows is the leg neither can stand in for,
+  # and it is a target this release ships. It is also where the bug actually was —
+  # `tests/json_contract.rs` compared a path spelled with `/` against one the binary
+  # built with `\`, with no `#[cfg]` anywhere near it, so only `windows-latest` could
+  # see it. A comment in that file already says the Windows leg is the one CI runs.
+  #
+  # And the cost, honestly: this gate **would have blocked all six of those releases**,
+  # over a bug in a test rather than in a binary. That is exactly why the lints only
+  # annotate — a red leg here has to mean "the suite disagrees with the code", never
+  # "someone's lint got stricter".
+  #
+  # Not a duplicate of `ci.yml`'s `test` job — please do not delete it as one. It is
+  # the same commands reached from a trigger `ci.yml` cannot see.
+  test:
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # `shared-key` rather than relying on the job id, even though rust-cache would
+      # build the same string from a job called `test`: the key this has to match is
+      # `ci.yml`'s, and spelling it out means renaming either job cannot silently turn
+      # every release into a cache miss. Measured shape is
+      # `v0-rust-{shared-key}-{OS}-{arch}-{hashes}`, so these two legs land on
+      # `…-test-Linux-x64-…` and `…-test-Windows_NT-x64-…` — exactly what ci.yml warms
+      # on main. A miss is survivable, costing a cold build on a job nowhere near the
+      # critical path (`app` is 224s), which is what makes the coupling safe rather
+      # than clever. Saving only on main, for the reason given on `build`.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Advisory — see the header. rustfmt's verdict is platform-independent, so once.
+      - name: Format check (advisory, never blocks the release)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (advisory, never blocks the release)
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The gate. `--locked` because a release has to test the lockfile it ships —
+      # the same flag `build` and `app` already pass.
+      - name: Test
+        run: cargo test --locked
+
+      # `release_notes.py`'s own docstring lists "only ever ran in ci.yml" as one of
+      # its bugs. `check_manifests.py` was moved onto the tag path for exactly that
+      # reason; its sibling was left behind. `publish` calls `release_notes.py` to
+      # build the Release body, so the rules it enforces have to be checked here too.
+      #
+      # Here and not in `version`, deliberately: `version` is upstream of `build` and
+      # `app`, and the `workflow_dispatch` entry point exists to find out whether a
+      # release *builds*. A changelog-formatting self-test must not be able to skip
+      # four builds. `publish` needs this job, so it blocks just as well from here.
+      # Linux only because `python3` is not the interpreter's name on the Windows
+      # runner, and the rules it checks are not platform-shaped.
+      - name: Check the release-notes rules
+        if: runner.os == 'Linux'
+        run: python3 .github/scripts/release_notes.py --self-test
+
   # A single job creates the Release and uploads every artifact at once.
   #
   # Previously each of the four matrix jobs called action-gh-release itself, so
@@ -285,7 +411,7 @@ jobs:
   # still running.
   publish:
     name: Publish release
-    needs: [version, build, app]
+    needs: [version, build, app, test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
