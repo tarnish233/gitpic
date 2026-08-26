@@ -4,6 +4,51 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.4] - 2026-08-26
+
+### A refused update check now says which refusal it was
+
+- **Every 403 from GitHub was reported as "rate-limited, try again later", including the ones waiting cannot fix.** A blocked user agent or a company proxy answering before GitHub ever saw the request produced the same message as a spent hourly quota, so the advice was wrong and GitHub's own explanation was dropped. A refusal is now only called a rate limit when the response says it is, and anything else reports what GitHub actually said.
+- **A real rate limit now says how long to wait.** It knew — GitHub sends the reset time on every one of these — but the code threw the headers away before building the message, so all it could offer was "later" when it could have said the number of seconds.
+- **「上次检查」 in 设置 ▸ 通用 is now 「上次成功检查」.** That timestamp only ever moved on a check that completed, so next to a failure it was describing a different moment than the error beside it — a two-day-old stamp above a fresh 「RATE_LIMITED」 read as "it was rate-limited two days ago".
+
+<!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file. Keep each bullet above on one line — the app's update sheet renders with .inlineOnlyPreservingWhitespace, which keeps newlines verbatim, so a wrapped line breaks mid-sentence at 480pt -->
+
+### CLI
+
+- `release.rs`'s `status_error` mapped `403 | 429` to `RATE_LIMITED` on the status code alone.
+  Its own doc comment justified having a mapping separate from `crate::github`'s "because the
+  same statuses mean different things here" — and the one difference that mattered was the one
+  it got wrong, while the module it deliberately diverged from tested the body first. GitHub
+  answers 403 for a blocked user agent and a middlebox answers it before GitHub is reached;
+  neither is fixed by waiting.
+- Three signals decide it now, because GitHub uses three shapes: `x-ratelimit-remaining: 0`
+  for a primary limit, a `retry-after` header for a secondary one, and the phrase in the body
+  as the fallback when something stripped the headers — which is the same test `crate::github`
+  applies. The status code decides nothing on its own.
+- `AppError::with_retry_hint` has existed since the error codes were introduced, documented as
+  being for the one code "whose documented remedy is wait and retry, so it is the only one for
+  which a number is guidance rather than noise" — and this call site, the one that needed it,
+  never used it. `check_against` read `resp.status()` and dropped the response, so the headers
+  carrying the answer were gone one line before the mapping asked. It now passes the headers
+  and the body through.
+- `retry-after` is already seconds; `x-ratelimit-reset` is an absolute epoch second and becomes
+  a delta here. A reset in the past yields no hint at all rather than "retry after 0s", because
+  a zero reads as advice and is not.
+- The test that covered this asserted the defect: it checked that a bare `FORBIDDEN` maps to
+  `RATE_LIMITED`. It now asserts the opposite, that GitHub's words survive, and that the advice
+  which cannot work is not given — reverting the mapping turns it red, checked. Three more
+  cover each shape of real limit, the wait arriving from either header, and the past-reset case.
+
+### App
+
+- The status line under 更新 said 「上次检查」 for a value that `AppModel` stamps only on a
+  completed check — deliberately, so a week offline does not silently count as a week of
+  checking. The word 「成功」 is what makes the line and the failure row beneath it legible as
+  the two different moments they are.
+
+
+
 ## [0.20.3] - 2026-08-26
 
 ### Logging out is no longer blocked while an update is on screen
