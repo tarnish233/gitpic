@@ -68,7 +68,7 @@ public enum SelfUpdate {
         asset: ReleaseAsset,
         sha256 expected: String,
         onProgress: @Sendable @escaping (Progress) -> Void
-    ) async throws -> URL {
+    ) async throws -> VerifiedImage {
         guard let url = URL(string: asset.url) else {
             throw Failure.download("下载地址无法解析：\(asset.url)")
         }
@@ -79,18 +79,65 @@ public enum SelfUpdate {
         var keep = false
         defer { if !keep { try? FileManager.default.removeItem(at: file) } }
 
-        let got = try sha256OfFile(at: file)
+        let verified = try verify(file, expecting: expected)
+        keep = true
+        return verified
+    }
+
+    /// A disk image whose SHA-256 has been checked, carrying the identity of the bytes that
+    /// were checked.
+    ///
+    /// ``download(asset:sha256:onProgress:)`` returns this instead of a bare `URL` so that an
+    /// unverified path cannot reach ``stage(dmg:expectedVersion:replacing:isCancelled:)`` — the
+    /// compiler holds that, rather than a comment asking the next caller to remember.
+    ///
+    /// The reason it carries `dev`/`ino` and not just the digest: the digest authenticates one
+    /// *inode's* bytes, while `hdiutil` can only be told a *path*. Those are two independent
+    /// resolutions, and this used to be the whole gap — the hash was taken through one `open`
+    /// and the image mounted through another, so what was authenticated was never provably what
+    /// was installed. `stage` re-asserts the path still names this inode immediately before it
+    /// attaches, which joins the two halves back together.
+    public struct VerifiedImage: Sendable {
+        public let url: URL
+        public let sha256: String
+        /// From `fstat` on the descriptor that was hashed — never from a path lookup.
+        let dev: dev_t
+        let ino: ino_t
+    }
+
+    /// Hash the file, and record which bytes were hashed, through a single descriptor.
+    private static func verify(_ file: URL, expecting expected: String) throws -> VerifiedImage {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+
+        let got = try sha256(of: handle)
         guard got == expected else {
             throw Failure.digestMismatch(expected: expected, got: got)
         }
-        keep = true
-        return file
+        // `fstat` on the descriptor just hashed, deliberately, and not `stat` on `file`. The
+        // point of recording an identity is to name the bytes the digest covers; resolving the
+        // path again here would itself be the second, independent lookup that this whole
+        // mechanism exists to detect.
+        var info = stat()
+        guard fstat(handle.fileDescriptor, &info) == 0 else {
+            throw Failure.download("无法确认下载文件的身份")
+        }
+        return VerifiedImage(url: file, sha256: got, dev: info.st_dev, ino: info.st_ino)
     }
 
     /// SHA-256 of a file, read in chunks so peak memory does not scale with the release.
     public static func sha256OfFile(at url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
+        return try sha256(of: handle)
+    }
+
+    /// The chunked hash itself, over an already-open descriptor.
+    ///
+    /// Split out from ``sha256OfFile(at:)`` so that ``verify(_:expecting:)`` can hash and
+    /// `fstat` the *same* descriptor. Reopening the path between those two steps would leave
+    /// exactly the hole this is here to close.
+    private static func sha256(of handle: FileHandle) throws -> String {
         var hasher = SHA256()
         while let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty {
             hasher.update(data: chunk)
