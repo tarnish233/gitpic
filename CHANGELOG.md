@@ -4,6 +4,49 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.5] - 2026-08-26
+
+### The update check now uses the GitHub credential you already have, so a shared IP cannot starve it
+
+- **The unauthenticated GitHub API allows 60 requests an hour, and that budget belongs to an address rather than to a person.** Behind a shared egress — a company network, a carrier NAT — those 60 are shared with everyone behind it: measured on a machine that had checked once that day, GitHub answered `API rate limit exceeded` with `x-ratelimit-used: 60`, while the same request through a different egress had 52 left. For those users the anonymous path is not slower, it does not work at all.
+- **So the check now sends the credential `gitpic auth login` already stored**, which moves the limit from 60 an hour per address to 5000 an hour on your own account — the remedy GitHub's own error message names. No permission is needed for it: a token with no scopes at all raises the limit just as well.
+- **Nothing changes if you have never logged in**: no credential means no header and the same anonymous request as before. And a credential GitHub refuses — expired, revoked — falls back to an anonymous attempt rather than failing, because a stale image-host token should not be able to stop you being told a new version exists.
+
+<!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file. Keep each bullet above on one line — the app's update sheet renders with .inlineOnlyPreservingWhitespace, which keeps newlines verbatim, so a wrapped line breaks mid-sentence at 480pt -->
+
+### CLI
+
+- `release.rs`'s module doc explicitly forbade this: sending the credential "would put the
+  user's token on a request that has no business carrying it". That half is reversed, with the
+  measurement recorded in the module header — 60 an hour is per address, and an address is not
+  a person. The other half, that the two modules keep separate error mappings because the same
+  statuses mean different things, still stands and is why they are still two modules.
+- What was conceded and what was not is written down. The credential goes to
+  `api.github.com` — the same host and the same token `gitpic auth login` already sends
+  there — and GitHub is the only party that sees it; this project's repository owner does not.
+  It stays optional: no credential, no header. A rejected one falls back to anonymous. And the
+  request cannot follow a redirect at all (`redirect::Policy::none()`), so the header has
+  nowhere else to travel.
+- The test asserting the check never sends a credential was **narrowed, not deleted**. A
+  blanket prohibition would now be false, and a false comment about a credential is worse than
+  none. Three properties still hold and are still guarded: no credential means no header
+  (`sends_no_credential_when_there_is_none`), a credential goes only to the compile-time base
+  and only in bearer form (`sends_the_credential_only_to_the_fixed_base`), and a redirect is
+  never followed (`does_not_follow_a_redirect_with_a_credential`). Each was checked by
+  reverting the thing it guards.
+- The credential is a parameter rather than read inside `check_against`. Read from the file, the
+  security assertion would pass on CI and fail on any developer who had run `gitpic auth login`
+  — an assertion whose verdict depends on the machine is not one.
+- The redirect test was vacuous in its first form, and its doc comment says so: `Location`
+  pointed at `example.invalid`, which resolves nowhere, so following the hop and refusing to
+  follow it produced the same two observable facts — one request and an error — and it stayed
+  green with `Policy::none()` deleted. `Location` now points back at the stub, so a client that
+  follows is counted.
+- Two assumptions the code rests on were measured rather than assumed: GitHub answers **401**,
+  not 403, for a bad token on this endpoint, so the fallback branch really fires; and after a
+  check with a credential the *anonymous* budget does not move at all (47 → 47), so the request
+  really was authenticated.
+
 ## [0.20.4] - 2026-08-26
 
 ### A refused update check now says which refusal it was
