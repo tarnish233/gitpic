@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Upload images to a GitHub repo (image host) and get a Markdown link.",
-    "version": "0.20.1"
+    "version": "0.20.2"
   },
   "plugins": [
     {
       "name": "gitpic",
       "description": "Upload a local or clipboard image to a GitHub repo (image host) and return a Markdown link.",
-      "version": "0.20.1",
+      "version": "0.20.2",
       "author": {
         "name": "tarnish233"
       },
