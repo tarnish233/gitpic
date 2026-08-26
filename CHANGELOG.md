@@ -50,9 +50,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### A refused update check now says which refusal it was
 
-- **Every 403 from GitHub was reported as "rate-limited, try again later", including the ones waiting cannot fix.** A blocked user agent or a company proxy answering before GitHub ever saw the request produced the same message as a spent hourly quota, so the advice was wrong and GitHub's own explanation was dropped. A refusal is now only called a rate limit when the response says it is, and anything else reports what GitHub actually said.
-- **A real rate limit now says how long to wait.** It knew — GitHub sends the reset time on every one of these — but the code threw the headers away before building the message, so all it could offer was "later" when it could have said the number of seconds.
-- **「上次检查」 in 设置 ▸ 通用 is now 「上次成功检查」.** That timestamp only ever moved on a check that completed, so next to a failure it was describing a different moment than the error beside it — a two-day-old stamp above a fresh 「RATE_LIMITED」 read as "it was rate-limited two days ago".
+- A failed update check says which refusal it was, instead of calling every 403 a rate limit
+- A real rate limit now says how long to wait
+- 设置's 「上次检查」 is now 「上次成功检查」, so it no longer reads as the outcome of a failed check
 
 <!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file. Keep each bullet above on one line — the app's update sheet renders with .inlineOnlyPreservingWhitespace, which keeps newlines verbatim, so a wrapped line breaks mid-sentence at 480pt -->
 
@@ -95,7 +95,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Logging out is no longer blocked while an update is on screen
 
-- **A logout, a restart, or Quit from the Dock icon used to be refused while the update window was open — Force Quit was the only way past it.** macOS refuses to terminate an app while a window has a sheet attached, and the update window is a sheet that stays up for the whole download; 0.20.2 fixed the app's own 「退出 GitPic」 and ⌘Q, but the routes macOS synthesises never went through that code and stayed broken. They now quit, and they run the same cleanup, so a logout mid-install still leaves no mounted image, no half-prepared copy of the app and no download behind.
+- Logging out, restarting, or quitting from the Dock icon is no longer refused while the update window is open
+- Quitting mid-install still leaves no mounted image, half-prepared copy of the app, or download behind
 
 <!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file. Keep each bullet above on one line — the app's update sheet renders with .inlineOnlyPreservingWhitespace, which keeps newlines verbatim, so a wrapped line breaks mid-sentence at 480pt -->
 
