@@ -346,6 +346,9 @@ ax 'click button 2 of sheet 1 of sheet 1 of window 1' >/dev/null
 
 # THE assertion. 0.20.0 got everything above this line right and stopped here.
 step "waiting for pid $TEST_PID to exit (this is the check that 0.20.0 failed)"
+# Kept under its own name because the quit phases below reassign `$TEST_PID` each time they
+# relaunch, and the summary at the end has to be able to name the one the *update* watched.
+UPDATE_PID="$TEST_PID"
 GONE=""
 for _ in $(seq 1 240); do
   if ! kill -0 "$TEST_PID" 2>/dev/null; then GONE=yes; break; fi
@@ -663,5 +666,13 @@ echo "    no mount, no staging directory, no download left"
 
 echo
 echo "PASS  $OLD_VERSION -> $TARGET_VERSION"
-echo "      pid $TEST_PID exited, pid $NEW_PID is running $INSTALLED from $RUNNING_FROM"
+# Past tense, and naming the pid the update phase actually watched. This line used to read
+# "pid $TEST_PID exited, pid $NEW_PID is running …", which was false by the time it printed:
+# `$TEST_PID` had been reassigned by the three quit phases, and `$NEW_PID` — the app the
+# update brought back — was killed by the `kill_test_app` at the top of the first of them. So
+# the summary asserted a live process that this script had itself torn down. Found by running
+# the thing rather than by reading it, which is the whole argument for this gate existing.
+echo "      pid $UPDATE_PID exited and pid $NEW_PID came back running $INSTALLED"
+echo "      from $RUNNING_FROM"
+echo "      then three quits were driven, each leaving no mount, staging directory or download"
 echo "      /Applications/GitPic.app untouched ($SYSTEM_AFTER)"
