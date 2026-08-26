@@ -140,6 +140,14 @@ thing that sees that, so a real install is what the gate runs. It touches only
 `~/Applications`, refuses to run if `/Applications/GitPic.app` (this machine's own,
 usually Homebrew's) moves, and needs this terminal to hold an Accessibility grant.
 
+It also drives the three quits separately, because they are three different routes and
+fixing one has twice left the others broken: 「退出 GitPic」 in the status menu (our code),
+and the `terminate:` AppKit synthesises for a Dock-menu Quit and for the Apple Event a
+logout or restart sends (not our code, and refused by any attached sheet — so the app used
+to block logging out while an update sheet was up). ⌘Q is not driven, because making the
+app frontmost poisons the accessibility tree for the rest of the run; it shares one
+selector with the menu item, which `QuitPathContractTests` holds.
+
 ## Working in Parallel (one agent, one worktree)
 
 Several agents work this repo at once, and `git checkout` is per-*directory* state:

@@ -320,13 +320,15 @@ enum Updater {
     ///
     /// **Not every route out of the process comes through here, and the earlier claim that it did
     /// was wrong.** The Dock icon's contextual-menu Quit and the Apple Event a logout or restart
-    /// sends are synthesised by AppKit and still arrive as `terminate:`, so they are still refused
-    /// while a sheet is attached — and the app has a Dock icon precisely when the settings window
-    /// is up (`AppActivationPolicy.enter`), which is the only way to get a sheet in the first
-    /// place. What is true is narrower and is what the tripwire checks: every affordance *this
-    /// code owns* ends here. Closing the rest means
-    /// `NSWindow.preventsApplicationTerminationWhenModal = false` on the sheet window, which
-    /// defaults to `true`; it is not done here because nothing has measured it yet.
+    /// sends are synthesised by AppKit and still arrive as `terminate:` — and the app has a Dock
+    /// icon precisely when the settings window is up (`AppActivationPolicy.enter`), which is the
+    /// only way to get a sheet in the first place. Those routes are now closed from both ends:
+    /// ``allowTerminationWithSheets()`` stops the sheet refusing them, and
+    /// `AppDelegate.applicationShouldTerminate` sends what gets through to ``quitByUser()``, so
+    /// they land here after all rather than letting AppKit exit without the staging undo. What
+    /// the tripwire checks is still the narrower property — that every affordance *this code
+    /// owns* ends here — because a grep cannot see AppKit's behaviour; the
+    /// 「quit Apple Event」 phase in `scripts/check-self-update.sh` is what measures that.
     ///
     /// `QuitPathContractTests` asserts that no `NSApplication.terminate` selector comes back
     /// into `GitPicApp/`, so the next person to add a quit affordance cannot reintroduce it
@@ -356,6 +358,50 @@ enum Updater {
     /// The user asked to leave — the status menu's 「退出 GitPic」 or ⌘Q.
     static func quitByUser() -> Never {
         quit("user asked to quit")
+    }
+
+    /// Stop AppKit refusing to terminate while a sheet is attached.
+    ///
+    /// ``quit(_:)`` fixed every affordance *this code* owns by never calling `terminate:` at
+    /// all. It could do nothing about the routes AppKit synthesises: the Dock icon's
+    /// contextual-menu Quit, and the Apple Event a logout or a restart sends. Those still
+    /// arrive as `terminate:`, and a sheet still refuses them — so with the update sheet up
+    /// the app is not merely awkward to quit, it **blocks the user logging out**, and the only
+    /// way past it is Force Quit. The sheet is up for the whole download and staging, and the
+    /// app has a Dock icon exactly then, because a sheet needs the settings window
+    /// (`AppActivationPolicy.enter`).
+    ///
+    /// **Why a notification and not five call sites.** There are five sheet-shaped
+    /// presentations today — the update `.sheet`, 图床's 「把这个配置文件移开？」, 「升级前需要退出
+    /// GitPic」, 「下载并安装」, and the agent-integration `.confirmationDialog` — and
+    /// ``quitForUpdate(_:)`` already records why per-sheet fixes are the wrong shape: they
+    /// "would leave the next sheet anyone adds to reintroduce the bug silently". One observer
+    /// covers the five and the sixth.
+    ///
+    /// Read a turn later, and across every sheet rather than the notification's own window:
+    /// `willBeginSheet` fires *before* AppKit populates `attachedSheet`, and setting the flag
+    /// is idempotent, so a loop that may run once too often is worth more than a lookup that
+    /// has to name the right window.
+    ///
+    /// **This half is the plausible fix, not yet the measured one, and the ordering matters.**
+    /// Lifting the refusal is only safe because ``AppDelegate/applicationShouldTerminate(_:)``
+    /// now routes `terminate:` into ``quitByUser()``: without it AppKit would tear the process
+    /// down its own way, running neither ``prepareToQuit()`` nor the staging undo, which is the
+    /// 0.20.1 leak reopened through a different door. What no unit test can reach is whether
+    /// this actually stops the refusal — `swift test` cannot import `GitPicApp`, and the
+    /// behaviour lives in AppKit and needs a real sheet on a real window. That is what
+    /// `scripts/check-self-update.sh`'s 「quit Apple Event」 phase measures, by sending the same
+    /// event a logout sends while an install is in flight.
+    static func allowTerminationWithSheets() {
+        _ = NotificationCenter.default.addObserver(
+            forName: NSWindow.willBeginSheetNotification, object: nil, queue: .main
+        ) { _ in
+            DispatchQueue.main.async {
+                for window in NSApp.windows where window.isSheet {
+                    window.preventsApplicationTerminationWhenModal = false
+                }
+            }
+        }
     }
 
     /// Quit, upgrade, reopen.

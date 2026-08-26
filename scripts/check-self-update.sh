@@ -403,6 +403,13 @@ SYSTEM_AFTER="$(system_fingerprint)"
 # on `ax` above records that `set frontmost to true` poisons the process into answering
 # -1719 to every later `window 1`. The menu item and ⌘Q share one selector and one
 # `Updater.quitByUser`, so the menu item is the honest half to assert.
+#
+# A third route neither of those covers gets its own phase at the end: the `terminate:` that
+# AppKit synthesises for a Dock-menu Quit and for the Apple Event a logout or a restart sends.
+# That one never enters our code at all, so a sheet refused it long after 「退出 GitPic」 was
+# fixed — meaning the app blocked the user logging out while an update sheet was up. It is
+# driven with `tell application id … to quit`, which is the same event and needs no frontmost
+# app; see 「the quit Apple Event mid-install」.
 
 # Whatever is running from the test path, gone, so the next launch is unambiguous.
 kill_test_app() {
@@ -585,6 +592,72 @@ if [[ "$DEBRIS_AFTER" != "$DEBRIS_BEFORE" ]]; then
   fail "a quit during an install left an attached image, a staging directory or the download
       behind. An attached image is invisible in Finder (-nobrowse) and survives until
       reboot; the launch sweep only reclaims these after 24 h."
+fi
+echo "    no mount, no staging directory, no download left"
+
+step "the quit Apple Event mid-install (what a logout sends)"
+# The route the two phases above cannot reach. They drive 「退出 GitPic」, which is *our* code
+# and never calls `terminate:` at all. A Dock-menu Quit and the Apple Event a logout or a
+# restart sends are synthesised by AppKit and do arrive as `terminate:`, which a sheet refuses
+# — so with the update sheet up the app used to block logging out, Force Quit the only way
+# past it. Two changes close it and neither is correct alone: `allowTerminationWithSheets`
+# clears the refusal, and `applicationShouldTerminate` sends what gets through to the one quit
+# path so the staging undo still runs. `QuitPathContractTests` holds that both exist; only
+# this phase can say whether AppKit agrees.
+#
+# `tell application id … to quit` rather than clicking the Dock icon's menu: it is the same
+# `kAEQuitApplication` event a logout sends, it needs no accessibility tree, and it does not
+# have to make the app frontmost — which is what poisons the AX tree for the rest of the run.
+kill_test_app
+install_old_bundle
+DEBRIS_BEFORE="$(install_debris)"
+launch_and_wait
+open_update_sheet
+QUIT_PID="$TEST_PID"
+ax 'click button 1 of group 1 of sheet 1 of window 1' >/dev/null
+for _ in $(seq 1 30); do
+  [[ "$(ax 'get exists sheet 1 of sheet 1 of window 1' 2>/dev/null)" == "true" ]] && break
+  sleep 1
+done
+ax 'click button 2 of sheet 1 of sheet 1 of window 1' >/dev/null
+INSTALLING=""
+for _ in $(seq 1 60); do
+  if [[ "$(ax 'get count of buttons of group 1 of sheet 1 of window 1' 2>/dev/null || true)" != "3" ]]; then
+    INSTALLING=yes; break
+  fi
+  sleep 0.2
+done
+[[ -n "$INSTALLING" ]] || fail "the install never started (the sheet still shows its buttons)"
+# `|| true` because a refused quit is reported as an AppleScript error, and that is a result
+# to assert on rather than a reason to abort the run with `set -e`. The explicit timeout keeps
+# a refusal fast: the default Apple Event timeout is two minutes, and waiting it out would say
+# nothing that ten seconds does not.
+QUIT_ERR="$(osascript \
+  -e 'with timeout of 10 seconds' \
+  -e "tell application id \"$TEST_BUNDLE_ID\" to quit" \
+  -e 'end timeout' 2>&1 || true)"
+[[ -z "$QUIT_ERR" ]] || echo "    (the event returned: $QUIT_ERR)"
+expect_gone "$QUIT_PID" \
+  "the quit Apple Event did nothing while the update sheet was attached. This is the route a
+      logout takes, so the app would also have blocked logging out — AppKit refuses
+      \`terminate:\` while a sheet is up unless preventsApplicationTerminationWhenModal is
+      cleared on it (Updater.allowTerminationWithSheets)" 60
+
+step "asserting the Apple Event quit also left nothing behind"
+# The half that `applicationShouldTerminate` is responsible for. If it returned .terminateNow
+# instead of routing into the one quit path, the process would be gone — the check above would
+# pass — and AppKit's own teardown would have run neither the login-child reap nor
+# `SelfUpdate.undoInFlightWork()`, leaving exactly what 0.20.1 shipped to stop leaking. So the
+# absence check is not a duplicate of the one above; it is the only thing that separates
+# "quit" from "quit correctly".
+sleep 3
+DEBRIS_AFTER="$(install_debris)"
+if [[ "$DEBRIS_AFTER" != "$DEBRIS_BEFORE" ]]; then
+  echo "    before:" >&2; echo "${DEBRIS_BEFORE:-      (none)}" | sed 's/^/      /' >&2
+  echo "    after:"  >&2; echo "${DEBRIS_AFTER:-      (none)}"  | sed 's/^/      /' >&2
+  fail "the Apple Event quit left an attached image, a staging directory or the download
+      behind — AppKit tore the process down without the staging undo, which is what
+      applicationShouldTerminate routing into Updater.quitByUser() exists to prevent."
 fi
 echo "    no mount, no staging directory, no download left"
 

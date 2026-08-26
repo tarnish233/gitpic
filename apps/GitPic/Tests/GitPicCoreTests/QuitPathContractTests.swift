@@ -190,11 +190,77 @@ struct QuitPathContractTests {
                 """)
     }
 
+    /// The routes AppKit synthesises are closed from both ends, or from neither.
+    ///
+    /// The Dock icon's contextual-menu Quit and the Apple Event a logout sends arrive as
+    /// `terminate:`, which a sheet refuses — so with the update sheet up the app used to block
+    /// the user logging out, with Force Quit the only way past it. Closing that takes two
+    /// changes that are only correct together:
+    ///
+    /// - `Updater.allowTerminationWithSheets()` clears
+    ///   `preventsApplicationTerminationWhenModal` on every sheet, so `terminate:` stops being
+    ///   refused;
+    /// - `AppDelegate.applicationShouldTerminate` sends what now gets through to
+    ///   `Updater.quitByUser()`.
+    ///
+    /// Either one alone is a defect rather than half a fix. The first without the second lets
+    /// AppKit tear the process down its own way, running neither `prepareToQuit()` nor the
+    /// staging undo — the leak 0.20.1 shipped to close, reopened through a different door. The
+    /// second without the first is dead code, because a sheet's refusal happens before the
+    /// delegate is consulted. So this asserts them as a pair, and deleting either half fails
+    /// here rather than in a release.
+    ///
+    /// A grep again, and again the weaker half: whether AppKit actually stops refusing is
+    /// AppKit's behaviour with a real sheet on a real window, which `swift test` cannot reach at
+    /// all. `scripts/check-self-update.sh`'s 「quit Apple Event」 phase measures that by sending
+    /// the same event a logout sends, mid-install.
+    @Test("the terminate: routes are closed from both ends")
+    func appKitRoutesReachTheOneQuitPath() throws {
+        let app = try Self.read("GitPicApp.swift")
+        let updater = try Self.read("Updater.swift")
+
+        let shouldTerminate = try #require(
+            Self.body(of: "func applicationShouldTerminate(_ sender: NSApplication)", in: app),
+            """
+            AppDelegate does not implement applicationShouldTerminate. Without it a logout or a \
+            Dock-menu Quit lets AppKit exit without prepareToQuit() or the staging undo.
+            """)
+        #expect(shouldTerminate.contains("Updater.quitByUser()"),
+                """
+                applicationShouldTerminate must route into Updater.quitByUser(), not return \
+                .terminateNow — AppKit's own teardown runs neither the login-child reap nor \
+                SelfUpdate.undoInFlightWork(). Body was: \(shouldTerminate)
+                """)
+
+        let launch = try #require(
+            Self.body(of: "func applicationDidFinishLaunching", in: app),
+            "cannot find applicationDidFinishLaunching's body")
+        #expect(launch.contains("Updater.allowTerminationWithSheets()"),
+                """
+                applicationDidFinishLaunching must install allowTerminationWithSheets(), and \
+                before any window can open — it works by watching sheets begin, so a sheet it \
+                never saw begin keeps AppKit's refusal and applicationShouldTerminate stays \
+                unreachable.
+                """)
+
+        let allow = try #require(
+            Self.body(of: "static func allowTerminationWithSheets()", in: updater),
+            "cannot find allowTerminationWithSheets's body")
+        #expect(allow.contains("preventsApplicationTerminationWhenModal = false"),
+                "allowTerminationWithSheets must clear the flag that refuses termination")
+        // Every sheet, not one named window: five sheet-shaped presentations exist today and
+        // the point of doing this centrally is the sixth someone adds.
+        #expect(allow.contains("willBeginSheetNotification"),
+                """
+                allowTerminationWithSheets must observe willBeginSheetNotification rather than \
+                fix one sheet at its call site, or the next sheet added reintroduces the bug.
+                """)
+    }
+
     /// The text between a declaration's opening `{` and the first `}` at the declaration's own
     /// indentation — enough to tell "inside this function" from "somewhere in this file", without
     /// pretending to be a Swift parser.
-    static func body(of declaration: String, in source: String) -> String? {
-        let lines = source.components(separatedBy: "\n")
+    static func body(of declaration: String, in source: String) -> String? {        let lines = source.components(separatedBy: "\n")
         guard let start = lines.firstIndex(where: { $0.contains(declaration) }) else { return nil }
         let indent = String(lines[start].prefix { $0 == " " })
         guard let end = lines[(start + 1)...].firstIndex(where: { $0 == indent + "}" })
