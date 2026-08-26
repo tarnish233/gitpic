@@ -61,7 +61,10 @@ enum MainMenu {
                      action: #selector(NSApplication.unhideAllApplications(_:)),
                      keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "退出 GitPic", action: #selector(NSApplication.terminate(_:)),
+        // No target, so this travels the responder chain to `NSApp`, which hands what it
+        // cannot handle to its delegate. Not `NSApplication.terminate`: AppKit refuses to
+        // terminate while a sheet is attached to any window — see ``Updater/quit(_:)``.
+        menu.addItem(withTitle: "退出 GitPic", action: #selector(AppDelegate.quitByUser),
                      keyEquivalent: "q")
 
         item.submenu = menu

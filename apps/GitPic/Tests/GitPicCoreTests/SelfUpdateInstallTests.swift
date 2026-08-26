@@ -183,6 +183,23 @@ struct SelfUpdateInstallTests {
             dev: info.st_dev, ino: info.st_ino)
     }
 
+    /// Register into the process-wide registry the way `stage` does, at the current generation.
+    ///
+    /// The generation is read here rather than passed in because these tests are standing in for
+    /// a `stage` that has just started; a test that needs the *stale* generation asks for it
+    /// explicitly — see `refusesToRegisterAfterADrain`.
+    private static func register(staging: URL) {
+        #expect(SelfUpdate.inFlightWork.hold(staging: staging,
+                                             since: SelfUpdate.inFlightWork.generation),
+                "registering at the current generation must succeed")
+    }
+
+    private static func register(mount: URL) {
+        #expect(SelfUpdate.inFlightWork.hold(mount: mount,
+                                             since: SelfUpdate.inFlightWork.generation),
+                "registering at the current generation must succeed")
+    }
+
     private static func fixture(installed: String = "0.18.0") throws -> Fixture {
         let dmg = try Self.sharedImage.get()
         let root = FileManager.default.temporaryDirectory
@@ -767,6 +784,210 @@ struct SelfUpdateInstallTests {
         // Nothing was mounted, so the mount point was removed by the plain `rmdir` path — no
         // `hdiutil detach` was needed and none of it recursed into a volume.
         #expect(Self.mountLeftovers() == mountsBefore)
+    }
+
+    // MARK: - Quitting mid-install
+
+    /// `exit(0)` runs no `defer`, so the quit has to undo staging itself.
+    ///
+    /// This is the behavioural half of `QuitPathContractTests.quitUndoesInFlightWork`, which can
+    /// only grep: `Updater` lives in `GitPicApp`, an `executableTarget` tests cannot import, so
+    /// what the drain *does* is asserted here and that `quit` still calls it is asserted there.
+    @Test("the drain removes the staging directory and the download")
+    func undoRemovesStagingAndDownload() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+
+        // Shaped like the real ones: a staging directory with a bundle inside it, beside the
+        // target, and a disk image in the temporary directory.
+        let staging = f.apps.appendingPathComponent(".GitPic-update-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        try Self.makeApp(at: staging.appendingPathComponent("GitPic.app"), version: "0.19.0")
+        let download = f.root.appendingPathComponent("gitpic-update-\(UUID().uuidString).dmg")
+        try FileManager.default.copyItem(at: f.dmg.url, to: download)
+
+        Self.register(staging: staging)
+        SelfUpdate.holdDownload(download)
+        SelfUpdate.undoInFlightWork()
+
+        #expect(!FileManager.default.fileExists(atPath: staging.path),
+                "the staging directory survived the quit")
+        #expect(!FileManager.default.fileExists(atPath: download.path),
+                "the disk image survived the quit")
+        // The target is untouched — the drain undoes an install, it does not roll one back.
+        #expect(SelfUpdate.bundleVersion(of: f.target) == "0.18.0")
+        // And the registry is empty, so a second quit has nothing to do.
+        #expect(SelfUpdate.inFlightWork.drain().isEmpty)
+    }
+
+    /// The drain detaches a real image, and does not block waiting for it.
+    ///
+    /// Fire-and-forget, so the assertion has to poll: what is being checked is that the detach
+    /// actually happens, not when. `detachMount` is deliberately *not* used on the quit path —
+    /// it decides from `isMountPoint` and would unlink the mount point out from under an attach
+    /// that had not landed yet, which is unrecoverable rather than merely leaked.
+    @Test("the drain detaches an image the install had mounted")
+    func undoDetachesTheMount() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let mountsBefore = Self.mountLeftovers()
+
+        let mount = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitpic-mount-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
+        let attach = try ChildProcess.run(
+            executable: URL(fileURLWithPath: "/usr/bin/hdiutil"),
+            args: ["attach", f.dmg.url.path, "-nobrowse", "-readonly", "-mountpoint", mount.path],
+            timeout: 120)
+        try #require(attach.status == 0 && !attach.timedOut,
+                     "could not attach the fixture image: \(String(decoding: attach.stderr, as: UTF8.self))")
+        // If the drain does not get it, this does — a leaked mount survives until reboot.
+        defer { SelfUpdate.detachMount(at: mount) }
+        try #require(FileManager.default.fileExists(
+            atPath: mount.appendingPathComponent("GitPic.app").path), "nothing got mounted")
+
+        Self.register(mount: mount)
+        SelfUpdate.undoInFlightWork()
+
+        // The background `sh` retries for up to ~2 s of its own, so allow more than that.
+        var gone = false
+        for _ in 0..<100 where !gone {
+            gone = !FileManager.default.fileExists(atPath: mount.path)
+            if !gone { Thread.sleep(forTimeInterval: 0.1) }
+        }
+        #expect(gone, "the mount point is still there, so the image is still attached")
+        #expect(Self.mountLeftovers() == mountsBefore)
+    }
+
+    /// The handover to the install script and the quit cannot both win.
+    ///
+    /// The dangerous ordering is the second half: if a quit takes the staging directory while
+    /// `installAndRelaunch` goes on to spawn the script anyway, the script finds no staged bundle
+    /// and its `trap reopen EXIT` puts the *old* bundle back — a successful install turned into a
+    /// silent rollback. So the claim has to be the atomic step, and `false` has to mean "do not
+    /// hand off".
+    @Test("the staged bundle goes to the script or to the quit, never to both")
+    func stagedBundleHasOneOwner() throws {
+        let apps = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitpic-owner-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: apps, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: apps) }
+        let staging = apps.appendingPathComponent(".GitPic-update-\(UUID().uuidString)")
+
+        // The script wins: it claims, so the quit afterwards finds nothing to delete.
+        Self.register(staging: staging)
+        #expect(SelfUpdate.claimStaged(staging), "the first claim must succeed")
+        #expect(SelfUpdate.inFlightWork.drain().staging == nil,
+                "a claimed directory must not still be drainable")
+
+        // The quit wins: it drained first, so the claim fails and the caller must not hand off.
+        Self.register(staging: staging)
+        #expect(SelfUpdate.inFlightWork.drain().staging == staging)
+        #expect(!SelfUpdate.claimStaged(staging),
+                "claiming after a drain would hand the script a directory being deleted")
+
+        // And a claim only ever matches the directory it was given.
+        Self.register(staging: staging)
+        #expect(!SelfUpdate.claimStaged(apps.appendingPathComponent(".GitPic-update-other")))
+        #expect(SelfUpdate.claimStaged(staging))
+    }
+
+    /// The mount path reaches the detach as an argument, never as script text.
+    ///
+    /// A shape assertion rather than a behaviour one, and it is here because the alternative is a
+    /// quoting bug in generated shell: `$1` cannot be broken by a path, an interpolated
+    /// `\(mount.path)` can. Absolute command paths for the same class of reason — the drain runs
+    /// with whatever `PATH` the app inherited.
+    @Test("the detach script takes its path as an argument, not as text")
+    func detachScriptIsQuotingProof() {
+        let script = SelfUpdate.detachScript
+        #expect(script.contains("\"$1\""), "the path must arrive as a quoted positional argument")
+        #expect(script.contains("/usr/bin/hdiutil"), "hdiutil must be absolute")
+        #expect(script.contains("/bin/rmdir"), "rmdir must be absolute")
+        #expect(!script.contains("gitpic-mount-"),
+                "no path may be interpolated into the script text")
+        #expect(script.contains("-force"),
+                "a polite detach exits 16 on a busy mount — see detachMount's measurement")
+    }
+
+    /// A registration made after the drain has already been and gone must be refused.
+    ///
+    /// This is the bug `quitDuringStagingLeavesNothing` caught when the registrations were plain
+    /// setters. The drain took the mount, `stage` carried on — it had no way to know — created its
+    /// staging directory, registered it into a table nothing would read again, copied a whole
+    /// bundle into it and returned successfully. Nothing ever removed it.
+    ///
+    /// It is not a test-only window. `quit` runs a blocking `UserDefaults.synchronize()` between
+    /// the drain and `exit(0)`, which is ample time for `createDirectory` to land. So registering
+    /// and asking "has a quit happened" have to be one atomic step, and the answer has to be
+    /// something `stage` acts on.
+    @Test("nothing new may be registered once a quit has drained")
+    func refusesToRegisterAfterADrain() {
+        let stale = SelfUpdate.inFlightWork.generation
+        _ = SelfUpdate.inFlightWork.drain()
+
+        let mount = URL(fileURLWithPath: "/tmp/gitpic-mount-never-created")
+        let staging = URL(fileURLWithPath: "/tmp/.GitPic-update-never-created")
+        #expect(!SelfUpdate.inFlightWork.hold(mount: mount, since: stale),
+                "a mount registered after the drain would never be detached")
+        #expect(!SelfUpdate.inFlightWork.hold(staging: staging, since: stale),
+                "a staging directory registered after the drain would never be removed")
+        // Nothing was recorded, so a later drain has nothing to act on.
+        #expect(SelfUpdate.inFlightWork.drain().isEmpty)
+        // And the current generation still works — the refusal is per-generation, not a latch.
+        // A latch would poison every later test in this process, since the registry is
+        // process-wide and `swift test` runs one process.
+        #expect(SelfUpdate.inFlightWork.hold(mount: mount,
+                                            since: SelfUpdate.inFlightWork.generation))
+        SelfUpdate.inFlightWork.release(mount: mount)
+    }
+
+    /// The real race: a quit landing while `stage` is copying.
+    ///
+    /// Everything above registers by hand. This one drives `stage` on another thread, waits until
+    /// it has actually mounted the image, and drains from underneath it — which is what
+    /// 「退出 GitPic」 during an install does. `stage` then unwinds through its own `defer`s at the
+    /// same time, so the two cleanups converge on the same paths; the assertion is about the end
+    /// state, because that convergence is the design and not a hazard.
+    @Test("a quit during staging leaves nothing behind")
+    func quitDuringStagingLeavesNothing() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let mountsBefore = Self.mountLeftovers()
+
+        let done = DispatchSemaphore(value: 0)
+        let target = f.target
+        let dmg = f.dmg
+        DispatchQueue.global().async {
+            // Throws or returns — either is a legitimate outcome of being drained mid-flight, and
+            // which one depends on where the SIGKILL lands. The end state is what matters.
+            _ = try? SelfUpdate.stage(dmg: dmg, expectedVersion: "0.19.0", replacing: target)
+            done.signal()
+        }
+
+        // Wait for it to reach the window this is about, rather than sleeping a guessed interval.
+        var mounted: URL?
+        for _ in 0..<600 where mounted == nil {
+            mounted = SelfUpdate.inFlightWork.mountInFlight
+            if mounted == nil { Thread.sleep(forTimeInterval: 0.01) }
+        }
+        try #require(mounted, "stage never registered a mount, so nothing was exercised")
+
+        SelfUpdate.undoInFlightWork()
+        #expect(done.wait(timeout: .now() + 120) == .success, "stage never finished unwinding")
+
+        // Give the fire-and-forget detach its retries.
+        var settled = false
+        for _ in 0..<100 where !settled {
+            settled = Self.mountLeftovers() == mountsBefore
+            if !settled { Thread.sleep(forTimeInterval: 0.1) }
+        }
+        #expect(settled, "a mount was left attached: \(Self.mountLeftovers())")
+        #expect(Self.entries(in: f.apps, prefix: ".GitPic-update-").isEmpty,
+                "a staging directory was left beside the target")
+        #expect(SelfUpdate.bundleVersion(of: f.target) == "0.18.0",
+                "the installed bundle must be untouched")
+        #expect(SelfUpdate.inFlightWork.drain().isEmpty, "the registry was left dirty")
     }
 
     // MARK: - Cancellation
