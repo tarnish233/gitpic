@@ -160,6 +160,30 @@ to block logging out while an update sheet was up). ⌘Q is not driven, because 
 app frontmost poisons the accessibility tree for the rest of the run; it shares one
 selector with the menu item, which `QuitPathContractTests` holds.
 
+**The other AppKit-only property with a suite of its own: opening the window has to *show*
+it.** `WindowFocusContractTests` is a source scan for the same reason the quit contract is
+one — `GitPicApp` is an `executableTarget` tests cannot import, and the answer comes from
+AppKit's treatment of a real window in an app that is not frontmost. What it holds is that
+raising the policy and coming to the front are two calls, only the first of them guarded:
+`AppActivationPolicy.enter()` is reference-counted so that closing the window gives the Dock
+icon back, and `comeForward()` is not, because it has to happen on every open. They were one
+call until 0.20.6, so the guard skipped the activation whenever the window was already open,
+and every route in that can be taken while the app is in the background — the status menu's
+打开设置, 连通性测试 and 检查更新/有新版本… — then did nothing the user could see.
+`makeKeyAndOrderFront` does not cover it: an app that is not active puts none of its windows
+in front of the active app's. (`MainMenu`'s ⌘, and 关于 were never affected; a main-menu key
+equivalent only fires while the app is frontmost.)
+
+Measured rather than reasoned about, by driving both builds through the accessibility tree
+with the window already open behind Finder, five trials each, every trial checking that
+Finder really had the screen first: shipped 0.20.5 came forward **0/5**, the fix **5/5**.
+Two things that harness taught, worth knowing before writing another one: a human at the
+keyboard steals focus, so a trial that cannot confirm its own precondition has to be
+discarded rather than counted; and clicking one GitPic's status item while a *second* GitPic
+is frontmost left the first sitting `.regular` with zero windows and refusing to open one —
+not reproducible on a fresh process, so it is an artifact of driving two instances at once
+and not a defect, but it will waste an hour if you meet it without knowing.
+
 ## Working in Parallel (one agent, one worktree)
 
 Several agents work this repo at once, and `git checkout` is per-*directory* state:

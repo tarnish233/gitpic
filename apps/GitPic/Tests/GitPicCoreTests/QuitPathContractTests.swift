@@ -268,7 +268,9 @@ struct QuitPathContractTests {
         return lines[(start + 1)..<end].joined(separator: "\n")
     }
 
-    private static func read(_ name: String) throws -> String {
+    /// Internal, not private: ``WindowFocusContractTests`` scans the same sources for a
+    /// different property and there is no reason for a second copy of this.
+    static func read(_ name: String) throws -> String {
         let byName = Dictionary(grouping: try appSources()) { $0.lastPathComponent }
         let url = try #require(byName[name]?.first, "missing \(name)")
         return try String(contentsOf: url, encoding: .utf8)
