@@ -6,11 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.20.5] - 2026-08-26
 
-### The update check now uses the GitHub credential you already have, so a shared IP cannot starve it
+### The update check is no longer starved by a shared IP's rate limit
 
-- **The unauthenticated GitHub API allows 60 requests an hour, and that budget belongs to an address rather than to a person.** Behind a shared egress — a company network, a carrier NAT — those 60 are shared with everyone behind it: measured on a machine that had checked once that day, GitHub answered `API rate limit exceeded` with `x-ratelimit-used: 60`, while the same request through a different egress had 52 left. For those users the anonymous path is not slower, it does not work at all.
-- **So the check now sends the credential `gitpic auth login` already stored**, which moves the limit from 60 an hour per address to 5000 an hour on your own account — the remedy GitHub's own error message names. No permission is needed for it: a token with no scopes at all raises the limit just as well.
-- **Nothing changes if you have never logged in**: no credential means no header and the same anonymous request as before. And a credential GitHub refuses — expired, revoked — falls back to an anonymous attempt rather than failing, because a stale image-host token should not be able to stop you being told a new version exists.
+- Update checks use your GitHub sign-in now, so the hourly limit is 5000 rather than 60 shared network-wide
+- Nothing changes if you never signed in; an expired credential falls back to anonymous instead of failing
 
 <!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file. Keep each bullet above on one line — the app's update sheet renders with .inlineOnlyPreservingWhitespace, which keeps newlines verbatim, so a wrapped line breaks mid-sentence at 480pt -->
 

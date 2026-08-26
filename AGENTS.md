@@ -17,6 +17,18 @@
 Docs: `README.md` (中文, default), `README.en.md`, `skills/gitpic/SKILL.md` (agent
 usage), `CHANGELOG.zh-CN.md` (中文, Release source), and `CHANGELOG.md` (English). Keep
 both changelogs aligned for every release. CI lives in `.github/workflows/`.
+
+**The `release-notes-end` marker splits two audiences, and the half above it is for
+people deciding whether to upgrade.** Everything above becomes the GitHub Release body
+*and* the app's update sheet; everything below stays in the file. So above the marker:
+one theme heading and **two or three bullets of roughly one line each** — what changed,
+in the user's terms, no mechanism. Aim for ~40 characters of 中文 or ~100 of English per
+bullet; a released 0.20.3 bullet ran to 246 characters, which is a paragraph pretending
+to be a summary. Everything that made it worth doing — the measurement, the design that
+was rejected, the test that was wrong — goes *below* the marker and into the commit
+message, which is where someone reading the code will look for it. Nothing is lost by
+being brief up top; it is only moved to the reader who wants it.
+
 Homebrew lives in the separate `tarnish233/homebrew-tap` repo, as **two entries with
 different names on purpose**. The cask is **`gitpic`** (`Casks/gitpic.rb`) and installs
 the app; the formula is **`gitpic_cli`** (`Formula/gitpic_cli.rb`) and installs only the
