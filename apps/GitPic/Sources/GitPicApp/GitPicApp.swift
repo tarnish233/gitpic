@@ -515,16 +515,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // that includes a modal panel. `AppActivationPolicy` is reference-counted
         // for exactly this: the panel can hold .regular alongside the settings window.
         //
-        // This replaces a bare `NSApp.activate(ignoringOtherApps:)`, which is
-        // deprecated as of macOS 14 and does not do what its name says any more:
-        // under cooperative activation a background app cannot pull itself in front
-        // of the active one. What decides it is where the click came from — a real
-        // click on the status item grants the app activation rights and the panel
-        // comes up in front (confirmed by hand); the same menu item driven
-        // programmatically gets no such rights and the panel opens *behind* the
-        // frontmost app's windows (measured). So this is the policy that makes the
-        // real path work, not a guarantee for every caller.
+        // This replaces a bare `NSApp.activate(ignoringOtherApps:)`, which does not do
+        // what its name says any more: under cooperative activation a background app
+        // cannot pull itself in front of the active one. What decides it is where the
+        // click came from — a real click on the status item grants the app activation
+        // rights and the panel comes up in front (confirmed by hand); the same menu item
+        // driven programmatically gets no such rights and the panel opens *behind* the
+        // frontmost app's windows (measured). So it is the *policy* that makes the real
+        // path work, not the activation on its own — which is why both are named here
+        // rather than one standing in for the other.
+        //
+        // (`activateIgnoringOtherApps:` is **not** deprecated yet, as an earlier version of
+        // this comment claimed: the SDK marks it `API_TO_BE_DEPRECATED` — "will be
+        // deprecated in a future release. Use NSApp.activate instead" — so it compiles
+        // without a warning. Its `macos(14.0)` replacement is the strict cooperative form,
+        // which has no measurement behind it here; the call that is measured to work from a
+        // status-item click is the one `AppActivationPolicy.comeForward` makes.)
         AppActivationPolicy.enter()
+        AppActivationPolicy.comeForward()
         defer { AppActivationPolicy.leave() }
         guard p.runModal() == .OK, !p.urls.isEmpty else { return }
         upload(paths: p.urls)

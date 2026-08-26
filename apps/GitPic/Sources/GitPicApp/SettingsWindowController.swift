@@ -99,6 +99,26 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             AppActivationPolicy.enter()
             holdingActivation = true
         }
+        // And come to the front. **Outside the guard, on purpose** — this is the half that
+        // has to happen on every open, and it used to be a side effect of `enter()`, which
+        // meant the reference count decided it. With the window already open the guard
+        // skipped `enter()`, so nothing asked AppKit to activate, and nothing else in this
+        // method covers it: `makeKeyAndOrderFront` orders the window to the front of *this
+        // app's* windows, and an app that is not active puts none of its windows in front
+        // of the active app's.
+        //
+        // So every route into this window that can be taken *while the app is in the
+        // background* — which is the status menu's 打开设置, 连通性测试 and
+        // 检查更新/有新版本… — did nothing visible at all once the window was open behind
+        // something else, and the latter two did it worse than nothing: they started work
+        // whose answer rendered in a window the user could not see. (`MainMenu`'s ⌘, and
+        // 关于 are not affected — a main-menu key equivalent only fires while this app is
+        // frontmost, and then the window is already in front.)
+        //
+        // Measured on 0.20.5 through the accessibility tree: 打开设置 with the window
+        // closed → frontmost app GitPic; activate Finder; 打开设置 again → frontmost app
+        // still Finder, `window 1` still there, untouched, behind it.
+        AppActivationPolicy.comeForward()
         super.showWindow(sender)
         window?.deminiaturize(nil)
         window?.makeKeyAndOrderFront(nil)

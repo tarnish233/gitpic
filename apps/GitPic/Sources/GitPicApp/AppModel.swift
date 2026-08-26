@@ -5,13 +5,33 @@ import GitPicCore
 /// Lets a menu-bar-only app show a real window with a normal title bar, then go
 /// back to being invisible. Reference-counted because more than one window (or a
 /// modal alert) can need `.regular` at the same time.
+///
+/// **Raising the policy and coming to the front are two acts, and separating them is the
+/// whole point of this type's shape.** The policy is per *window*: taken when one opens,
+/// given back when the last one closes, which is what returns the app to the status bar —
+/// so it is counted. Coming to the front is per *click*: it has to happen every time,
+/// because between two clicks the user can have gone somewhere else. They used to be one
+/// call, which handed the reference count a decision it has no business making —
+/// ``SettingsWindowController/showWindow(_:)`` carries what that cost.
 @MainActor
 enum AppActivationPolicy {
     private static var depth = 0
 
+    /// Take a reference on `.regular`. Deliberately does **not** bring the app forward;
+    /// pair it with ``comeForward()``.
     static func enter() {
         depth += 1
         NSApp.setActivationPolicy(.regular)
+    }
+
+    /// Put this app in front of whatever is active.
+    ///
+    /// One spelling of the call, in one place, because it is subtler than it looks: under
+    /// cooperative activation a background app cannot pull itself past the active one
+    /// unless something granted it activation rights. `AppDelegate.pickFiles` records what
+    /// grants them here. `.regular` plus this is measured to work from a status-item click,
+    /// which is the only way into this app.
+    static func comeForward() {
         NSApp.activate(ignoringOtherApps: true)
     }
 
