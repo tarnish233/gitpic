@@ -4,6 +4,42 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.6] - 2026-08-26
+
+### 打开设置 no longer does nothing when the window is already open
+
+- With the settings window open behind another app, clicking it left the window there; it comes to the front now
+- 连通性测试 and 检查更新 were affected the same way — they ran, and drew their answer in a window you could not see
+
+<!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file. Keep each bullet above on one line — the app's update sheet renders with .inlineOnlyPreservingWhitespace, which keeps newlines verbatim, so a wrapped line breaks mid-sentence at 480pt -->
+
+### App
+
+- The activation had been written as a side effect of a reference count.
+  `AppActivationPolicy.enter()` raised `.regular` *and* called `NSApp.activate`, while
+  `SettingsWindowController.showWindow` calls it behind a `holdingActivation` guard so the
+  count cannot leak — closing the window has to give the Dock icon back. With the window
+  already open that guard skipped `enter()`, and the activation went with it.
+- Nothing else in `showWindow` covers that half. `makeKeyAndOrderFront` orders the window to
+  the front of *this process's* windows; an app that is not active puts none of its windows
+  in front of the active app's.
+- So the two acts are now two calls: `enter()` takes the policy (once per window, hence still
+  counted) and the new `comeForward()` activates (every open, hence outside the guard). The
+  file panel in `pickFiles` relied on the same side effect and now names both.
+- Measured, one variable apart: the same accessibility-tree script against the shipped 0.20.5
+  and against this build — window already open, Finder holding the screen, five trials each,
+  every trial confirming Finder really had it first. 0/5 came forward, then 5/5. Every earlier
+  phase (cold open, close, reopen, close, reopen, switch away) was identical on both.
+- `WindowFocusContractTests` holds the shape. A source scan, because `GitPicApp` is an
+  `executableTarget` tests cannot import and the behaviour is AppKit's — the same reason
+  `QuitPathContractTests` is one. It asserts the activation is reachable from *outside* the
+  guard and that `enter()` is not what activates; all three ways of undoing the fix were
+  verified to turn it red.
+- Corrected a comment that was false: `activateIgnoringOtherApps:` is **not** deprecated yet.
+  The SDK marks it `API_TO_BE_DEPRECATED` — "will be deprecated in a future release" — so it
+  compiles without a warning. Its macOS 14 replacement is the strict cooperative form, which
+  has no measurement behind it here.
+
 ## [0.20.5] - 2026-08-26
 
 ### The update check is no longer starved by a shared IP's rate limit
