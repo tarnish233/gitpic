@@ -1,13 +1,37 @@
 //! The project's own release feed: is there a newer gitpic than this one?
 //!
 //! **Not part of [`crate::github`]**, and the separation is deliberate. That module is a
-//! client for *the user's image host* — every request carries the credential from
-//! `gitpic auth login`, and its error mapping is written in those terms (a 401 means "your
-//! token was rejected", a 404 means "your repo or branch is missing"). This module talks to
-//! a fixed, unauthenticated, public endpoint about gitpic itself, where a 401 is
-//! meaningless and a 404 means "this project has published no releases". Sharing one client
-//! would mean one error mapping answering two different questions, and would put the user's
-//! token on a request that has no business carrying it.
+//! client for *the user's image host*, and its error mapping is written in those terms (a 404
+//! means "your repo or branch is missing"). This module talks to a fixed endpoint about
+//! gitpic itself, where a 404 means "this project has published no releases". Sharing one
+//! client would mean one error mapping answering two different questions — that half of the
+//! argument still stands, and is why there are still two modules.
+//!
+//! **The other half — "and would put the user's token on a request that has no business
+//! carrying it" — was reversed in 0.20.5, on measurement.** The unauthenticated API allows 60
+//! requests an hour *per address*, and an address is not a user: behind a shared NAT egress
+//! that budget belongs to everyone behind it. Measured on a real one — GitHub answered
+//! `403 API rate limit exceeded for 163.128.6.24` with `x-ratelimit-used: 60` for a machine
+//! that had made one check that day, and the same request through a different egress had 52
+//! of 60 left. For those users the anonymous path is not slower, it does not work at all, and
+//! GitHub's own error names the remedy: an authenticated request is 5000 an hour and is
+//! counted against the account rather than the address.
+//!
+//! What was conceded, and what was not. The credential goes to `api.github.com` — the same
+//! host and the same token that `gitpic auth login` already sends there for uploads — and
+//! GitHub is the only party that sees it; this project's repository owner does not. No
+//! permission is needed for it to work, so a token with no scopes at all raises the limit
+//! just as well. It stays **optional**: no credential means no header and the old anonymous
+//! request, because the app is usable without ever logging in. A rejected credential falls
+//! back to anonymous rather than failing, so a stale image-host token cannot break update
+//! checks. And the request cannot follow a redirect at all
+//! ([`reqwest::redirect::Policy::none`]), so the header has nowhere else to travel.
+//!
+//! The test that asserted no credential is ever sent was **narrowed rather than deleted** —
+//! see `sends_no_credential_when_there_is_none` and `sends_the_credential_only_to_the_fixed_base`.
+//! A blanket prohibition would now be false, and a comment claiming one would be worse than
+//! none; what still holds and is still worth guarding is that the header appears only with a
+//! credential, only against the compile-time base, and never on a redirect.
 
 use crate::error::{AppError, ErrorCode, Result};
 use serde::{Deserialize, Serialize};
@@ -243,48 +267,111 @@ fn is_fence_delimiter(line: &str) -> bool {
 
 /// Ask GitHub for the latest release and compare it with this build.
 pub async fn check() -> Result<UpdateReport> {
-    check_against(API).await
+    check_against(API, best_effort_token().as_deref()).await
 }
 
-/// The same, against an explicit API base.
+/// The credential to raise the rate limit with, or nothing — never an error.
 ///
-/// Private, and unlike [`crate::github`]'s equivalent the reason is not the credential —
-/// there is none — but the release notes: whatever comes back is rendered inside GitPic's
-/// own settings window, so the origin must not be reachable from a config file or an
-/// environment variable. Tests inject a loopback stub directly.
-async fn check_against(api: &str) -> Result<UpdateReport> {
+/// Every way [`crate::auth::token`] can fail (no `auth.toml`, an expired credential, one that
+/// is not a bare token) collapses to `None` and an anonymous request. Deliberately: this is a
+/// background check on a public endpoint, and the app is usable without ever logging in, so
+/// none of those states is a reason to stop telling the user a new version exists.
+fn best_effort_token() -> Option<String> {
+    crate::auth::token().ok()
+}
+
+/// One attempt, and enough of its outcome for the caller to decide about a second.
+enum Attempt {
+    Ok(LatestRelease),
+    /// GitHub rejected the credential itself — the one outcome worth retrying anonymously,
+    /// because a stale image-host token must not be able to break update checks.
+    CredentialRejected,
+    Failed(AppError),
+}
+
+/// The same, against an explicit API base and with an explicit credential.
+///
+/// Private, and unlike [`crate::github`]'s equivalent the reason is not only the credential
+/// but the release notes: whatever comes back is rendered inside GitPic's own settings
+/// window, so the origin must not be reachable from a config file or an environment
+/// variable. Tests inject a loopback stub directly.
+///
+/// The credential is a parameter rather than read here, so that every test states which case
+/// it is exercising instead of inheriting whatever `auth.toml` the machine happens to hold.
+/// Read from the file it would have been, `sends_no_credential_when_there_is_none` would pass
+/// on CI and fail on any developer who had run `gitpic auth login` — a security assertion
+/// whose verdict depends on the machine is not one.
+async fn check_against(api: &str, token: Option<&str>) -> Result<UpdateReport> {
     let client = reqwest::Client::builder()
         .user_agent(UA)
         .timeout(REQUEST_TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
+        // Nothing here redirects — `releases/latest` answers 200 directly — so refusing to
+        // follow one costs nothing and makes "the credential cannot travel to another host"
+        // structural rather than a property of whichever reqwest release is linked. reqwest
+        // does strip sensitive headers across hosts on its own; this does not depend on it.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| AppError::network(format!("http client: {e}")))?;
 
     let url = format!("{api}/repos/{RELEASES_REPO}/releases/latest");
-    let resp = client
-        .get(&url)
+
+    let latest = match fetch(&client, &url, token).await {
+        Attempt::Ok(latest) => latest,
+        // Anonymous retry, and only from here: the first attempt carried a credential that
+        // GitHub refused, which says nothing about whether the release feed is readable.
+        Attempt::CredentialRejected => match fetch(&client, &url, None).await {
+            Attempt::Ok(latest) => latest,
+            Attempt::Failed(e) => return Err(e),
+            // Unreachable in practice — there is no credential left to reject — but stated
+            // rather than `unreachable!()`, because a panic in a background update check
+            // would be a worse answer than an error message.
+            Attempt::CredentialRejected => {
+                return Err(AppError::new(
+                    ErrorCode::General,
+                    "check for updates: GitHub rejected an anonymous request as unauthorised",
+                ))
+            }
+        },
+        Attempt::Failed(e) => return Err(e),
+    };
+
+    report(CURRENT, latest)
+}
+
+/// One request, decoded, with the credential attached only if there is one.
+async fn fetch(client: &reqwest::Client, url: &str, token: Option<&str>) -> Attempt {
+    let mut req = client
+        .get(url)
         .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .await
-        .map_err(|e| AppError::network(format!("check for updates: {e}")))?;
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+    let resp = match req.send().await {
+        Ok(resp) => resp,
+        Err(e) => return Attempt::Failed(AppError::network(format!("check for updates: {e}"))),
+    };
 
     let status = resp.status();
     if !status.is_success() {
-        // Headers and body before the response is dropped. The old code passed the status
-        // alone, which is why the mapping below could not tell a rate limit from any other
-        // 403 and could not say when to retry — `x-ratelimit-remaining` is the authoritative
-        // signal, and `AppError::with_retry_hint` existed unused for want of a number.
+        if status.as_u16() == 401 && token.is_some() {
+            return Attempt::CredentialRejected;
+        }
+        // Headers and body before the response is dropped. Passing the status alone is why
+        // this could not tell a rate limit from any other 403, and could not say when to
+        // retry — `x-ratelimit-remaining` is the authoritative signal, and
+        // `AppError::with_retry_hint` existed unused for want of a number.
         let headers = resp.headers().clone();
         let body = resp.text().await.unwrap_or_default();
-        return Err(status_error(status, &headers, &body));
+        return Attempt::Failed(status_error(status, &headers, &body));
     }
-    let latest: LatestRelease = resp
-        .json()
-        .await
-        .map_err(|e| AppError::network(format!("check for updates: unreadable reply: {e}")))?;
-
-    report(CURRENT, latest)
+    match resp.json::<LatestRelease>().await {
+        Ok(latest) => Attempt::Ok(latest),
+        Err(e) => Attempt::Failed(AppError::network(format!(
+            "check for updates: unreadable reply: {e}"
+        ))),
+    }
 }
 
 /// Turn a fetched release into the report, or explain why it cannot be compared.
@@ -408,6 +495,13 @@ fn status_error(
         404 => AppError::new(
             ErrorCode::RemoteNotFound,
             format!("{RELEASES_REPO} has published no releases yet"),
+        ),
+        // Reachable only when the anonymous retry is itself refused as unauthorised, since a
+        // rejected credential is retried without one before it gets here. Named honestly
+        // rather than folded into `General`: 401 has exactly one meaning.
+        401 => AppError::new(
+            ErrorCode::AuthFailed,
+            "check for updates: GitHub rejected the request as unauthorised".to_string(),
         ),
         // Unauthenticated api.github.com allows 60 requests an hour per address. One
         // daily check cannot reach that alone, but it shares the quota with everything
@@ -753,16 +847,21 @@ mod tests {
         assert_eq!(out.matches("```").count(), 2, "unbalanced fence: {out}");
     }
 
-    /// End to end over a loopback socket: the URL that gets requested, and a real decode
-    /// of a GitHub-shaped reply.
+    /// End to end over a loopback socket, and the anonymous half of the credential contract.
+    ///
+    /// Two jobs in one test because they need the same request: the URL that gets asked for
+    /// and a real decode of a GitHub-shaped reply, plus the assertion that a check with no
+    /// credential sends no `Authorization`. Named for the second because that is the one a
+    /// future edit could break silently — a wrong URL or a failed decode fails loudly on its
+    /// own.
     #[tokio::test]
-    async fn fetches_the_latest_release_over_http() {
+    async fn sends_no_credential_when_there_is_none() {
         let body = r#"{"tag_name":"v9.9.9","name":"GitPic 9.9.9",
             "body":"- a line of notes","html_url":"https://example.invalid/rel",
             "published_at":"2026-08-24T01:02:03Z"}"#;
         let (addr, served) = crate::testutil::stub(vec![crate::testutil::http("200 OK", body)]);
 
-        let out = check_against(&addr).await.unwrap();
+        let out = check_against(&addr, None).await.unwrap();
         // 9.9.9 outranks anything this crate will plausibly be, so the comparison is
         // pinned without hardcoding today's version.
         assert!(out.update_available, "9.9.9 must outrank {}", out.current);
@@ -788,8 +887,17 @@ mod tests {
         let headers = req.to_lowercase();
         // GitHub refuses requests without one, so this is a contract and not a courtesy.
         assert!(headers.contains("user-agent: gitpic/"), "no UA: {req}");
-        // Nothing authenticated: this endpoint is public, and the user's credential has
-        // no business on a request to a repository that is not theirs.
+        // No credential to send, so none is sent. **Narrowed in 0.20.5, not deleted.** This
+        // used to assert that the update check never authenticates at all, which was a real
+        // property with a real reason — and it stopped being true when a measurement showed
+        // the anonymous 60-an-hour budget is per *address*, so a shared NAT egress leaves it
+        // permanently spent and the check simply cannot work there. See the module header.
+        //
+        // What is guarded now is narrower and still worth guarding: the header appears only
+        // when there is a credential (here), only against the compile-time base and in bearer
+        // form (`sends_the_credential_only_to_the_fixed_base`), and never on a redirect
+        // (`does_not_follow_a_redirect_with_a_credential`). A blanket claim would now be false,
+        // and a false comment about a credential is worse than none.
         //
         // This assertion is also why the request is read through `testutil` rather than with
         // the single `sock.read` that used to be inlined here. A negative assertion over a
@@ -799,7 +907,113 @@ mod tests {
         // of the headers before this looks at them.
         assert!(
             !headers.contains("authorization:"),
-            "the update check must not send a credential: {req}"
+            "an anonymous check must send no credential: {req}"
+        );
+    }
+
+    /// With a credential, it goes out — in bearer form, and only to the base under test.
+    ///
+    /// The positive half of the pair above. Written against an explicit token rather than
+    /// whatever `auth.toml` holds, so this states the case instead of inheriting it.
+    #[tokio::test]
+    async fn sends_the_credential_only_to_the_fixed_base() {
+        let body = r#"{"tag_name":"v9.9.9","html_url":"https://example.invalid/rel"}"#;
+        let (addr, served) = crate::testutil::stub(vec![crate::testutil::http("200 OK", body)]);
+
+        let out = check_against(&addr, Some("ghp_notarealtoken"))
+            .await
+            .unwrap();
+        assert_eq!(out.latest, "9.9.9");
+
+        let req = served.join().unwrap().remove(0);
+        let headers = req.to_lowercase();
+        assert!(
+            headers.contains("authorization: bearer ghp_notarealtoken"),
+            "the credential must be sent as a bearer token: {req}"
+        );
+        // One request, to the one path. A second would mean the anonymous retry fired on a
+        // response that was not a rejection.
+        assert!(
+            req.contains(&format!("GET /repos/{RELEASES_REPO}/releases/latest")),
+            "unexpected request: {req}"
+        );
+    }
+
+    /// A credential GitHub refuses falls back to an anonymous request instead of failing.
+    ///
+    /// The point is that a stale *image-host* token cannot break update checks: the two have
+    /// nothing to do with each other, and someone whose `auth.toml` expired should still be
+    /// told a new version exists. The second request must carry no credential — retrying with
+    /// the same rejected one would be a loop with extra steps.
+    #[tokio::test]
+    async fn a_rejected_credential_retries_anonymously() {
+        let body = r#"{"tag_name":"v9.9.9","html_url":"https://example.invalid/rel"}"#;
+        let (addr, served) = crate::testutil::stub(vec![
+            crate::testutil::http("401 Unauthorized", r#"{"message":"Bad credentials"}"#),
+            crate::testutil::http("200 OK", body),
+        ]);
+
+        let out = check_against(&addr, Some("expired"))
+            .await
+            .expect("a rejected credential must not fail the check");
+        assert_eq!(out.latest, "9.9.9");
+
+        let reqs = served.join().unwrap();
+        assert_eq!(reqs.len(), 2, "expected a second, anonymous attempt");
+        assert!(
+            reqs[0]
+                .to_lowercase()
+                .contains("authorization: bearer expired"),
+            "the first attempt should carry the credential: {}",
+            reqs[0]
+        );
+        assert!(
+            !reqs[1].to_lowercase().contains("authorization:"),
+            "the retry must be anonymous: {}",
+            reqs[1]
+        );
+    }
+
+    /// The credential cannot be carried anywhere by a redirect, and this can tell.
+    ///
+    /// `reqwest` strips sensitive headers across hosts on its own, and this does not rely on
+    /// that: the client refuses redirects outright, so there is no second request at all.
+    ///
+    /// **The `Location` points back at the stub, and that is the whole design of the test.**
+    /// The first version sent it to `http://example.invalid/elsewhere`, which resolves
+    /// nowhere — so following the redirect and refusing to follow it produced the same two
+    /// observable facts, one request and an error, and the assertion passed with the redirect
+    /// policy deleted. Checked by deleting it. A relative `Location` resolves against the
+    /// request URL, so a client that follows comes straight back here and is counted.
+    #[tokio::test]
+    async fn does_not_follow_a_redirect_with_a_credential() {
+        let moved = "HTTP/1.1 302 Found\r\nLocation: /redirected\r\n\
+                     Content-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_string();
+        let body = r#"{"tag_name":"v9.9.9","html_url":"https://example.invalid/rel"}"#;
+        // Two responses queued: if the redirect is followed the stub serves both and the
+        // check succeeds, which is the failure this asserts against.
+        let (addr, served) =
+            crate::testutil::stub(vec![moved, crate::testutil::http("200 OK", body)]);
+
+        let err = check_against(&addr, Some("ghp_notarealtoken"))
+            .await
+            .expect_err("a redirect must not be followed");
+
+        // The listener still holds an unserved response, so joining it would block. What can
+        // be asserted without that is the outcome: a 302 became an error rather than a
+        // successful check, which only happens if the hop was refused.
+        drop(served);
+        assert_ne!(
+            err.code,
+            ErrorCode::RemoteNotFound,
+            "a 302 must not be read as 'no releases': {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("302") || err.message.contains("check for updates"),
+            "unexpected error for a refused redirect: {}",
+            err.message
         );
     }
 
@@ -820,7 +1034,7 @@ mod tests {
             ]}"#;
         let (addr, served) = crate::testutil::stub(vec![crate::testutil::http("200 OK", body)]);
 
-        let out = check_against(&addr).await.unwrap();
+        let out = check_against(&addr, None).await.unwrap();
         assert_eq!(
             out.assets.len(),
             2,
