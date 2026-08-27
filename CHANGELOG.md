@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.7] - 2026-08-27
+
+### Quitting mid-update no longer leaves a half-copied GitPic
+
+- Quitting during an in-app install now kills the copy in progress, instead of leaving it running after GitPic is gone
+- A half-written new version is removed rather than recreated by that leftover process
+
+<!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file. Keep each bullet above on one line — the app's update sheet renders with .inlineOnlyPreservingWhitespace, which keeps newlines verbatim, so a wrapped line breaks mid-sentence at 480pt -->
+
+### App
+
+- `InFlightWork` registers mount, staging directory and download through
+  `claimSlot(epoch)` so a quit that already drained refuses new work.
+  `hold(child:)` was a plain setter. `exit(0)` reaps nothing, and
+  `UserDefaults.synchronize()` between the drain and `exit` is long enough for
+  `ditto` to spawn. The drain has already gone, so the registry never sees that
+  process; launchd adopts it and recreates the staging directory just deleted.
+- `hold(child:since:)` now goes through `claimSlot` too. `holdWritingChild`
+  SIGKILLs immediately on `false`, and `runWritingStep` throws `.cancelled`
+  rather than letting `try?` turn that into a failed copy.
+- `refusesToRegisterAfterADrain` covers the child slot; `refusedWritingChildIsKilled`
+  asserts the refused process is actually dead.
+
 ## [0.20.6] - 2026-08-26
 
 ### 打开设置 no longer does nothing when the window is already open
