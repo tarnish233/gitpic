@@ -922,7 +922,7 @@ struct SelfUpdateInstallTests {
     /// and asking "has a quit happened" have to be one atomic step, and the answer has to be
     /// something `stage` acts on.
     @Test("nothing new may be registered once a quit has drained")
-    func refusesToRegisterAfterADrain() {
+    func refusesToRegisterAfterADrain() throws {
         let stale = SelfUpdate.inFlightWork.generation
         _ = SelfUpdate.inFlightWork.drain()
 
@@ -932,6 +932,21 @@ struct SelfUpdateInstallTests {
                 "a mount registered after the drain would never be detached")
         #expect(!SelfUpdate.inFlightWork.hold(staging: staging, since: stale),
                 "a staging directory registered after the drain would never be removed")
+
+        // The writing child used to skip `claimSlot` entirely — a plain setter — so this
+        // is the slot the epoch was invented for and did not cover. `/bin/sleep` is
+        // enough: the registry only stores the `Process`, it does not run it.
+        let sleeper = Process()
+        sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        sleeper.arguments = ["30"]
+        try sleeper.run()
+        defer {
+            if sleeper.isRunning { sleeper.terminate() }
+            sleeper.waitUntilExit()
+        }
+        #expect(!SelfUpdate.inFlightWork.hold(child: sleeper, since: stale),
+                "a child registered after the drain would never be SIGKILLed")
+
         // Nothing was recorded, so a later drain has nothing to act on.
         #expect(SelfUpdate.inFlightWork.drain().isEmpty)
         // And the current generation still works — the refusal is per-generation, not a latch.
@@ -940,6 +955,35 @@ struct SelfUpdateInstallTests {
         #expect(SelfUpdate.inFlightWork.hold(mount: mount,
                                             since: SelfUpdate.inFlightWork.generation))
         SelfUpdate.inFlightWork.release(mount: mount)
+        #expect(SelfUpdate.inFlightWork.hold(child: sleeper,
+                                            since: SelfUpdate.inFlightWork.generation))
+        SelfUpdate.inFlightWork.releaseAnyChild()
+    }
+
+    /// A `false` from the child slot is not a suggestion: the process is already running
+    /// (`onSpawn` fires after `posix_spawn`) and the registry will never see it, so nobody
+    /// else will SIGKILL it. Returning without killing is the leak `hold(child:)` as a
+    /// setter used to be.
+    @Test("a writing child refused by the epoch is SIGKILLed")
+    func refusedWritingChildIsKilled() throws {
+        let stale = SelfUpdate.inFlightWork.generation
+        _ = SelfUpdate.inFlightWork.drain()
+
+        let sleeper = Process()
+        sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        sleeper.arguments = ["30"]
+        try sleeper.run()
+        defer {
+            if sleeper.isRunning { sleeper.terminate() }
+            sleeper.waitUntilExit()
+        }
+        try #require(sleeper.isRunning, "the fixture process never started")
+
+        #expect(SelfUpdate.holdWritingChild(sleeper, since: stale) == false)
+        sleeper.waitUntilExit()
+        #expect(sleeper.isRunning == false)
+        #expect(SelfUpdate.inFlightWork.drain().isEmpty,
+                "a refused child must not land in the registry")
     }
 
     /// The real race: a quit landing while `stage` is copying.
