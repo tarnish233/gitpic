@@ -476,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "gitpic"
-version = "0.20.6"
+version = "0.20.7"
 dependencies = [
  "arboard",
  "base64",

@@ -4,6 +4,27 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.20.7] - 2026-08-27
+
+### 安装更新时退出，不会再留下半成品
+
+- 安装更新中途退出 GitPic 时，正在复制的进程会被立刻停掉
+- 不会再留下写了一半的新版本，也不会在退出后继续往磁盘里写
+
+<!-- release-notes-end: 以上是 GitHub Release 与 App 内更新弹窗共用的文案；以下只留在本文件。上面每条保持一行——App 的更新弹窗用 .inlineOnlyPreservingWhitespace 渲染，换行会保留，折行会在 480pt 处断句 -->
+
+### App
+
+- `InFlightWork` 用 `claimSlot(epoch)` 登记 mount、staging、download，这样一次已经 drain
+  过的退出会拒绝之后的登记。`hold(child:)` 却是普通 setter。`exit(0)` 收不掉子进程；
+  `UserDefaults.synchronize()` 夹在 drain 和退出之间，这段窗口够 `ditto` 被 spawn。
+  drain 已经结束，registry 再也看不到它，launchd 收养这个进程，把刚删掉的 staging
+  目录再写回来。
+- `hold(child:since:)` 走同一套 `claimSlot`。`holdWritingChild` 在 `false` 时立刻
+  `SIGKILL`，`runWritingStep` 抛 `.cancelled`，不再被 `try?` 吞成「复制失败」。
+- `refusesToRegisterAfterADrain` 现在也覆盖子进程槽位；新增
+  `refusedWritingChildIsKilled` 断言被拒绝的进程确实被杀掉。
+
 ## [0.20.6] - 2026-08-26
 
 ### 窗口已经开着时，「打开设置」不再毫无反应
