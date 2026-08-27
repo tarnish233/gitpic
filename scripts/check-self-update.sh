@@ -2,19 +2,16 @@
 # Install a deliberately-old GitPic.app, run a REAL in-app update, and assert that the
 # old process exits and a new one comes back on the new version.
 #
-# **Run this before any release that touches the update path.** Not as a nicety — this
-# script exists because 0.20.0 shipped an in-app updater that downloaded, verified,
-# staged and handed off correctly and then *did not quit*, so the swap script's wait
-# expired, it renamed the bundle out from under a live process, and `open -a` merely
-# reactivated the old build. 243 unit tests and a full `GITPIC_APP_DRY_RUN=1` pass were
-# green, and none of them could have caught it: `GITPIC_APP_DRY_RUN=1` returns before the
-# quit, `GitPicApp` is an executableTarget that tests cannot import, and the refusal came
-# from AppKit ("App termination blocked by modal sheet") rather than from our code. A real
-# install was the only thing that could see it, and no real install was run.
-#
-# So the rule is the narrow one that would have caught it: no release that changes
-# `Updater.swift`, `SelfUpdate*.swift`, `UpdateSheet.swift` or the quit goes out until this
-# has been run and passed on a real machine. See AGENTS.md.
+# **Not a release gate.** Do not run this as part of cutting a release — see AGENTS.md.
+# The script still exists because 0.20.0 shipped an in-app updater that downloaded,
+# verified, staged and handed off correctly and then *did not quit*, so the swap
+# script's wait expired, it renamed the bundle out from under a live process, and
+# `open -a` merely reactivated the old build. 243 unit tests and a full
+# `GITPIC_APP_DRY_RUN=1` pass were green, and none of them could have caught it:
+# `GITPIC_APP_DRY_RUN=1` returns before the quit, `GitPicApp` is an executableTarget
+# that tests cannot import, and the refusal came from AppKit ("App termination
+# blocked by modal sheet") rather than from our code. Reach for it only when
+# deliberately debugging the quit/handoff on a real machine.
 #
 # WHAT IT TOUCHES, AND WHAT IT REFUSES TO
 #   * writes only to ~/Applications/GitPic.app and a temp build directory;

@@ -137,28 +137,27 @@ renderer, which a unit test cannot reach. It runs against a temporary
 `XDG_CONFIG_HOME`/`XDG_DATA_HOME` and never touches the network. `cargo test` picks
 it up with everything else.
 
-**The app's update path has its own gate: `scripts/check-self-update.sh`.**
-It installs a deliberately-old build, runs a *real* in-app update against the
-published release, and asserts that the old process exits and a new one comes back
-running the new version from the installed path. No release that changes
-`Updater.swift`, `SelfUpdate*.swift`, `UpdateSheet.swift` or the quit goes out
-until it has passed on a real machine. It exists because 0.20.0 shipped an updater
-that downloaded, verified, staged and handed off correctly and then **did not
-quit**: 243 unit tests, a full dry run and a code review were all green, because
-`GITPIC_APP_DRY_RUN=1` returns before the quit, `GitPicApp` is an executableTarget
-tests cannot import, and AppKit refused the termination ("App termination blocked
-by modal sheet") without consulting our code at all. A real install is the only
-thing that sees that, so a real install is what the gate runs. It touches only
-`~/Applications`, refuses to run if `/Applications/GitPic.app` (this machine's own,
-usually Homebrew's) moves, and needs this terminal to hold an Accessibility grant.
-
-It also drives the three quits separately, because they are three different routes and
-fixing one has twice left the others broken: 「退出 GitPic」 in the status menu (our code),
-and the `terminate:` AppKit synthesises for a Dock-menu Quit and for the Apple Event a
-logout or restart sends (not our code, and refused by any attached sheet — so the app used
-to block logging out while an update sheet was up). ⌘Q is not driven, because making the
-app frontmost poisons the accessibility tree for the rest of the run; it shares one
-selector with the menu item, which `QuitPathContractTests` holds.
+**Do not run `scripts/check-self-update.sh` as part of cutting a release.** A
+release that touches `Updater.swift`, `SelfUpdate*.swift`, `UpdateSheet.swift` or
+the quit is covered by `QuitPathContractTests` and `SelfUpdateInstallTests`
+(including `quitDuringStagingLeavesNothing`). The live-install script still
+exists, and it is how 0.20.0's "downloaded then did not quit" was caught after
+the fact: 243 unit tests, a full dry run and a code review were all green,
+because `GITPIC_APP_DRY_RUN=1` returns before the quit, `GitPicApp` is an
+`executableTarget` tests cannot import, and AppKit refused the termination
+("App termination blocked by modal sheet") without consulting our code at all.
+Reach for it only when deliberately debugging the quit/handoff on a real
+machine. It is not a ship gate: it needs an Accessibility grant, rewrites
+`Cargo.toml` to `0.0.1` for the length of the run, hits GitHub's unauthenticated
+rate limit from a worktree with no credential, and the confirmation-alert click
+is not reliable from an agent session. It touches only `~/Applications`, refuses
+to run if `/Applications/GitPic.app` (this machine's own, usually Homebrew's)
+moves, and drives the three quits separately when it does run: 「退出 GitPic」 in
+the status menu (our code), and the `terminate:` AppKit synthesises for a
+Dock-menu Quit and for the Apple Event a logout or restart sends. ⌘Q is not
+driven, because making the app frontmost poisons the accessibility tree for the
+rest of the run; it shares one selector with the menu item, which
+`QuitPathContractTests` holds.
 
 Every `InFlightWork` slot — mount, staging, download, **and the writing child** —
 registers through `claimSlot(epoch)`. The child used to be a plain setter: a `ditto`
