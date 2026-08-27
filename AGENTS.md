@@ -160,6 +160,13 @@ to block logging out while an update sheet was up). ⌘Q is not driven, because 
 app frontmost poisons the accessibility tree for the rest of the run; it shares one
 selector with the menu item, which `QuitPathContractTests` holds.
 
+Every `InFlightWork` slot — mount, staging, download, **and the writing child** —
+registers through `claimSlot(epoch)`. The child used to be a plain setter: a `ditto`
+spawned in the `UserDefaults.synchronize()` window between drain and `exit(0)` was
+reparented to launchd and recreated the staging directory just deleted. `false` from
+`holdWritingChild` is SIGKILL immediately and ``InstallFailure.cancelled``. Do not add
+a fifth registration shape.
+
 **The other AppKit-only property with a suite of its own: opening the window has to *show*
 it.** `WindowFocusContractTests` is a source scan for the same reason the quit contract is
 one — `GitPicApp` is an `executableTarget` tests cannot import, and the answer comes from
@@ -183,6 +190,68 @@ discarded rather than counted; and clicking one GitPic's status item while a *se
 is frontmost left the first sitting `.regular` with zero windows and refusing to open one —
 not reproducible on a fresh process, so it is an artifact of driving two instances at once
 and not a defect, but it will waste an hour if you meet it without knowing.
+
+## Known defects
+
+These are still in the tree. They are listed here so a later change does not
+"fix" half of the invariant and ship the other half, which is how several of
+them formed. Do not close one by adding a special-case branch in an unrelated
+path; the surrounding comments already record what that costs.
+
+**`loginGeneration` only protects clearing `loginTask`.** `AppModel.beginLogin`
+bumps a generation so a cancelled task's `defer` cannot nil a newer login's
+handle. The `for await` over `loginEvents` does not consult it, so a `.done` or
+`.failed` already in the pipe still writes `auth` — 取消 can be followed by a
+logged-in state, or a new login can be overwritten `.broken`. `loadRepos` /
+`loadBranches` already drop a stale answer this way; the event loop does not.
+`logout()` also does not bump `reposGeneration`, so an in-flight listing can
+refill the picker after the list was cleared. A generation that does not guard
+the state it exists to protect is the same hole as `AppActivationPolicy` treating
+raise-policy and come-forward as one call: the second half still has to run.
+
+**The history pane still pretends config and history fail together.**
+`AppModel.reload()` was split so an unreadable `history.jsonl` cannot take down
+the form, and `gitpic list` is config-free. `HistoryPane` still gates on
+`configFailure` and tells the user the list is empty because the two reads are
+one. A `CONFIG_INVALID` file (the leftover `github.token` is the usual case) can
+leave `model.history` populated and hidden. There is also no `historyFailure`: a
+`list` that fails leaves the previous array, or 「还没有上传记录」 on a cold launch.
+Do not put a second read behind the first read's error.
+
+**History copy and thumbnails follow the target as it is configured now.**
+`history.jsonl` stores the URL that was uploaded. `gitpic list` prints it.
+`UploadedLink.init(_:config:)` and `HistoryRecord.thumbnailSource(config:)`
+rebuild both addresses from the current `github.owner/repo/branch`, so a row
+uploaded before `github.repo` changed yields a link into the new repository —
+and a thumbnail 404. The comment calls this unavoidable; it is not — the stored
+URL is right there. The schema is too thin (one URL, no kind, no
+owner/repo/branch), which is why the app reconstructs. Do not add a third
+reconstruction. If you touch history, persist both addresses (or the target the
+upload used) so the pane stops guessing.
+
+**`gitpic paste` does not see a Finder-copied image file.** The app measured this:
+Finder ⌘C puts `public.file-url` on the pasteboard, not `.png`/`.tiff`, and
+`NSImage` does not read it back either. The app therefore tries file URLs first
+(`GitPicApp.clipboardImages()`). The CLI's `paste` still uses
+`arboard::get_image()`, which is pixels only, so the same gesture uploads from
+the menu bar and reports "no image in clipboard" in the terminal. Do not "fix"
+paste by encoding whatever bitmap is there; the file is the better upload
+(original bytes, extension, name). Match the app's order: file URLs, then PNG,
+then TIFF.
+
+**`--stdin` still reads the whole stream before the size check.** File uploads
+call `reject_oversize` on the metadata *before* `read`, because `gitpic
+bigvideo.mov` used to allocate three gigabytes and then say the Contents API
+tops out at 100 MB — or OOM, exit 137, outside the documented 1–10 range.
+`read_stdin` is still `read_to_end`. `cat huge.mov | gitpic --stdin` is that
+old path. Count while reading; stop at `CONTENTS_PUT_MAX`.
+
+**`--compress` has no pixel ceiling.** `maybe_compress` decodes the full
+`DynamicImage`. The 100 MB cap is the compressed file; a much smaller PNG can
+decode to a multi-gigabyte bitmap. The history pane already decodes at thumbnail
+size (`CGImageSourceCreateThumbnailAtIndex`) for this reason. A compress that
+cannot re-encode should pass the original through, which it already does on
+encoder failure — it must not allocate an impossible bitmap on the way.
 
 ## Working in Parallel (one agent, one worktree)
 
@@ -237,4 +306,4 @@ worktree at a time.
 Follow Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`. PRs need a clear description, linked issues, and green CI (fmt, clippy, test on Linux/macOS/Windows). Releases are cut by pushing a `vX.Y.Z` tag, which builds the four platform binaries **and** GitPic.app and publishes them in one Release. The tag must equal `v` plus `Cargo.toml`'s version — the release workflow asserts it. The `app-v*` tags are historical, from when the app versioned separately; do not create new ones.
 
 ## Security & Configuration Tips
-Never commit tokens. The credential comes from `gitpic auth login` and nowhere else: a 0600 `~/.config/gitpic/auth.toml`, written through the same atomic-private helper as the config, so nothing secret reaches `~/.config/gitpic/config.toml` and neither `gitpic config get` nor `config edit` can show a token. `auth.toml` is the one file in that directory that must never go into dotfiles sync. `gh auth token`, `--with-token`, `GITPIC_TOKEN` and the `github.token` key have all been removed — do not reintroduce a second source; each of them meant either a second identity or a secret travelling by hand, and `github.token` is still reported as `CONFIG_INVALID`. **`gitpic auth login` is interactive and cannot run unattended**, so CI that uploads needs a machine that has logged in once, and an agent must hand the command to the user rather than run it. `Debug` is hand-written on every type that holds a token (`auth::Stored`, `oauth::Granted`) so a panic or an `expect` cannot print one.
+Never commit tokens. The credential comes from `gitpic auth login` and nowhere else: a 0600 `~/.config/gitpic/auth.toml`, written through the same atomic-private helper as the config, so nothing secret reaches `~/.config/gitpic/config.toml` and neither `gitpic config get` nor `config edit` can show a token. `auth.toml` is the one file in that directory that must never go into dotfiles sync. `gh auth token`, `--with-token`, `GITPIC_TOKEN` and the `github.token` key have all been removed — do not reintroduce a second source; each of them meant either a second identity or a secret travelling by hand, and `github.token` is still reported as `CONFIG_INVALID`. **`gitpic auth login` is interactive and cannot run unattended**, so CI that uploads needs a machine that has logged in once, and an agent must hand the command to the user rather than run it. `Debug` is hand-written on every type that holds a token (`auth::Stored`, `oauth::Granted`, `oauth::Device`) so a panic or an `expect` cannot print one. `GitHub` holds the same token and currently has no `Debug` at all — do not derive one.

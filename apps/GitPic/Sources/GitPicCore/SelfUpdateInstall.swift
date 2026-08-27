@@ -279,7 +279,9 @@ extension SelfUpdate {
             claimSlot(epoch) { self.download = url }
         }
 
-        func hold(child process: Process) { under { self.child = process } }
+        func hold(child process: Process, since epoch: UInt64) -> Bool {
+            claimSlot(epoch) { self.child = process }
+        }
 
         func release(mount url: URL) { under { if self.mount == url { self.mount = nil } } }
         func release(download url: URL) {
@@ -475,8 +477,16 @@ extension SelfUpdate {
         // attributes and ACLs, and an ad-hoc signature lives in extended attributes — `cp -R`
         // would break it. `--noqtn` because the same page says quarantine bits are preserved
         // too, and a quarantined ad-hoc bundle is one Gatekeeper refuses outright.
-        let copy = try? runWritingStep(
-            "/usr/bin/ditto", ["--noqtn", source.path, bundle.path], timeout: 300)
+        let copy: ProcessOutcome?
+        do {
+            copy = try runWritingStep(
+                "/usr/bin/ditto", ["--noqtn", source.path, bundle.path],
+                timeout: 300, epoch: epoch)
+        } catch InstallFailure.cancelled {
+            throw InstallFailure.cancelled
+        } catch {
+            copy = nil
+        }
         guard let copy, copy.status == 0, !copy.timedOut else {
             throw InstallFailure.staging("复制新版本失败："
                 + (copy?.timedOut == true ? "超时" : "ditto 退出码 \(copy?.status ?? -1)"))
@@ -485,9 +495,17 @@ extension SelfUpdate {
         // Belt and braces over `--noqtn`: a nested file could carry the attribute even when
         // the top level does not, and one quarantined item inside the bundle is enough.
         // Ignored on failure — there is usually nothing to remove, and `xattr` exits non-zero
-        // when there is not.
-        _ = try? runWritingStep(
-            "/usr/bin/xattr", ["-dr", "com.apple.quarantine", bundle.path], timeout: 60)
+        // when there is not. A quit that drained while `xattr` was spawning is not a
+        // failure of that kind: the child is already dead and this must stop.
+        do {
+            _ = try runWritingStep(
+                "/usr/bin/xattr", ["-dr", "com.apple.quarantine", bundle.path],
+                timeout: 60, epoch: epoch)
+        } catch InstallFailure.cancelled {
+            throw InstallFailure.cancelled
+        } catch {
+            // Ignored: there is usually nothing to remove.
+        }
 
         // Verified *here*, on the copy, and last — after `ditto` made it and after `xattr`
         // mutated it. This used to run against the read-only mount thirty lines above, where
@@ -533,15 +551,39 @@ extension SelfUpdate {
     /// outlives the process that asked for it, and racing it produces a mount nothing can find
     /// again. `codesign` only reads, so deleting the directory under it is already safe and it
     /// exits on its own once this process is gone.
+    ///
+    /// `epoch` is the one captured at the start of ``stage``: a `false` from
+    /// ``holdWritingChild(_:since:)`` means a quit drained while this child was spawning, so
+    /// the process is already SIGKILLed and this step is cancelled rather than a failed copy.
     private static func runWritingStep(
-        _ executable: String, _ args: [String], timeout: TimeInterval
+        _ executable: String, _ args: [String], timeout: TimeInterval, epoch: UInt64
     ) throws -> ProcessOutcome {
+        var refused = false
         defer { inFlightWork.releaseAnyChild() }
-        return try ChildProcess.run(
+        let out = try ChildProcess.run(
             executable: URL(fileURLWithPath: executable),
             args: args,
             timeout: timeout,
-            onSpawn: { inFlightWork.hold(child: $0) })
+            onSpawn: { refused = !holdWritingChild($0, since: epoch) })
+        if refused { throw InstallFailure.cancelled }
+        return out
+    }
+
+    /// Register `process` as the writing child, or SIGKILL it if a quit already drained.
+    ///
+    /// The two outcomes have to be one function: a `false` from
+    /// ``InFlightWork/hold(child:since:)`` means the registry will never see this process, so
+    /// ``undoInFlightWork()`` will never kill it. Returning without killing is the leak
+    /// `hold(child:)` as a plain setter used to be — a `ditto` spawned in the
+    /// `UserDefaults.synchronize()` window between drain and `exit(0)` was reparented to
+    /// launchd and recreated the staging directory just deleted.
+    ///
+    /// Internal so the refusal-kills-the-child half is testable without going through
+    /// `ChildProcess.run`.
+    static func holdWritingChild(_ process: Process, since epoch: UInt64) -> Bool {
+        if inFlightWork.hold(child: process, since: epoch) { return true }
+        kill(process.processIdentifier, SIGKILL)
+        return false
     }
 
     /// `codesign --verify --deep --strict` on a bundle, as a yes or no.
