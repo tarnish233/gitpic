@@ -232,6 +232,32 @@ struct SelfUpdateInstallTests {
             .filter { $0.hasPrefix("gitpic-mount-") })
     }
 
+    /// Attach a fixture image the way `stage` does, retries included.
+    ///
+    /// The one test here that mounts an image *itself* rather than through `stage` needs the same
+    /// tolerance `stage` now has, and for the reason that made it necessary there: measured on a
+    /// GitHub `macos-latest` runner, seventeen seconds into this suite every remaining
+    /// `hdiutil attach` began returning `Resource temporarily unavailable` inside 0.07 s and kept
+    /// doing so — twenty failures in a suite that had been passing, from a kernel that had simply
+    /// stopped accepting attaches. The run before and the run after were both green, so this is a
+    /// bound on how much of somebody else's machine this test is willing to depend on, not a
+    /// workaround for a defect of ours.
+    ///
+    /// A timeout is not retried, matching `stage`: an attach that timed out may have landed, and
+    /// attaching twice is worse than reporting once.
+    private static func attachWithRetries(_ dmg: URL, at mount: URL) throws -> ProcessOutcome {
+        var out: ProcessOutcome!
+        for attempt in 1...3 {
+            out = try ChildProcess.run(
+                executable: URL(fileURLWithPath: "/usr/bin/hdiutil"),
+                args: ["attach", dmg.path, "-nobrowse", "-readonly", "-mountpoint", mount.path],
+                timeout: 120)
+            if out.status == 0 || out.timedOut { break }
+            if attempt < 3 { Thread.sleep(forTimeInterval: 1) }
+        }
+        return out
+    }
+
     /// The digest has to cover the bytes that get mounted, not a path that once held them.
     ///
     /// `download` hashes through one descriptor and `hdiutil` opens the path again, with a
@@ -767,7 +793,18 @@ struct SelfUpdateInstallTests {
         }
     }
 
-    @Test("a file that is not a disk image is refused")
+    /// Also the only observable proof that the attach is retried.
+    ///
+    /// `stage` spawns `/usr/bin/hdiutil` by absolute path, so a transient failure cannot be
+    /// injected — but a file that is not an image fails the same way a transient refusal does, by
+    /// exiting non-zero fast. Three attempts one second apart therefore cannot finish in under two
+    /// seconds, and a lower bound on elapsed time is deterministic in the safe direction: a
+    /// `Thread.sleep` can overrun, never undershoot. Delete the retry and this assertion fails.
+    ///
+    /// It is also what the two seconds are: the stated cost of not pattern-matching `hdiutil`'s
+    /// stderr to decide what is worth retrying — a genuinely unreadable image is refused that much
+    /// later than it used to be.
+    @Test("a file that is not a disk image is refused, after retrying the attach")
     func refusesGarbage() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("gitpic-install-test-\(UUID().uuidString)")
@@ -777,10 +814,13 @@ struct SelfUpdateInstallTests {
         let notAnImage = root.appendingPathComponent("GitPic-0.19.0-macos-arm64.dmg")
         try Data("this is not a disk image".utf8).write(to: notAnImage)
 
+        let started = ContinuousClock.now
         #expect(throws: SelfUpdate.InstallFailure.self) {
             _ = try SelfUpdate.stage(dmg: Self.measured(notAnImage), expectedVersion: "0.19.0",
                                      replacing: root.appendingPathComponent("GitPic.app"))
         }
+        #expect(started.duration(to: .now) >= .seconds(2),
+                "the attach was not retried: three attempts a second apart cannot be faster")
         // Nothing was mounted, so the mount point was removed by the plain `rmdir` path — no
         // `hdiutil detach` was needed and none of it recursed into a volume.
         #expect(Self.mountLeftovers() == mountsBefore)
@@ -835,10 +875,7 @@ struct SelfUpdateInstallTests {
         let mount = FileManager.default.temporaryDirectory
             .appendingPathComponent("gitpic-mount-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
-        let attach = try ChildProcess.run(
-            executable: URL(fileURLWithPath: "/usr/bin/hdiutil"),
-            args: ["attach", f.dmg.url.path, "-nobrowse", "-readonly", "-mountpoint", mount.path],
-            timeout: 120)
+        let attach = try Self.attachWithRetries(f.dmg.url, at: mount)
         try #require(attach.status == 0 && !attach.timedOut,
                      "could not attach the fixture image: \(String(decoding: attach.stderr, as: UTF8.self))")
         // If the drain does not get it, this does — a leaked mount survives until reboot.
