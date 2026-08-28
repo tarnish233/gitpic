@@ -198,38 +198,66 @@ final class AppModel {
     /// terminates the `gitpic` child — otherwise a login the user walked away from
     /// keeps polling GitHub until the code expires, fifteen minutes later.
     private var loginTask: Task<Void, Never>?
-    /// Identifies the login allowed to clear ``loginTask`` when it finishes.
+    /// Identifies the login allowed to write `auth` and to clear ``loginTask``.
     ///
     /// Cancellation releases the handle immediately so a new login can start. The old
     /// task still gets one turn to unwind its `AsyncStream`; without a generation check,
     /// its `defer` could then clear the *new* task's handle, making that login appear idle
-    /// and leaving no task for 取消 or window close to stop.
+    /// and leaving no task for 取消 or window close to stop — and a `.done` already in
+    /// the pipe would still write a logged-in state over 「登录已取消」.
     private var loginGeneration = 0
 
     var loginInFlight: Bool { loginTask != nil }
 
     func refreshAuth() async {
+        await refreshAuth(onlyIfLoginGeneration: nil)
+    }
+
+    /// Re-read `auth status`, and only write `auth` when this call still owns it.
+    ///
+    /// `expected` is the generation the caller captured. The stream can still yield
+    /// a `.done` or `.failed` after 取消 — the child is killed, the event is already
+    /// in the pipe — and without this check that event would write a logged-in or
+    /// `.broken` state over 「登录已取消」, then `loadRepos` would refill a picker
+    /// `logout` just cleared. `nil` means “the generation as of entry”: 再检查一次
+    /// and `attach` pass that. `cancelLogin` / `logout` / `.done` pass the value
+    /// they bumped or captured, so a newer login cannot be overwritten.
+    private func refreshAuth(onlyIfLoginGeneration expected: Int?) async {
         guard let runner else {
             // Never leave `.unknown` standing on a *finished* discovery: the pane
             // renders it as a spinner, and with no runner there will never be an
             // answer. While discovery is still running, `attach` is what calls back.
-            if toolState == .missing {
+            let generation = expected ?? loginGeneration
+            if loginGeneration == generation, toolState == .missing {
                 auth = .broken(detail: "找不到 gitpic，没法检查登录状态")
             }
             return
         }
+        let generation = expected ?? loginGeneration
+        if loginGeneration != generation { return }
         auth = .checking
+        let next: AuthState
         do {
-            auth = try await runner.authStatus().state
+            next = try await runner.authStatus().state
         } catch let RunFailure.cli(_, error) {
-            auth = error.code == "CONFIG_MISSING"
+            next = error.code == "CONFIG_MISSING"
                 ? .loggedOut(detail: nil)
                 : .broken(detail: "\(error.code)：\(error.message)")
         } catch {
-            auth = .broken(detail: "\(error)")
+            next = .broken(detail: "\(error)")
         }
+        // The await above is the window: 取消 / logout bump the generation while
+        // status is in flight, and a write here would still land.
+        if loginGeneration != generation { return }
+        auth = next
         if case .loggedIn = auth {
             await loadRepos()
+            // `loadRepos` can return early because logout already bumped
+            // `reposGeneration`. Without this check, `loadBranches` would then
+            // bump `branchesGeneration` itself and refill the picker `clearBranches`
+            // just emptied — the branches half of the hole `reposGeneration += 1`
+            // was added to close.
+            if loginGeneration != generation { return }
             // After the repositories, not concurrently: the branch listing is about
             // whichever repository the draft names, and on a fresh window that draft is
             // only readable once `reload` has landed.
@@ -256,6 +284,9 @@ final class AppModel {
             }
             for await event in runner.loginEvents(scope: scope) {
                 guard let self else { return }
+                // Same generation the `defer` already consults. Without this, a `.done`
+                // or `.failed` already in the pipe still writes `auth` after 取消.
+                guard self.loginGeneration == generation else { return }
                 switch event {
                 case let .code(userCode, url, _):
                     self.auth = .awaitingCode(userCode: userCode, url: url)
@@ -267,7 +298,7 @@ final class AppModel {
                     // every other surface shows, and one code path deciding what
                     // "logged in" looks like is one fewer way for the two to disagree.
                     _ = login
-                    await self.refreshAuth()
+                    await self.refreshAuth(onlyIfLoginGeneration: generation)
                 case let .failed(error):
                     self.auth = error.code == "CONFIG_MISSING"
                         ? .loggedOut(detail: error.message)
@@ -288,10 +319,14 @@ final class AppModel {
         // Invalidate the cancelled task's `defer` before releasing the handle. A new
         // login may start while the old stream is still unwinding.
         loginGeneration += 1
+        let generation = loginGeneration
         task.cancel()
         loginTask = nil
         auth = .loggedOut(detail: "登录已取消")
-        Task { await refreshAuth() }
+        // Pass the generation just bumped. `refreshAuth()` with `nil` would write
+        // whatever `auth status` returns even after a newer login has started —
+        // `beginLogin` only requires `loginTask == nil`, which this already cleared.
+        Task { await refreshAuth(onlyIfLoginGeneration: generation) }
     }
 
     func logout() async {
@@ -299,6 +334,7 @@ final class AppModel {
         // Same invalidation as `cancelLogin`: logout releases the handle before the
         // cancelled stream is guaranteed to have finished unwinding.
         loginGeneration += 1
+        let generation = loginGeneration
         loginTask?.cancel()
         loginTask = nil
         do {
@@ -308,10 +344,14 @@ final class AppModel {
             // from the CLI rather than assumed here.
             Diagnostics.log("logout failed: \(error)")
         }
+        // Same invalidation `loadRepos` already applies to a stale answer: without
+        // the bump, a listing that left before the file was gone would refill the
+        // picker after this just cleared it.
+        reposGeneration += 1
         repos = []
         reposFailure = nil
         clearBranches()
-        await refreshAuth()
+        await refreshAuth(onlyIfLoginGeneration: generation)
     }
 
     func loadRepos() async {
@@ -477,6 +517,15 @@ final class AppModel {
             $0.owner == draft.github.owner && $0.name == draft.github.repo
         }
     }
+
+    /// Why the last history read failed, or `nil` if it did not.
+    ///
+    /// Its own field, next to `configFailure` rather than behind it: `gitpic list`
+    /// never opens `config.toml`, and a `CONFIG_INVALID` file must not hide a list
+    /// that actually loaded. A failed `list` leaves the previous array in
+    /// `history`; this is what distinguishes that from 「还没有上传记录」 on a cold
+    /// launch that could not read the file.
+    private(set) var historyFailure: String?
 
     /// Why the last config read failed, or `nil` if it did not.
     ///
@@ -1345,7 +1394,12 @@ final class AppModel {
         // the history list and nothing else.
         do {
             history = try await runner.history(limit: 100)
+            historyFailure = nil
         } catch {
+            // Keep whatever `history` already holds: a later failure must not
+            // pretend the list is empty. `historyFailure` is what the pane shows
+            // when there is nothing to keep (a cold launch that could not read).
+            historyFailure = ConfigFailure(error).message
             Diagnostics.log("history read failed: \(String(describing: error))")
         }
     }

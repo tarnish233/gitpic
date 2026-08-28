@@ -82,7 +82,7 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
     }
 
     let mut inputs = if is_paste {
-        vec![read_clipboard(u.name.as_deref())?]
+        read_clipboard(u.name.as_deref())?
     } else if u.stdin {
         vec![read_stdin(u.name.as_deref())?]
     } else {
@@ -198,6 +198,9 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
             sha: item.sha.clone(),
             size: item.size,
             deduped: item.deduped,
+            owner: Some(cfg.github.owner.clone()),
+            repo: Some(cfg.github.repo.clone()),
+            branch: Some(cfg.github.branch.clone()),
         }) {
             if cli.verbose > 0 {
                 eprintln!("warning: could not record history: {}", e.message);
@@ -401,17 +404,43 @@ fn read_files(files: &[std::path::PathBuf]) -> Result<Vec<InputImage>> {
 }
 
 fn read_stdin(name: Option<&str>) -> Result<InputImage> {
-    let mut bytes = Vec::new();
-    std::io::stdin()
-        .read_to_end(&mut bytes)
-        .map_err(|e| AppError::usage(format!("read stdin: {e}")))?;
-    if bytes.is_empty() {
-        return Err(AppError::usage("stdin was empty"));
-    }
+    let bytes = read_limited(
+        std::io::stdin().lock(),
+        "stdin",
+        crate::github::CONTENTS_PUT_MAX,
+    )?;
     Ok(InputImage {
         name: display_name(name, &bytes, ExtFallback::Stdin)?,
         bytes,
     })
+}
+
+/// Read `reader` and refuse to grow past `cap`, so a huge stream cannot be
+/// allocated before the Contents API size check has a chance to fire.
+///
+/// File uploads call `reject_oversize` on the metadata *before* `read`. Stdin
+/// has no metadata; counting while reading is the equivalent. The overflowing
+/// chunk is not appended — the buffer stays at or under `cap`.
+fn read_limited<R: Read>(mut reader: R, source: &str, cap: usize) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| AppError::usage(format!("read {source}: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        let new_len = bytes.len().saturating_add(n);
+        if new_len > cap {
+            return Err(crate::github::oversize_error(source, new_len));
+        }
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    if bytes.is_empty() {
+        return Err(AppError::usage(format!("{source} was empty")));
+    }
+    Ok(bytes)
 }
 
 /// The canonical extension for whatever these bytes actually are, if the format is
@@ -425,10 +454,33 @@ fn sniffed_ext(bytes: &[u8]) -> Option<&'static str> {
         .and_then(|f| f.extensions_str().first().copied())
 }
 
-fn read_clipboard(name: Option<&str>) -> Result<InputImage> {
-    use image::ImageEncoder;
+fn read_clipboard(name: Option<&str>) -> Result<Vec<InputImage>> {
     let mut clip =
         arboard::Clipboard::new().map_err(|e| AppError::general(format!("clipboard: {e}")))?;
+    // File URLs first, and that ordering is the whole point: Finder ⌘C puts
+    // `public.file-url` on the pasteboard — no PNG, no TIFF — and `get_image`
+    // does not see it. The file is also the better upload: original bytes,
+    // extension, and name survive, instead of every paste landing as a
+    // re-encoded `clipboard.png`. Same order the app uses (`clipboardImages`).
+    if let Some(inputs) = clipboard_from_file_list(clip.get().file_list().unwrap_or_default()) {
+        return inputs;
+    }
+    Ok(vec![read_clipboard_pixels(&mut clip, name)?])
+}
+
+/// `Some` when the pasteboard named files that exist; `None` means fall through
+/// to pixels. Directories and missing paths are skipped rather than turning a
+/// Finder copy of an image into "file not found".
+fn clipboard_from_file_list(paths: Vec<std::path::PathBuf>) -> Option<Result<Vec<InputImage>>> {
+    let files: Vec<_> = paths.into_iter().filter(|p| p.is_file()).collect();
+    if files.is_empty() {
+        return None;
+    }
+    Some(read_files(&files))
+}
+
+fn read_clipboard_pixels(clip: &mut arboard::Clipboard, name: Option<&str>) -> Result<InputImage> {
+    use image::ImageEncoder;
     let img = clip
         .get_image()
         .map_err(|e| AppError::usage(format!("no image in clipboard: {e}")))?;
@@ -597,6 +649,60 @@ mod tests {
         std::fs::write(&svg, b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>").expect("write");
         let read = read_files(&[svg]).expect("reads");
         assert_eq!(read[0].name, "logo.svg");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stdin_stops_before_the_buffer_grows_past_the_cap() {
+        // A small cap, so this does not have to allocate 100 MB to prove the
+        // overflowing chunk is refused. The production path uses CONTENTS_PUT_MAX.
+        let src = vec![7u8; 80];
+        let err = read_limited(std::io::Cursor::new(&src), "stdin", 50).unwrap_err();
+        assert_eq!(err.code, crate::error::ErrorCode::Usage);
+        assert!(err.message.contains("stdin"), "{}", err.message);
+        assert!(err.message.contains("100"), "{}", err.message);
+    }
+
+    #[test]
+    fn stdin_accepts_a_stream_at_the_cap() {
+        let src = b"hello";
+        let got = read_limited(std::io::Cursor::new(&src[..]), "stdin", 5).expect("at the cap");
+        assert_eq!(got, b"hello");
+    }
+
+    #[test]
+    fn stdin_refuses_an_empty_stream() {
+        let err = read_limited(std::io::Cursor::new(&b""[..]), "stdin", 50).unwrap_err();
+        assert_eq!(err.code, crate::error::ErrorCode::Usage);
+        assert!(err.message.contains("empty"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_finder_file_list_is_read_as_files_not_pixels() {
+        let dir = std::env::temp_dir().join(format!("gitpic-paste-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let png = {
+            let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]));
+            let mut out = Vec::new();
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                .expect("encode");
+            out
+        };
+        let path = dir.join("shot.png");
+        std::fs::write(&path, &png).expect("write");
+
+        let got = clipboard_from_file_list(vec![path])
+            .expect("files present")
+            .expect("readable");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "shot.png");
+        assert_eq!(got[0].bytes, png);
+
+        // A directory, or nothing, is not a file list to upload — fall through to pixels.
+        assert!(clipboard_from_file_list(vec![dir.clone()]).is_none());
+        assert!(clipboard_from_file_list(Vec::new()).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

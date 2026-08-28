@@ -18,8 +18,8 @@ import UniformTypeIdentifiers
 ///
 /// A value rather than a `HistoryRecord` reference so the fetch cannot silently
 /// start depending on more of the row than this — and so `.task(id:)` in the UI can
-/// compare it: `url` moves when `github.owner/repo/branch` change, which is exactly
-/// when a row's thumbnail has to be re-resolved.
+/// compare it: `urls` move when the row's own target does, which is exactly when
+/// a thumbnail has to be re-resolved.
 public struct ThumbnailSource: Sendable, Hashable {
     /// GitHub's blob sha for the content. Content-addressed, which is what makes it
     /// safe as a cache key: it cannot go stale, because different bytes are a
@@ -83,17 +83,27 @@ extension HistoryRecord {
     ///   That 404 costs one request and then falls through, once, because the decoded
     ///   result is cached by content afterwards.
     ///
-    /// This is thumbnails only. What gets *copied* still follows the configured target
-    /// exactly, via ``UploadedLink``; a picture that loaded over the fallback is not a
-    /// claim about the user's links, and `doctor` remains what tests those.
-    public func thumbnailSource(config c: GitpicConfig) -> ThumbnailSource {
-        let raw = rawURL(config: c)
-        let branch = c.github.branch
-        guard !LinkURL.cdnBranchIsAmbiguous(branch) else {
+    /// This is thumbnails only. What gets *copied* still follows the user's
+    /// chosen ``LinkForm``, via ``UploadedLink``, against the *upload's* target;
+    /// a picture that loaded over the fallback is not a claim about the user's
+    /// links, and `doctor` remains what tests those.
+    public func thumbnailSource(config c: GitpicConfig? = nil) -> ThumbnailSource {
+        let target = resolvedTarget
+            ?? c.map { UploadTarget(owner: $0.github.owner,
+                                    repo: $0.github.repo,
+                                    branch: $0.github.branch) }
+        guard let target else {
+            // The stored URL is still a fetchable address, even if we cannot
+            // name the other form.
+            return ThumbnailSource(sha: sha, urls: [url], byteSize: size)
+        }
+        let raw = LinkURL.raw(owner: target.owner, repo: target.repo,
+                              branch: target.branch, path: path)
+        guard !LinkURL.cdnBranchIsAmbiguous(target.branch) else {
             return ThumbnailSource(sha: sha, urls: [raw], byteSize: size)
         }
-        let cdn = LinkURL.cdn(owner: c.github.owner, repo: c.github.repo,
-                              branch: branch, path: path)
+        let cdn = LinkURL.cdn(owner: target.owner, repo: target.repo,
+                              branch: target.branch, path: path)
         return ThumbnailSource(sha: sha, urls: [cdn, raw], byteSize: size)
     }
 }

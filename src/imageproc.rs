@@ -8,12 +8,14 @@ pub struct CompressOpts {
     pub quality: u8,
 }
 
-/// Possibly compress/resize `bytes`. Returns the (possibly new) bytes; takes
-/// ownership so a no-op returns the original buffer without copying. Falls back
-/// to the original bytes on any error or unsupported format.
+/// Pixel budget for a decode that is about to allocate a bitmap.
 ///
-/// The re-encode always preserves the input format, so the caller's filename
-/// and extension stay valid.
+/// 4096×4096. The Contents API cap is 100 MB of *file*; a much smaller PNG can
+/// decode to a multi-gigabyte bitmap, which is what this stops. A compress that
+/// cannot re-encode already returns the original; it must not allocate an
+/// impossible image on the way.
+const MAX_DECODE_PIXELS: u64 = 16_777_216;
+
 /// Decode `bytes`, with any EXIF orientation baked into the pixels.
 ///
 /// A separate function because the decoder borrows `bytes` for its lifetime, and
@@ -34,10 +36,18 @@ pub struct CompressOpts {
 ///
 /// Costs nothing in the common case: an image with no orientation tag reads as
 /// `NoTransforms`, which `apply_orientation` handles by doing nothing at all.
+///
+/// Dimensions are read from the header *before* `from_decoder`, so a PNG whose
+/// IHDR claims tens of thousands of pixels on a side cannot allocate that bitmap
+/// on the way to "hand the original back".
 fn decode_upright(bytes: &[u8], fmt: ImageFormat) -> Option<image::DynamicImage> {
     let mut decoder = image::ImageReader::with_format(std::io::Cursor::new(bytes), fmt)
         .into_decoder()
         .ok()?;
+    let (width, height) = decoder.dimensions();
+    if u64::from(width).saturating_mul(u64::from(height)) > MAX_DECODE_PIXELS {
+        return None;
+    }
     // A file whose EXIF will not parse is not a reason to refuse the compression.
     let orientation = decoder
         .orientation()
@@ -47,6 +57,12 @@ fn decode_upright(bytes: &[u8], fmt: ImageFormat) -> Option<image::DynamicImage>
     Some(img)
 }
 
+/// Possibly compress/resize `bytes`. Returns the (possibly new) bytes; takes
+/// ownership so a no-op returns the original buffer without copying. Falls back
+/// to the original bytes on any error or unsupported format.
+///
+/// The re-encode always preserves the input format, so the caller's filename
+/// and extension stay valid.
 pub fn maybe_compress(bytes: Vec<u8>, opts: &CompressOpts) -> Vec<u8> {
     if !opts.enabled {
         return bytes;
@@ -277,5 +293,84 @@ mod tests {
         };
         let out = maybe_compress(bytes.clone(), &opts);
         assert_eq!(out, bytes);
+    }
+
+    /// PNG CRC-32 (ISO 3309), the polynomial IHDR is checked with.
+    fn crc32_png(data: &[u8]) -> u32 {
+        let mut crc: u32 = 0xFFFF_FFFF;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    /// A real 1×1 PNG whose IHDR has been rewritten to claim `w`×`h`.
+    ///
+    /// `dimensions()` reads that header; `from_decoder` would then try to allocate
+    /// the bitmap. The ceiling has to fire on the first of those, which is why the
+    /// IDAT is still a 1×1 image: a real 50_000×50_000 PNG cannot exist in a unit
+    /// test. CRC is recomputed so the decoder will accept the header at all.
+    fn png_claiming(w: u32, h: u32) -> Vec<u8> {
+        let mut bytes = png_of(1, 1);
+        // signature (8) + length (4) + type (4) = 16; width then height.
+        bytes[16..20].copy_from_slice(&w.to_be_bytes());
+        bytes[20..24].copy_from_slice(&h.to_be_bytes());
+        // CRC covers type + data (13 bytes of IHDR).
+        let crc = crc32_png(&bytes[12..29]);
+        bytes[29..33].copy_from_slice(&crc.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn a_rewritten_ihdr_is_what_the_decoder_reports() {
+        // Without this, `compression_passes_through_an_image_too_large_to_decode`
+        // could pass because `into_decoder` failed, not because the ceiling fired.
+        let bytes = png_claiming(50_000, 50_000);
+        let decoder =
+            image::ImageReader::with_format(std::io::Cursor::new(&bytes), ImageFormat::Png)
+                .into_decoder()
+                .expect("a patched IHDR must still construct a decoder");
+        assert_eq!(decoder.dimensions(), (50_000, 50_000));
+    }
+
+    #[test]
+    fn compression_passes_through_an_image_too_large_to_decode() {
+        // 50_000 × 50_000 would be a ~7.5 GB bitmap. The original file is a few
+        // dozen bytes; handing it back is the only correct outcome.
+        let bytes = png_claiming(50_000, 50_000);
+        let out = maybe_compress(
+            bytes.clone(),
+            &CompressOpts {
+                enabled: true,
+                max_width: 100,
+                quality: 82,
+            },
+        );
+        assert_eq!(out, bytes, "must not allocate the claimed bitmap");
+    }
+
+    #[test]
+    fn compression_still_decodes_an_image_under_the_pixel_ceiling() {
+        // 64×32 is well under 4096×4096; this is the control that the ceiling
+        // does not refuse ordinary photographs. Forced through a resize so the
+        // output is kept even if the re-encode is not smaller.
+        let bytes = png_of(64, 32);
+        let out = maybe_compress(
+            bytes,
+            &CompressOpts {
+                enabled: true,
+                max_width: 32,
+                quality: 82,
+            },
+        );
+        let decoded = image::load_from_memory(&out).unwrap();
+        assert_eq!(decoded.width(), 32);
     }
 }

@@ -192,65 +192,13 @@ and not a defect, but it will waste an hour if you meet it without knowing.
 
 ## Known defects
 
-These are still in the tree. They are listed here so a later change does not
-"fix" half of the invariant and ship the other half, which is how several of
-them formed. Do not close one by adding a special-case branch in an unrelated
-path; the surrounding comments already record what that costs.
+These are listed here so a later change does not "fix" half of the invariant and
+ship the other half, which is how several of them formed. Do not close one by
+adding a special-case branch in an unrelated path; the surrounding comments
+already record what that costs.
 
-**`loginGeneration` only protects clearing `loginTask`.** `AppModel.beginLogin`
-bumps a generation so a cancelled task's `defer` cannot nil a newer login's
-handle. The `for await` over `loginEvents` does not consult it, so a `.done` or
-`.failed` already in the pipe still writes `auth` — 取消 can be followed by a
-logged-in state, or a new login can be overwritten `.broken`. `loadRepos` /
-`loadBranches` already drop a stale answer this way; the event loop does not.
-`logout()` also does not bump `reposGeneration`, so an in-flight listing can
-refill the picker after the list was cleared. A generation that does not guard
-the state it exists to protect is the same hole as `AppActivationPolicy` treating
-raise-policy and come-forward as one call: the second half still has to run.
-
-**The history pane still pretends config and history fail together.**
-`AppModel.reload()` was split so an unreadable `history.jsonl` cannot take down
-the form, and `gitpic list` is config-free. `HistoryPane` still gates on
-`configFailure` and tells the user the list is empty because the two reads are
-one. A `CONFIG_INVALID` file (the leftover `github.token` is the usual case) can
-leave `model.history` populated and hidden. There is also no `historyFailure`: a
-`list` that fails leaves the previous array, or 「还没有上传记录」 on a cold launch.
-Do not put a second read behind the first read's error.
-
-**History copy and thumbnails follow the target as it is configured now.**
-`history.jsonl` stores the URL that was uploaded. `gitpic list` prints it.
-`UploadedLink.init(_:config:)` and `HistoryRecord.thumbnailSource(config:)`
-rebuild both addresses from the current `github.owner/repo/branch`, so a row
-uploaded before `github.repo` changed yields a link into the new repository —
-and a thumbnail 404. The comment calls this unavoidable; it is not — the stored
-URL is right there. The schema is too thin (one URL, no kind, no
-owner/repo/branch), which is why the app reconstructs. Do not add a third
-reconstruction. If you touch history, persist both addresses (or the target the
-upload used) so the pane stops guessing.
-
-**`gitpic paste` does not see a Finder-copied image file.** The app measured this:
-Finder ⌘C puts `public.file-url` on the pasteboard, not `.png`/`.tiff`, and
-`NSImage` does not read it back either. The app therefore tries file URLs first
-(`GitPicApp.clipboardImages()`). The CLI's `paste` still uses
-`arboard::get_image()`, which is pixels only, so the same gesture uploads from
-the menu bar and reports "no image in clipboard" in the terminal. Do not "fix"
-paste by encoding whatever bitmap is there; the file is the better upload
-(original bytes, extension, name). Match the app's order: file URLs, then PNG,
-then TIFF.
-
-**`--stdin` still reads the whole stream before the size check.** File uploads
-call `reject_oversize` on the metadata *before* `read`, because `gitpic
-bigvideo.mov` used to allocate three gigabytes and then say the Contents API
-tops out at 100 MB — or OOM, exit 137, outside the documented 1–10 range.
-`read_stdin` is still `read_to_end`. `cat huge.mov | gitpic --stdin` is that
-old path. Count while reading; stop at `CONTENTS_PUT_MAX`.
-
-**`--compress` has no pixel ceiling.** `maybe_compress` decodes the full
-`DynamicImage`. The 100 MB cap is the compressed file; a much smaller PNG can
-decode to a multi-gigabyte bitmap. The history pane already decodes at thumbnail
-size (`CGImageSourceCreateThumbnailAtIndex`) for this reason. A compress that
-cannot re-encode should pass the original through, which it already does on
-encoder failure — it must not allocate an impossible bitmap on the way.
+None currently. Closed items live in the comments next to the code that holds
+the other half.
 
 ## Working in Parallel (one agent, one worktree)
 

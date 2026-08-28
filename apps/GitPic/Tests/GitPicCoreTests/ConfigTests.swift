@@ -188,12 +188,30 @@ struct HistoryTests {
         #expect(r.date != nil)
     }
 
-    @Test("raw URL is rebuilt from the configured target, since history omits it")
+    @Test("raw URL is rebuilt from the stored URL's own target")
     func rawURLDerivation() throws {
         let cfg = try decode(ConfigTests.live, ConfigEnvelope.self).config
         let r = try #require(try decode(Self.live, HistoryEnvelope.self).results.first)
         #expect(r.rawURL(config: cfg)
                 == "https://raw.githubusercontent.com/tarnish233/picture_of_notes/main/images/2026/08/0e25bc02-gitpic-app-selftest.png")
+        // A later config pointing somewhere else must not move this row.
+        var other = cfg
+        other.github.repo = "other"
+        #expect(r.rawURL(config: other)
+                == "https://raw.githubusercontent.com/tarnish233/picture_of_notes/main/images/2026/08/0e25bc02-gitpic-app-selftest.png")
+    }
+
+    @Test("a history line with owner repo branch decodes them")
+    func decodePersistedTarget() throws {
+        let r: HistoryRecord = try decode("""
+        { "time": "2026-08-19T23:00:22+08:00", "name": "x", "path": "a.png",
+          "url": "https://e/x", "sha": "abc", "size": 1, "deduped": false,
+          "owner": "o", "repo": "r", "branch": "main" }
+        """)
+        #expect(r.owner == "o")
+        #expect(r.repo == "r")
+        #expect(r.branch == "main")
+        #expect(r.resolvedTarget?.repo == "r")
     }
 
     @Test("path separators survive percent-encoding; spaces do not stay literal")

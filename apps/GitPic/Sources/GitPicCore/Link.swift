@@ -101,6 +101,24 @@ public struct LinkForm: Sendable, Hashable {
 
 // MARK: - URLs
 
+/// The repository an upload landed in — owner, repo, and branch, nothing else.
+///
+/// History used to rebuild both addresses from today's `github.owner/repo/branch`,
+/// so a row uploaded before `github.repo` changed yielded a link into the new
+/// repository. This is the target the upload actually used, recovered from the
+/// record rather than from config.
+public struct UploadTarget: Sendable, Hashable {
+    public let owner: String
+    public let repo: String
+    public let branch: String
+
+    public init(owner: String, repo: String, branch: String) {
+        self.owner = owner
+        self.repo = repo
+        self.branch = branch
+    }
+}
+
 /// The two public URL forms, built exactly as `src/link.rs` builds them.
 ///
 /// Ported rather than read back out of the CLI's output, because the output does
@@ -148,6 +166,60 @@ public enum LinkURL {
     /// the CLI declines to print.
     public static func cdnBranchIsAmbiguous(_ branch: String) -> Bool {
         branch.contains("/")
+    }
+
+    /// Recover the repository a stored history URL pointed at.
+    ///
+    /// The encoded `path` is the suffix, so a branch containing `/` is the remainder
+    /// after owner and repo rather than a split that cannot tell the two apart.
+    /// `nil` when the URL is not one of the two templates gitpic writes, or when
+    /// the path does not sit at the end of it.
+    public static func parse(_ url: String, path: String) -> UploadTarget? {
+        parseCDN(url, path: path) ?? parseRaw(url, path: path)
+    }
+
+    private static func parseCDN(_ url: String, path: String) -> UploadTarget? {
+        let prefix = "https://cdn.jsdelivr.net/gh/"
+        guard url.hasPrefix(prefix) else { return nil }
+        let rest = String(url.dropFirst(prefix.count))
+        guard let head = strippingPath(rest, encodedPath: GitHubEncoding.encodePath(path)) else {
+            return nil
+        }
+        // `owner/repo@branch`. The last `@` is the ref separator gitpic wrote;
+        // owner and repo cannot contain one.
+        guard let at = head.lastIndex(of: "@") else { return nil }
+        let ownerRepo = String(head[..<at])
+        let branch = GitHubEncoding.decodePath(String(head[head.index(after: at)...]))
+        guard let slash = ownerRepo.firstIndex(of: "/"),
+              ownerRepo[ownerRepo.index(after: slash)...].contains("/") == false
+        else { return nil }
+        let owner = GitHubEncoding.decodePath(String(ownerRepo[..<slash]))
+        let repo = GitHubEncoding.decodePath(String(ownerRepo[ownerRepo.index(after: slash)...]))
+        guard !owner.isEmpty, !repo.isEmpty, !branch.isEmpty else { return nil }
+        return UploadTarget(owner: owner, repo: repo, branch: branch)
+    }
+
+    private static func parseRaw(_ url: String, path: String) -> UploadTarget? {
+        let prefix = "https://raw.githubusercontent.com/"
+        guard url.hasPrefix(prefix) else { return nil }
+        let rest = String(url.dropFirst(prefix.count))
+        guard let head = strippingPath(rest, encodedPath: GitHubEncoding.encodePath(path)) else {
+            return nil
+        }
+        let parts = head.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 3 else { return nil }
+        let owner = GitHubEncoding.decodePath(parts[0])
+        let repo = GitHubEncoding.decodePath(parts[1])
+        let branch = GitHubEncoding.decodePath(parts[2...].joined(separator: "/"))
+        guard !owner.isEmpty, !repo.isEmpty, !branch.isEmpty else { return nil }
+        return UploadTarget(owner: owner, repo: repo, branch: branch)
+    }
+
+    /// Drop the encoded path suffix, leaving owner/repo(/@branch).
+    private static func strippingPath(_ rest: String, encodedPath: String) -> String? {
+        let suffix = "/" + encodedPath
+        guard rest.hasSuffix(suffix) else { return nil }
+        return String(rest.dropLast(suffix.count))
     }
 
     private static func enc(_ s: String) -> String { GitHubEncoding.encodePath(s) }
@@ -326,12 +398,16 @@ extension UploadedLink {
     private static func cdn(for c: GitpicConfig?, path: String)
         -> Result<String, CDNUnavailable> {
         guard let c else { return .failure(.noConfig) }
-        let branch = c.github.branch
+        return cdn(owner: c.github.owner, repo: c.github.repo,
+                   branch: c.github.branch, path: path)
+    }
+
+    private static func cdn(owner: String, repo: String, branch: String, path: String)
+        -> Result<String, CDNUnavailable> {
         guard !LinkURL.cdnBranchIsAmbiguous(branch) else {
             return .failure(.ambiguousBranch(branch: branch))
         }
-        return .success(LinkURL.cdn(owner: c.github.owner, repo: c.github.repo,
-                                    branch: branch, path: path))
+        return .success(LinkURL.cdn(owner: owner, repo: repo, branch: branch, path: path))
     }
 
     /// From a fresh upload.
@@ -363,19 +439,35 @@ extension UploadedLink {
 
     /// From a history row.
     ///
-    /// Both forms are rebuilt here, because `list` stores exactly one URL per row and
-    /// nothing saying which kind it is (`src/commands/upload.rs:187-195`). The cost is
-    /// unavoidable and worth stating: these follow the target as it is configured
-    /// *now*, so a row uploaded before `github.repo` changed yields a link into the
-    /// new repository.
-    public init(_ r: HistoryRecord, config c: GitpicConfig) {
+    /// `list` stores one URL per row and, since this version, the target that URL
+    /// was built for. The two addresses are rebuilt from *that* target, not from
+    /// today's `github.owner/repo/branch`. An older line without the fields is
+    /// parsed from the stored URL; today's config is the last resort, and only
+    /// when even that parse fails.
+    public init(_ r: HistoryRecord, config c: GitpicConfig? = nil) {
+        if let t = r.resolvedTarget
+            ?? c.map({ UploadTarget(owner: $0.github.owner,
+                                    repo: $0.github.repo,
+                                    branch: $0.github.branch) }) {
+            self.init(
+                id: r.id,
+                name: r.name,
+                path: r.path,
+                cdn: Self.cdn(owner: t.owner, repo: t.repo, branch: t.branch, path: r.path),
+                rawURL: LinkURL.raw(owner: t.owner, repo: t.repo, branch: t.branch, path: r.path),
+                deduped: r.deduped)
+            return
+        }
+        // Nothing to rebuild from. Serve the stored URL rather than inventing
+        // the other form from a repository this row was never uploaded to.
+        let stored = r.url
+        let looksCdn = stored.hasPrefix("https://cdn.jsdelivr.net/")
         self.init(
             id: r.id,
             name: r.name,
             path: r.path,
-            cdn: Self.cdn(for: c, path: r.path),
-            rawURL: LinkURL.raw(owner: c.github.owner, repo: c.github.repo,
-                                branch: c.github.branch, path: r.path),
+            cdn: looksCdn ? .success(stored) : .failure(.noConfig),
+            rawURL: stored,
             deduped: r.deduped)
     }
 }

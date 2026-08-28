@@ -60,19 +60,18 @@ struct HistoryPane: View {
         // above it. It is not the only way to reach those two choices — the status-item
         // menu carries the same shared `linkForm` — and a pinned strip was what forced
         // the hand-aligned layout in the first place.
-        if let failure = model.configFailure {
-            // Not "还没有上传记录", which is a claim this pane is in no position to
-            // make: history and config are read by the same `reload()`, config first,
-            // so a file that will not parse takes the history down with it and the
-            // list is empty for a reason that has nothing to do with uploads.
+        if let failure = model.historyFailure, model.history.isEmpty {
+            // Its own failure, not `configFailure`. `gitpic list` never opens the
+            // config file, so a leftover `github.token` (CONFIG_INVALID) must not
+            // hide a list that actually loaded, and must not claim the list is
+            // empty for a reason that has nothing to do with uploads.
             ContentUnavailableView {
                 Label("读不到历史", systemImage: "exclamationmark.triangle")
             } description: {
-                Text("\(failure.headline)。历史和配置是一起读的，所以这里也是空的。")
+                Text(failure)
             } actions: {
                 Button("重试") { Task { await model.reload() } }
                     .disabled(model.busy)
-                Button("去「图床」处理") { SettingsNavigation.shared.selectedTab = .host }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if model.history.isEmpty {
@@ -147,12 +146,10 @@ struct HistoryPane: View {
 
     private func row(_ r: HistoryRecord) -> some View {
         HStack(spacing: 10) {
-            // `savedConfig` is what an address is built from, so with no readable
-            // config there is no URL to fetch — the row still lists what was uploaded,
-            // it just cannot show it. The `configFailure` branch above already covers
-            // the case where the read *failed*; this covers the seconds before the
-            // first read lands.
-            HistoryThumbnail(source: model.savedConfig.map { r.thumbnailSource(config: $0) },
+            // Addresses come from the row — the stored URL, or the owner/repo/branch
+            // recorded with it — not from the target as it is configured now. Config
+            // is only a last resort when an older line cannot be parsed.
+            HistoryThumbnail(source: r.thumbnailSource(config: model.savedConfig),
                              store: model.thumbnails,
                              deduped: r.deduped)
             VStack(alignment: .leading, spacing: 2) {
@@ -198,8 +195,9 @@ struct HistoryPane: View {
         }
     }
 
-    /// History stores one URL and no record of which kind it is, so both addresses
-    /// are rebuilt from the configured target — see `UploadedLink`.
+    /// Both addresses come from the row itself: the owner/repo/branch recorded
+    /// at upload, or recovered from the stored URL. Today's config is only a last
+    /// resort for a line too old to parse — see `UploadedLink`.
     ///
     /// **Success is reported on the button; failure keeps the notification.** The split
     /// is not a preference, it is ``AppModel/notify(title:body:)``'s own justification
@@ -224,17 +222,11 @@ struct HistoryPane: View {
     /// you looked away" from "the button did nothing" after the fact — the same reason
     /// ``AppModel/writeLinkForm(_:)`` logs the success it deliberately does not announce.
     private func copy(_ r: HistoryRecord) {
-        guard let cfg = model.savedConfig else {
-            // Was a bare `return`: the button did nothing at all and said nothing
-            // about why.
-            model.notify(title: "复制失败", body: "读不到配置，生成不了链接")
-            return
-        }
         let form = model.linkForm
         // Names the cause, not just the gap: with a slashed branch every row in the pane
         // is CDN-less, and the remedy is a config change. Decided in Core, so the
         // menu-bar copy cannot word it differently — which it already did.
-        switch UploadedLink(r, config: cfg).snippetOrReason(form, name: r.name) {
+        switch UploadedLink(r, config: model.savedConfig).snippetOrReason(form, name: r.name) {
         case let .unavailable(reason):
             model.notify(title: "复制失败", body: reason)
         case let .text(text):
@@ -267,8 +259,7 @@ struct HistoryPane: View {
 /// error is worth reopening the pane for, and an original past the size ceiling is
 /// working as designed. ``ThumbnailFailure/message`` is what the tooltip says.
 struct HistoryThumbnail: View {
-    /// `nil` when there is no config to build an address from.
-    let source: ThumbnailSource?
+    let source: ThumbnailSource
     let store: ThumbnailStore
     let deduped: Bool
 
@@ -317,8 +308,8 @@ struct HistoryThumbnail: View {
         // it — the same place Finder puts an alias badge.
         .overlay(alignment: .bottomTrailing) { dedupBadge }
         .help(tooltip)
-        // Keyed on the source, so a row whose address moved — `github.owner/repo/
-        // branch` changed under it — refetches instead of showing the old picture.
+        // Keyed on the source, so a row whose own target moved refetches instead
+        // of showing the old picture.
         // Cancelled when the row scrolls away; the fetch itself survives that on
         // purpose, so the next row wanting the same image finds it cached.
         //
@@ -335,7 +326,6 @@ struct HistoryThumbnail: View {
         // Only the image. A late *failure* swaps one tertiary glyph for another inside
         // the same box, at the same size — there is no cut there to soften.
         .task(id: source) {
-            guard let source else { return }
             let asked = ContinuousClock.now
             let result = await store.thumbnail(for: source)
             let late = ContinuousClock.now - asked >= Motion.thumbnailIsLateAfter
@@ -403,12 +393,12 @@ struct HistoryThumbnail: View {
         case .failed(let why):
             return why.message
         case .pending:
-            return source == nil ? "还没读到配置，取不了缩略图" : "正在取缩略图…"
+            return "正在取缩略图…"
         case .loaded:
             // The address it was *reached* at is not recorded — a CDN hit and a raw
             // fallback are one cached image afterwards — so this names where the row
             // points, which is what the truncated path line cannot show in full.
-            return source?.urls.first ?? ""
+            return source.urls.first ?? ""
         }
     }
 }

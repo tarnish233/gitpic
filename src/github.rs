@@ -11,7 +11,7 @@ const API: &str = "https://api.github.com";
 const UA: &str = concat!("gitpic/", env!("CARGO_PKG_VERSION"));
 /// GitHub's Contents API PUT rejects bodies over 100 MB. Checking locally
 /// avoids base64-encoding a payload that cannot land.
-const CONTENTS_PUT_MAX: usize = 100 * 1024 * 1024;
+pub(crate) const CONTENTS_PUT_MAX: usize = 100 * 1024 * 1024;
 
 /// Whole-request ceiling. Uploads of a few MB over a slow link must still fit,
 /// but a half-open connection must not hang the CLI forever.
@@ -567,13 +567,18 @@ fn content_matches(existing_blob_sha: &str, bytes: &[u8]) -> bool {
     existing_blob_sha.eq_ignore_ascii_case(&git_blob_sha(bytes))
 }
 
+pub(crate) fn oversize_error(path: &str, len: usize) -> AppError {
+    AppError::usage(format!(
+        "{path} is {len} bytes; the GitHub Contents API rejects uploads over 100 MB"
+    ))
+}
+
 pub(crate) fn reject_oversize(path: &str, len: usize) -> Result<()> {
     if len > CONTENTS_PUT_MAX {
-        return Err(AppError::usage(format!(
-            "{path} is {len} bytes; the GitHub Contents API rejects uploads over 100 MB"
-        )));
+        Err(oversize_error(path, len))
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]
