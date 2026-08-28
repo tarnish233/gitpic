@@ -135,11 +135,23 @@ struct ThumbnailTests {
     /// — a dead address in the list is one wasted request per row, on every row.
     @Test("a slashed branch skips the CDN rather than 404ing on it")
     func slashedBranchIsRawOnly() {
-        var c = Self.config
-        c.github.branch = "feat/x"
-        #expect(LinkURL.cdnBranchIsAmbiguous(c.github.branch))
-        #expect(Self.record().thumbnailSource(config: c).urls
+        let r = HistoryRecord(time: "2026-08-22T10:00:00+08:00", name: "a",
+                              path: "images/a.png",
+                              url: "https://raw.githubusercontent.com/o/r/feat/x/images/a.png",
+                              sha: "abc123def456", size: 1024, deduped: false,
+                              owner: "o", repo: "r", branch: "feat/x")
+        #expect(LinkURL.cdnBranchIsAmbiguous("feat/x"))
+        #expect(r.thumbnailSource().urls
                 == ["https://raw.githubusercontent.com/o/r/feat/x/images/a.png"])
+    }
+
+    @Test("a history thumbnail does not follow the target as it is configured now")
+    func sourceStaysWithTheUploadTarget() {
+        var c = Self.config
+        c.github.repo = "other"
+        #expect(Self.record().thumbnailSource(config: c).urls
+                == ["https://cdn.jsdelivr.net/gh/o/r@main/images/a.png",
+                    "https://raw.githubusercontent.com/o/r/main/images/a.png"])
     }
 
     /// Both addresses of one image are one cache entry, because the key is the content.
@@ -394,21 +406,26 @@ struct ThumbnailTests {
     }
 
     /// Content-addressed, so it is the *bytes* that are cached and not the address:
-    /// after `github.repo` changes, the same image is still one disk read.
+    /// the same image reached at a different URL is still one disk read.
     @Test("the cache follows the content, not the URL")
     func cacheKeyedByContent() async throws {
         let dir = ThumbnailTests.tempDir()
         let stub = Stub(body: try ThumbnailTests.png(w: 400, h: 300))
         let store = ThumbnailStore(directory: dir, session: stub.session)
         let record = ThumbnailTests.record()
+        let source = record.thumbnailSource()
 
-        _ = await store.thumbnail(for: record.thumbnailSource(config: ThumbnailTests.config))
+        _ = await store.thumbnail(for: source)
         #expect(stub.requests == 1)
 
-        var moved = ThumbnailTests.config
-        moved.github.repo = "elsewhere"
-        let relocated = record.thumbnailSource(config: moved)
-        #expect(relocated.urls.allSatisfy { $0.contains("elsewhere") })
+        // A different address for the same blob. History rows no longer follow
+        // today's `github.repo`, so this has to be constructed rather than
+        // derived from a moved config — the key is still the sha.
+        let relocated = ThumbnailSource(
+            sha: record.sha,
+            urls: ["https://cdn.jsdelivr.net/gh/o/elsewhere@main/images/a.png"],
+            byteSize: record.size)
+        #expect(relocated.cacheKey == source.cacheKey)
         let hit = await store.thumbnail(for: relocated)
         #expect(hit.thumbnail != nil)
         #expect(stub.requests == 1, "same sha, so the new address is still a cache hit")

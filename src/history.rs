@@ -13,6 +13,14 @@ pub struct Record {
     pub sha: String,
     pub size: usize,
     pub deduped: bool,
+    /// The repository this upload landed in. Absent on lines written before these
+    /// fields existed; the app recovers them from `url` when it can.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// Ceiling for the history file. Past this it is trimmed, oldest first.
@@ -176,6 +184,9 @@ mod tests {
             sha: "deadbeef".to_string(),
             size: 1,
             deduped: false,
+            owner: None,
+            repo: None,
+            branch: None,
         })
         .unwrap()
     }
@@ -195,6 +206,36 @@ mod tests {
         let text = format!("{}\n{}\n{}\n", line("a"), line("b"), line("c"));
         let names: Vec<String> = parse_recent(&text, 2).into_iter().map(|r| r.name).collect();
         assert_eq!(names, ["c", "b"]);
+    }
+
+    #[test]
+    fn an_old_record_without_a_target_still_parses() {
+        // Lines written before owner/repo/branch existed must keep loading; a
+        // required field here would drop every historical upload from `gitpic list`.
+        let line = r#"{"time":"2026-08-17T00:00:00+08:00","name":"a","path":"images/a.png","url":"https://example.test/a.png","sha":"deadbeef","size":1,"deduped":false}"#;
+        let r: Record = serde_json::from_str(line).unwrap();
+        assert!(r.owner.is_none() && r.repo.is_none() && r.branch.is_none());
+        assert_eq!(r.name, "a");
+    }
+
+    #[test]
+    fn a_record_with_a_target_round_trips() {
+        let rec = Record {
+            time: "2026-08-17T00:00:00+08:00".into(),
+            name: "a".into(),
+            path: "images/a.png".into(),
+            url: "https://cdn.jsdelivr.net/gh/o/r@main/images/a.png".into(),
+            sha: "deadbeef".into(),
+            size: 1,
+            deduped: false,
+            owner: Some("o".into()),
+            repo: Some("r".into()),
+            branch: Some("main".into()),
+        };
+        let got: Record = serde_json::from_str(&serde_json::to_string(&rec).unwrap()).unwrap();
+        assert_eq!(got.owner.as_deref(), Some("o"));
+        assert_eq!(got.repo.as_deref(), Some("r"));
+        assert_eq!(got.branch.as_deref(), Some("main"));
     }
 
     #[test]

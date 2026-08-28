@@ -136,6 +136,38 @@ struct LinkTests {
 
     // MARK: - History
 
+    @Test("a stored CDN URL parses back into owner, repo, branch")
+    func parseCDN() {
+        let t = LinkURL.parse("https://cdn.jsdelivr.net/gh/o/r@main/images/a%20b/c.png",
+                              path: "images/a b/c.png")
+        #expect(t?.owner == "o")
+        #expect(t?.repo == "r")
+        #expect(t?.branch == "main")
+    }
+
+    @Test("a stored raw URL keeps a slashed branch, because the path is the suffix")
+    func parseRawSlashBranch() {
+        let t = LinkURL.parse("https://raw.githubusercontent.com/o/r/feat/x/a.png",
+                              path: "a.png")
+        #expect(t?.owner == "o")
+        #expect(t?.repo == "r")
+        #expect(t?.branch == "feat/x")
+    }
+
+    @Test("a URL that is not one of gitpic's two templates does not parse")
+    func parseRejectsUnknownHost() {
+        #expect(LinkURL.parse("https://example.test/a.png", path: "a.png") == nil)
+    }
+
+    @Test("decodePath is the inverse of encodePath")
+    func decodePathRoundTrip() {
+        for s in ["images/a b/c.png", "图/a.png", "a+b#c?.png", "feat/x"] {
+            #expect(GitHubEncoding.decodePath(GitHubEncoding.encodePath(s)) == s)
+        }
+        // A truncated escape stays literal rather than swallowing the rest.
+        #expect(GitHubEncoding.decodePath("a%2") == "a%2")
+    }
+
     @Test("a history row's CDN address is jsDelivr even when the stored URL is raw")
     func historyRowRebuildsBothAddresses() throws {
         // Regression: the pane returned `record.url` for the CDN option, but `list`
@@ -151,6 +183,40 @@ struct LinkTests {
         #expect(link.url(.raw) == "https://raw.githubusercontent.com/o/r/main/images/a%20b/c.png")
         // The one formula, so the record's own accessor cannot drift from it.
         #expect(link.url(.raw) == r.rawURL(config: Self.config))
+    }
+
+    @Test("a history row keeps the repository it was uploaded to")
+    func historyRowDoesNotFollowCurrentConfig() throws {
+        // Regression: both addresses were rebuilt from today's github.owner/repo/branch,
+        // so a row uploaded before `github.repo` changed yielded a link into the new
+        // repository — and a thumbnail 404.
+        let r: HistoryRecord = try JSONDecoder().decode(HistoryRecord.self, from: Data("""
+        { "time": "2026-08-19T23:00:22+08:00", "name": "shot", "path": "images/a b/c.png",
+          "url": "https://raw.githubusercontent.com/o/r/main/images/a%20b/c.png",
+          "sha": "abc", "size": 1, "deduped": false }
+        """.utf8))
+        var other = Self.config
+        other.github.repo = "other"
+        other.github.branch = "feat/x"
+        let link = UploadedLink(r, config: other)
+        #expect(link.url(.cdn) == "https://cdn.jsdelivr.net/gh/o/r@main/images/a%20b/c.png")
+        #expect(link.url(.raw) == "https://raw.githubusercontent.com/o/r/main/images/a%20b/c.png")
+        // And it does not need a config at all, once the stored URL parses.
+        let noConfig = UploadedLink(r, config: nil)
+        #expect(noConfig.url(.raw) == link.url(.raw))
+        #expect(noConfig.url(.cdn) == link.url(.cdn))
+    }
+
+    @Test("persisted owner repo branch win over parsing the stored URL")
+    func persistedTargetIsAuthoritative() {
+        let r = HistoryRecord(time: "2026-08-19T23:00:22+08:00", name: "shot",
+                              path: "a.png",
+                              url: "https://cdn.jsdelivr.net/gh/old/old@main/a.png",
+                              sha: "abc", size: 1, deduped: false,
+                              owner: "o", repo: "r", branch: "main")
+        let link = UploadedLink(r, config: nil)
+        #expect(link.url(.cdn) == "https://cdn.jsdelivr.net/gh/o/r@main/a.png")
+        #expect(link.url(.raw) == "https://raw.githubusercontent.com/o/r/main/a.png")
     }
 
     @Test("a branch with a slash has no CDN address at all, in either direction")

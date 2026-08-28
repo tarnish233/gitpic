@@ -206,10 +206,10 @@ public func reconcile(
 
 /// Mirrors one `history::Record` as returned by `list --json`.
 ///
-/// Deliberately smaller than `ItemResult`: history stores only `url`, so the
-/// markdown/HTML/raw forms have to be derived rather than read back. That is why
-/// the UI keeps freshly-uploaded `ItemResult`s in memory instead of re-reading
-/// history for the format switcher.
+/// Newer lines carry `owner`/`repo`/`branch` — the target the upload used — so both
+/// addresses can be rebuilt without guessing from today's config. Older lines have
+/// only `url`; ``LinkURL/parse(_:path:)`` recovers the target from that, and
+/// today's config is the last resort when even that fails.
 public struct HistoryRecord: Codable, Sendable, Hashable, Identifiable {
     public let time: String
     public let name: String
@@ -218,8 +218,26 @@ public struct HistoryRecord: Codable, Sendable, Hashable, Identifiable {
     public let sha: String
     public let size: Int
     public let deduped: Bool
+    public let owner: String?
+    public let repo: String?
+    public let branch: String?
 
     public var id: String { "\(time):\(sha)" }
+
+    public init(time: String, name: String, path: String, url: String, sha: String,
+                size: Int, deduped: Bool,
+                owner: String? = nil, repo: String? = nil, branch: String? = nil) {
+        self.time = time
+        self.name = name
+        self.path = path
+        self.url = url
+        self.sha = sha
+        self.size = size
+        self.deduped = deduped
+        self.owner = owner
+        self.repo = repo
+        self.branch = branch
+    }
 
     /// `time` is RFC 3339 with an offset, e.g. `2026-08-19T23:00:22.230025+08:00`.
     public var date: Date? {
@@ -230,13 +248,28 @@ public struct HistoryRecord: Codable, Sendable, Hashable, Identifiable {
         return f.date(from: time)
     }
 
-    /// The raw.githubusercontent form, rebuilt from the configured target.
+    /// The repository this row was uploaded to, if it can be known without guessing.
     ///
-    /// One formula, in ``LinkURL`` — the app needs the same two URLs for a freshly
-    /// uploaded item, and a second copy of the template here is how the two drift.
+    /// The persisted fields win; the stored URL is parsed next. `nil` means the
+    /// line is too old or too odd to recover, and the caller may fall back to
+    /// today's config — that is the guess this type exists to stop making first.
+    public var resolvedTarget: UploadTarget? {
+        if let owner, let repo, let branch,
+           !owner.isEmpty, !repo.isEmpty, !branch.isEmpty {
+            return UploadTarget(owner: owner, repo: repo, branch: branch)
+        }
+        return LinkURL.parse(url, path: path)
+    }
+
+    /// The raw.githubusercontent form for this row.
+    ///
+    /// Built from the upload's own target when that is known. The config argument
+    /// is the last resort for a line that cannot be parsed, not the default.
     public func rawURL(config c: GitpicConfig) -> String {
-        LinkURL.raw(owner: c.github.owner, repo: c.github.repo,
-                    branch: c.github.branch, path: path)
+        let t = resolvedTarget ?? UploadTarget(owner: c.github.owner,
+                                               repo: c.github.repo,
+                                               branch: c.github.branch)
+        return LinkURL.raw(owner: t.owner, repo: t.repo, branch: t.branch, path: path)
     }
 }
 
@@ -266,5 +299,37 @@ public enum GitHubEncoding {
             }
         }
         return out
+    }
+
+    /// Inverse of ``encodePath``. Bytes that are not a `%XX` pair stay literal, so
+    /// a truncated escape cannot swallow the rest of the string.
+    public static func decodePath(_ s: String) -> String {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(s.utf8.count)
+        let u = s.utf8
+        var i = u.startIndex
+        while i < u.endIndex {
+            if u[i] == 0x25,
+               let n1 = u.index(i, offsetBy: 1, limitedBy: u.endIndex),
+               let n2 = u.index(i, offsetBy: 2, limitedBy: u.endIndex),
+               n2 < u.endIndex,
+               let hi = hexNibble(u[n1]), let lo = hexNibble(u[n2]) {
+                bytes.append(hi << 4 | lo)
+                i = u.index(after: n2)
+            } else {
+                bytes.append(u[i])
+                i = u.index(after: i)
+            }
+        }
+        return String(bytes: bytes, encoding: .utf8) ?? s
+    }
+
+    private static func hexNibble(_ b: UInt8) -> UInt8? {
+        switch b {
+        case 0x30...0x39: return b - 0x30
+        case 0x41...0x46: return b - 0x41 + 10
+        case 0x61...0x66: return b - 0x61 + 10
+        default: return nil
+        }
     }
 }
