@@ -1,17 +1,20 @@
 import SwiftUI
 import GitPicCore
 
-/// What a new release says, and the two ways to act on it.
+/// What a new release says, and what to do about it.
 ///
 /// A sheet rather than a pane, because it is about one moment: a version was found, here is
 /// what is in it, do you want it. Raised by a *manual* check, and by 「查看更新内容」 for one
 /// the daily check found — never by the daily check itself, which reports through
 /// Notification Center instead of interrupting whatever the window was being used for.
+///
+/// It used to offer two actions, chosen by who installed the app: 「立即更新」 handed a
+/// Homebrew-managed copy to `brew upgrade --cask gitpic`, and 「下载并更新」 was for everyone else.
+/// There is one action now — see `Updater`'s header for why the split went away.
 struct UpdateSheet: View {
     @Bindable var model: AppModel
     let report: UpdateReport
 
-    @State private var confirmingUpgrade = false
     @State private var confirmingInstall = false
 
     /// The release notes, parsed once per report rather than once per redraw.
@@ -114,18 +117,15 @@ struct UpdateSheet: View {
             } else {
                 HStack(spacing: 8) {
                     switch model.upgradePath {
-                    case .homebrew:
-                        Button("立即更新") { confirmingUpgrade = true }
-                            .buttonStyle(.borderedProminent)
                     case .selfInstall(let asset, _, _):
                         Button("下载并更新") { confirmingInstall = true }
                             .buttonStyle(.borderedProminent)
                         Text(Self.size(asset.size))
                             .font(.caption).foregroundStyle(.secondary)
                     case .unavailable, .none:
-                        // No button at all rather than a disabled one: neither path can work
+                        // No button at all rather than a disabled one: the install cannot work
                         // here, and a greyed-out control with a tooltip is a worse answer than
-                        // the one route that does.
+                        // the reason printed below it.
                         EmptyView()
                     }
                     Button("打开发布页") {
@@ -156,26 +156,21 @@ struct UpdateSheet: View {
             }
         }
         .padding(16)
-        .alert("升级前需要退出 GitPic", isPresented: $confirmingUpgrade) {
-            Button("退出并升级") { model.performUpgrade() }
-            Button("取消", role: .cancel) {}
-        } message: {
-            // Says exactly what is about to happen, because all of it is visible and some
-            // of it is alarming: the window closes, the menu-bar icon disappears for the
-            // length of a download, and the app comes back on its own.
-            Text("Homebrew 不能替换正在运行的 App，所以 GitPic 会先退出，"
-                 + "升级完成后自动重新打开。这期间菜单栏图标会消失。\n\n"
-                 + "升级过程记录在 GitPic-update.log 里；万一失败，原来的版本仍然可用。")
-        }
         .alert("下载并安装 GitPic \(report.latest)", isPresented: $confirmingInstall) {
             Button("下载并安装") { model.performUpgrade() }
             Button("取消", role: .cancel) {}
         } message: {
             // The order matters and is stated, because it is what makes this safe: everything
             // that can go wrong happens while the window is still here.
-            Text("这份 GitPic 不是 Homebrew 装的，所以由 GitPic 自己安装更新。\n\n"
-                 + "会先下载并校验，全部通过之后才退出并替换，完成后自动重新打开——"
+            //
+            // It no longer opens by saying 「这份 GitPic 不是 Homebrew 装的，所以由 GitPic 自己
+            // 安装更新」. That sentence explained a fork that existed — brew-installed copies were
+            // sent to `brew upgrade` instead — and became false for those users the moment this
+            // became the only path. Nothing here needs to explain where the app came from; what
+            // the reader wants to know is what is about to happen to it.
+            Text("会先下载并校验，全部通过之后才退出并替换，完成后自动重新打开——"
                  + "下载或校验失败的话什么都不会改动。\n\n"
+                 + "替换那一步记录在 GitPic-update.log 里；万一失败，原来的版本仍然可用。\n\n"
                  + "校验用的是 GitHub 为这个文件公布的 SHA-256，和 Homebrew 验证 cask 的方式相同。")
         }
     }

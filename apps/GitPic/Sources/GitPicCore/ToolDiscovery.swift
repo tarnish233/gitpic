@@ -49,216 +49,6 @@ public enum ToolDiscovery {
         return loginShellLookup("gitpic")
     }
 
-    /// Which `brew`s are on this machine, keeping "none" and "could not tell" apart.
-    public enum BrewLocation: Equatable, Sendable {
-        /// Every `brew` found, in the order they were looked for.
-        ///
-        /// A **list**, not one path, and that is the whole point. A machine that has had both
-        /// an Intel and an Apple Silicon Homebrew has two prefixes with two independent
-        /// Caskrooms, and asking only the first one is how a cask installed by
-        /// `/usr/local/bin/brew` gets reported as "nobody's" by `/opt/homebrew/bin/brew` —
-        /// after which the in-app installer replaces a bundle brew manages. Never empty.
-        case found([URL])
-        /// The login shell answered, and there is no `brew`. A durable fact about the
-        /// machine.
-        case absent
-        /// No answer was obtained — the probe hit its 8 s bound, the shell never reached the
-        /// lookup, or it could not be spawned. Says nothing either way and must not be cached.
-        case unknown(reason: String)
-    }
-
-    /// Locate every `brew` on the machine, reporting *which* kind of "not found" this is.
-    ///
-    /// Exists for the same measured reason ``locateGitpic(bundleResourceURL:)`` does: a
-    /// Finder-launched app's PATH is `/usr/bin:/bin:/usr/sbin:/sbin`, so neither Homebrew
-    /// prefix is on it and `brew` cannot be found by name however normal it looks in a
-    /// terminal.
-    ///
-    /// **Why the absent/unknown distinction had to exist.** A single `nil` for both a machine
-    /// with no Homebrew and a probe that timed out was harmless while Homebrew was the only
-    /// way to upgrade — both meant "ask again later". It is not harmless now: a machine with
-    /// no `brew` at all is exactly the machine the in-app installer exists for, and folding it
-    /// in with "could not tell" left that user retrying a probe forever instead of being
-    /// offered the one path that works.
-    ///
-    /// The two hardcoded prefixes are Homebrew's own defaults (Apple Silicon, then Intel) and
-    /// answer the overwhelming majority without spawning a login shell, which costs up to
-    /// 8 seconds. The probe is the fallback for a custom `HOMEBREW_PREFIX`.
-    ///
-    /// **The stated gap.** Because the hardcoded paths short-circuit the probe, a machine with
-    /// a *vestigial* `/opt/homebrew/bin/brew` plus a custom-prefix brew that owns the cask is
-    /// still asked only the vestigial one. Closing it would mean paying the 8 s login shell on
-    /// every sheet open for everyone, including the very common "brew is here and it is not
-    /// mine" case. Left open deliberately; the alternative is a worse trade.
-    ///
-    /// The asymmetry in ``loginShellProbe(_:)`` is deliberate and follows its own reasoning: a
-    /// path found in stdout is trusted even if the shell had to be killed, because the answer
-    /// was already written. The bound and the two marks only decide whether the *absence* of a
-    /// path means anything.
-    public static func locateBrewOutcome() -> BrewLocation {
-        let hardcoded = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
-            .filter { FileManager.default.isExecutableFile(atPath: $0) }
-            .map { URL(fileURLWithPath: $0) }
-        if !hardcoded.isEmpty { return .found(hardcoded) }
-        let probe = loginShellProbe("brew")
-        if let path = probe.path { return .found([path]) }
-        guard probe.conclusive else {
-            return .unknown(reason: probe.reason ?? "没能确认这台机器上有没有 Homebrew")
-        }
-        return .absent
-    }
-
-    /// Which bundle Homebrew installed for `cask`, if any.
-    ///
-    /// Three answers, and the boundary between them is the whole safety property: only
-    /// ``notInstalled`` may authorise replacing a bundle, so anything short of Homebrew
-    /// positively saying "I have nothing under that token" has to be ``unusable``.
-    public enum BrewCaskApp: Equatable, Sendable {
-        /// brew manages this cask, and these are the bundles it lists — plural, because a
-        /// Caskroom can hold more than one version and each version directory has its own
-        /// `GitPic.app` symlink. Never empty, and every entry exists on disk.
-        case installedAt([URL])
-        /// brew has nothing installed under this token. A durable fact, and the only answer
-        /// that may lead to an install.
-        case notInstalled(status: Int32)
-        /// No usable answer. `reason` is user-facing Chinese; the command line, the exit
-        /// status and brew's own stderr go to ``Diagnostics/log(_:)`` instead, because this
-        /// string is rendered in a Chinese-only sheet (`UpdateSheet`).
-        case unusable(reason: String)
-    }
-
-    /// Ask Homebrew *which* bundle it installed for `cask`, not merely whether it did.
-    ///
-    /// Bounded at 20 seconds: a first invocation can catch Homebrew doing its own housekeeping,
-    /// and this runs behind a window that is waiting to draw a button. Spawning lives here
-    /// rather than in `GitPicApp` because `ChildProcess` is internal to this module — the same
-    /// reason ``locateBrewOutcome()`` is here and not beside its one caller.
-    ///
-    /// **Why the path and not a yes/no.** `brew list --cask gitpic` exits 0 whenever the cask
-    /// is installed *anywhere*, and that is not the question. A copy in `~/Applications` on a
-    /// machine whose cask installed to `/Applications` would answer "yes" and then be handed to
-    /// `brew upgrade`, which would replace the *other* bundle and leave this one — an old build,
-    /// still reporting the same update available, with brew reporting nothing left to do. The
-    /// user could repeat that forever. Caught by running it, not by reading it.
-    ///
-    /// Homebrew answers exactly: the Caskroom holds a symlink at
-    /// `<prefix>/Caskroom/<cask>/<version>/GitPic.app` pointing at wherever the app was
-    /// installed, and `brew list --cask` prints that path. Resolving it gives the bundle brew
-    /// owns, with no parsing of human-readable output and no guessing at `--appdir`.
-    ///
-    /// **Every ambiguous answer is ``BrewCaskApp/unusable(reason:)``, never "not mine".** Three
-    /// measured reasons, all on Homebrew 6.0.19 on this machine:
-    ///
-    /// 1. **Homebrew has exactly one error exit code.** `brew list --cask firefox` (a real cask,
-    ///    not installed) exits 1 with `find: /opt/homebrew/Caskroom/firefox: No such file or
-    ///    directory`; `env -i brew list --cask gitpic` *also* exits 1, with `Error: $HOME must
-    ///    be set to run brew.`; and `brew list --cask definitely-not-real-xyz` exits 1 with
-    ///    `Error: Cask '…' is unavailable: No Cask with this name exists.` So the status alone
-    ///    distinguishes nothing.
-    /// 2. **Nor does the message.** That last error is printed *even when the Caskroom holds the
-    ///    cask*: with `/opt/homebrew/Caskroom/gitpic-fixture-zzz/9.9.9/Fixture.app` created by
-    ///    hand, `brew list --cask gitpic-fixture-zzz` still said `No Cask with this name
-    ///    exists.` — which is what a removed tap looks like on a machine where the cask is very
-    ///    much installed. So the wording is not evidence either.
-    /// 3. What *is* evidence is the Caskroom itself, asked for by ``brewCaskroom(brew:)`` and
-    ///    then looked at. A token with no directory under `<prefix>/Caskroom` is one this brew
-    ///    has installed nothing for, whatever it said and whichever way it exited — and if brew
-    ///    cannot even say where its Caskroom is, that is itself the "no answer" case.
-    ///
-    /// Exit **0** with no identifiable bundle is also `unusable`, and this is not theoretical:
-    /// `brew list --cask codex` and `brew list --cask font-maple-mono-nf-cn` both exit 0 here
-    /// with zero `.app` lines. Exit 0 means brew *does* have the cask, so "I cannot see which
-    /// bundle" is the one thing it cannot mean.
-    public static func brewCaskApp(_ cask: String, brew: URL) -> BrewCaskApp {
-        let command = "\(brew.path) list --cask \(cask)"
-        let out: ProcessOutcome
-        do {
-            out = try ChildProcess.run(
-                executable: brew, args: ["list", "--cask", cask], timeout: 20)
-        } catch {
-            Diagnostics.log("update: \(command) could not be spawned: \(error)")
-            return .unusable(reason: "无法运行 Homebrew，没法确认这份 GitPic 是不是它装的")
-        }
-        if out.timedOut {
-            Diagnostics.log("update: \(command) timed out after 20s")
-            return .unusable(reason: "Homebrew 20 秒内没有回答这份 GitPic 是不是它装的")
-        }
-        guard out.status == 0 else {
-            // Confirmed against the filesystem rather than against brew's prose — see the
-            // three measurements above.
-            let complaint = Self.firstLine(of: out.stderr)
-            guard let caskroom = brewCaskroom(brew: brew) else {
-                Diagnostics.log("update: \(command) exited \(out.status) (\(complaint)) and"
-                                + " `brew --caskroom` gave no answer either")
-                return .unusable(reason: "Homebrew 没能说清这份 GitPic 是不是它装的")
-            }
-            // Homebrew keys the Caskroom by bare token, so a tap-qualified name
-            // (`tarnish233/tap/gitpic`) still lands in `Caskroom/gitpic`.
-            let entry = caskroom.appendingPathComponent(
-                URL(fileURLWithPath: cask).lastPathComponent)
-            if !FileManager.default.fileExists(atPath: entry.path) {
-                Diagnostics.log("update: \(command) exited \(out.status) (\(complaint)) and"
-                                + " \(entry.path) does not exist — brew installed no \(cask)")
-                return .notInstalled(status: out.status)
-            }
-            Diagnostics.log("update: \(command) exited \(out.status) (\(complaint)) but"
-                            + " \(entry.path) exists — brew may well own this cask")
-            return .unusable(reason: "Homebrew 没能说清这份 GitPic 是不是它装的")
-        }
-
-        // One path per line. The `.app`s among them are the artifacts; the rest are the receipt
-        // and the cask's own JSON. **All** of them, not the first: a Caskroom holding two
-        // version directories lists two `GitPic.app` symlinks, and the older one can be
-        // dangling — measured, `resolvingSymlinksInPath()` returns a dangling symlink
-        // *unchanged*, so picking it would compare a path that does not exist against the
-        // running bundle and conclude "not brew's".
-        let lines = String(decoding: out.stdout, as: UTF8.self)
-            .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-        let listed = lines.filter { $0.hasSuffix(".app") }
-        let apps = listed
-            .map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().standardizedFileURL }
-            .filter { FileManager.default.fileExists(atPath: $0.path) }
-        guard !apps.isEmpty else {
-            // Exit 0 means brew has this cask; there is simply nothing here to compare the
-            // running bundle against. That is the definition of "no answer", not of a durable
-            // fact — and the log has to say which, because the remedies differ.
-            Diagnostics.log("update: \(command) exited 0 but named no existing .app"
-                            + " (\(lines.count) line(s), \(listed.count) ending in .app)"
-                            + " — brew has \(cask), its bundle is unidentifiable")
-            return .unusable(reason: "Homebrew 管着 gitpic，但没有报出它装的是哪一个 GitPic.app")
-        }
-        return .installedAt(apps)
-    }
-
-    /// Where this `brew` keeps its Caskroom, straight from brew.
-    ///
-    /// `brew --caskroom` with no cask argument needs no tap and resolves no cask definition, so
-    /// it answers on a machine where `brew list --cask <token>` cannot — which is exactly when
-    /// it is asked. Measured at 46 ms, against `brew list --cask`'s 0.44 s, so this is cheap
-    /// enough to be the tiebreaker on the failure path.
-    ///
-    /// Deliberately *not* derived from `brew`'s own path: `/usr/local/bin/brew` is commonly a
-    /// symlink into `/usr/local/Homebrew/bin/brew`, and a prefix guessed from the wrong one of
-    /// those would point at a directory that does not exist — which on this code path reads as
-    /// "brew installed nothing" and authorises an install. Asking brew cannot be wrong that
-    /// way; failing to get an answer is the safe direction.
-    static func brewCaskroom(brew: URL) -> URL? {
-        let out = try? ChildProcess.run(executable: brew, args: ["--caskroom"], timeout: 20)
-        guard let out, out.status == 0, !out.timedOut else { return nil }
-        let path = String(decoding: out.stdout, as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard path.hasPrefix("/") else { return nil }
-        return URL(fileURLWithPath: path)
-    }
-
-    /// The first line of a child's stderr, for the log. Homebrew puts every error there —
-    /// measured: `brew list --cask firefox 2>/dev/null` prints nothing at all on stdout.
-    private static func firstLine(of stderr: Data) -> String {
-        let text = String(decoding: stderr, as: UTF8.self)
-        return text.split(whereSeparator: \.isNewline).first
-            .map { $0.trimmingCharacters(in: .whitespaces) } ?? "no stderr"
-    }
-
     /// Ask the user's login shell where a tool is. A login shell sources the user's
     /// profile, so this covers nix, asdf, and custom prefixes that no hardcoded list
     /// would catch. Verified to return `/opt/homebrew/bin/gh` even from a
@@ -307,9 +97,18 @@ public enum ToolDiscovery {
     /// | `.zprofile` containing `exec true` | **0**  | empty  |
     ///
     /// The last one is why the exit status cannot be the fix either. All four used to come back
-    /// `conclusive: true, path: nil` → `.absent` → "not Homebrew's" → an install over whatever
-    /// is in `/Applications`, and they are reachable *exactly* for the custom-`HOMEBREW_PREFIX`
-    /// users this probe exists to serve, since the two hardcoded paths are checked first.
+    /// `conclusive: true, path: nil`.
+    ///
+    /// **What that used to cost, and what it costs now.** This probe had a second caller: the
+    /// Homebrew ownership question, where a false "absent" folded into "not brew's" and
+    /// authorised replacing whatever was in `/Applications`. That caller is gone — the cask
+    /// declares `auto_updates true` and the app installs over every copy, so nothing asks about
+    /// brew any more (see `SelfUpdate.route`). The evidence below is kept as measured, because
+    /// the bracketing it justifies is still what makes the *remaining* caller correct: a false
+    /// "absent" now means `locateGitpic` reports no CLI on a machine that has one, which is a
+    /// milder failure than an unwanted install but still a wrong answer, and still reachable
+    /// exactly for the custom-prefix users this probe exists to serve — the hardcoded paths are
+    /// checked first, so only they get here.
     ///
     /// So the shell is made to prove it ran, and to bracket its answer. It prints
     /// ``probeOpen`` before the lookup — guarded by `command -v /bin/sh`, a lookup of something
@@ -321,13 +120,15 @@ public enum ToolDiscovery {
     /// - nothing between them → the tool really is not there → conclusive.
     /// - something between them that is not a usable path → the tool exists as an alias or a
     ///   shell function (measured: zsh prints `brew` for a function and `alias brew=…` for an
-    ///   alias), which ``commandVPath(in:tool:)`` rightly refuses to spawn — but it is *not*
-    ///   absence, and calling it absence is an install over a bundle brew may well own.
+    ///   alias — the measurement was taken against `brew`, which is no longer a tool this
+    ///   locates, and is left as recorded because the parse it exercises is unchanged), which
+    ///   ``commandVPath(in:tool:)`` rightly refuses to spawn — but it is *not* absence.
     ///
     /// The closing mark is what keeps a late-flushing profile job out of that second case:
     /// measured, `[gpg-agent] ready` arriving after the lookup lands *after* ``probeClose`` and
-    /// so cannot turn "no brew" into "cannot tell". A job that flushes in the microseconds
-    /// between the two marks still can, and that is the safe direction — the release page.
+    /// so cannot turn "the tool is not here" into "cannot tell". A job that flushes in the
+    /// microseconds between the two marks still can, and that is the safe direction — an
+    /// inconclusive answer, rather than a confident wrong one.
     static func loginShellProbe(_ tool: String) -> ShellProbe {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         guard FileManager.default.isExecutableFile(atPath: shell) else {
