@@ -4,6 +4,72 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.20.9] - 2026-08-28
+
+### Homebrew 装的也能一键更新，不用再退出等 brew
+
+- 更新只剩「下载并更新」一个按钮，装法不同也一样：先下载校验，退出后一两秒就回来
+- 之前 Homebrew 用户要先退出 App，再等 brew 在后台下载，菜单栏图标一直是空的
+- 打开更新弹窗不再卡顿几十秒
+
+<!-- release-notes-end: 以上是 GitHub Release 与 App 内更新弹窗共用的文案；以下只留在本文件。上面每条保持一行——App 的更新弹窗用 .inlineOnlyPreservingWhitespace 渲染，换行会保留，折行会在 480pt 处断句 -->
+
+### App
+
+- 之前按装法分叉：Homebrew 管着的交给 `brew upgrade --cask gitpic`，其余走 app 自己安装。分叉的
+  理由是成立的 —— 背着 brew 换 bundle 会让 cask 的 manifest 描述一个不在磁盘上的版本 —— 但 brew
+  用户拿到的是更差的那半：app 必须**先**退出才能 spawn brew，于是刷 tap 和整个下载都发生在
+  `.accessory` app 的菜单栏图标已经消失之后，没有进度、不能取消，900 秒看门狗是唯一的兜底。
+- 还有一个静默失败：tap 落后于 Release 时（dispatch + 六小时 cron 兜底，而这个 token 过期过），
+  实测 `brew upgrade --cask gitpic` 打印 "Warning: Not upgrading gitpic, the latest version is
+  already installed" 并**退出码 0**。脚本把它记成成功、把老版本开回来，用户白丢一次 app，下次
+  还提示同一个更新。
+- 解决它的是 cask 里缺的一个 stanza，不是改变对危险的判断。`auto_updates true` 正是 Cask Cookbook
+  对「菜单里有 Check for Updates… 且真的帮你下载安装」这种情况的定义。它不等于 brew 不再管 gitpic：
+  对 auto_updates cask，Homebrew 读**装着的 bundle 的 Info.plist** 再和 tap 比
+  （`Cask#auto_updates_bundle_outdated?`，`HOMEBREW_UPGRADE_AUTO_UPDATES_CASKS` 默认开），而不是读
+  自己的安装记录。对本机真实安装验证过：`installed_app_info_plist` 解析到
+  `/Applications/GitPic.app/Contents/Info.plist`，brew 自己的比较器给出「落后→升级 / 相同→不动 /
+  bundle 更新→不动」，最后一行正是自更新之后的窗口，也是它不会造成降级的原因。
+- 依赖 `tarnish233/homebrew-tap` 里同时加上的 `auto_updates true` 和
+  `uninstall quit: "dev.gitpic.app"`。tap 先行上线是刻意的：老版本 app 配新 cask 仍然正常（它只在
+  bundle 真落后时才调 brew，正是「会升级」那一行），反过来则会让 brew 和 app 同时争
+  `/Applications/GitPic.app`。
+- 删掉而不是禁用：`Route.homebrew`、`BrewOwnership`/`BrewVerdict`/`fold`/`brewOwnership`、
+  `ToolDiscovery` 的 `locateBrewOutcome`/`brewCaskApp`/`brewCaskroom`、`upgradeAndRelaunch` 以及
+  生成那段 bash 和看门狗的 `writeScript`、「立即更新」按钮及其确认弹窗。净减 692 行。
+- 顺带两个效果：开更新弹窗不再付 8 秒登录 shell 加每个 Homebrew prefix 20 秒的 `brew list --cask`，
+  所以「正在确认升级方式…」几乎看不到了 —— 路由现在是三个本地事实的纯函数；`retryable: true` 再也
+  没有来源（探测是唯一来源），这一点写在 case 注释上而不是把字段折掉，因为删掉它不改变任何运行时行为。
+
+### 修复
+
+- `hdiutil attach` 的瞬时失败不再被报成「磁盘映像有问题」。在本仓库自己的 CI 上量到：一个反复挂载
+  卸载的套件跑到第 17 秒后，之后每次 attach 都在 0.07 秒内返回 `Resource temporarily unavailable`
+  并持续到跑完，而前一次运行和不改代码的重跑都是绿的 —— 机器停止接受挂载，用户的 Mac 一样会。改成
+  三次尝试、间隔一秒，和 `detachMount` 已有的形状一致。**超时不重试**：超时的 attach 可能其实已经
+  挂上（这正是 detach 的 `defer` 装在 attach 之前的原因），重试会把同一映像挂两次。**不匹配 stderr**
+  判断是否瞬时：那种拼写有好几种，列表是会列错的东西；用尝试次数兜住代价，坏映像晚约两秒被拒绝。
+
+### 测试
+
+- 补上此前**完全没有**覆盖的情形：`stage` 从没跑过 cask 管着的 bundle，因为 `route` 在到它之前就
+  返回 `.homebrew`；而 `check-self-update.sh` 按设计拒绝碰 `/Applications`，也就是 cask 装的地方。
+  新测试按量到的真实形状搭 fixture（两个绝对路径符号链接），跑真实的 stage + swap 脚本，然后**执行**
+  `bin/gitpic` 那个链接读它打印的版本号 —— 证明的是「终端里的 CLI 跟着升了」，而不只是「链接没断」。
+- 两个新断言都验证过会咬，不只验证会过：attach 重试关掉后测试在 1.14 秒失败；cask 测试跳过 swap 后
+  两条断言各自报出该报的消息。第一次构造的 mutation 是无效的（`resolvingSymlinksInPath()` 在不含符号
+  链接的路径上原样返回），这一点记在提交里，因为它是「为什么最终选了那个 mutation」的理由。
+- 被删掉的 12 行路由测试里有两条断言比测试本身更有价值，保留并推广了：现在 `route` 能产生的每一个
+  拒绝都会被检查「是中文句子且不含选项 flag」（旧测试只把它钉在一个字符串上，而 bug 恰好就在那里），
+  以及「只有三个事实决定路由」改成结构性断言。
+
+### 文档
+
+- 全仓库 grep 已删机制，修掉四处被这次改动 falsify 掉的说法，其中 `src/commands/update.rs` 那句
+  「`GitPic.app` runs `brew upgrade` instead」是明确的假陈述，而它是 CLI 不自装（仍然正确的行为）的
+  **理由**；`check-self-update.sh` 的三按钮检查功能上仍然正确，坏掉的只是它解释「为什么」的部分。
+
 ## [0.20.8] - 2026-08-28
 
 ### 历史、粘贴和登录不再指错地方
