@@ -34,9 +34,12 @@ struct QuitPathContractTests {
     /// tripwire whose whole purpose was to catch it.
     ///
     /// Anchored on the receiver (`NSApp` / `NSApplication`) or on the selector's colon, never on
-    /// the bare word `terminate`: the generated brew script in `Updater.swift` contains `SIGTERM`
-    /// and `SIGKILL` inside string literals, `AppModel` speaks of "terminates the `gitpic` child",
-    /// and `LoginChild.terminate()` is a legitimate thing to call on a `Process`.
+    /// the bare word `terminate`. The original motive was the generated Homebrew upgrade script in
+    /// `Updater.swift`, which carried `SIGTERM` and `SIGKILL` inside string literals — that script
+    /// is gone, and the anchoring is kept because the other reasons never depended on it:
+    /// `AppModel` speaks of "terminates the `gitpic` child", `LoginChild.terminate()` is a
+    /// legitimate thing to call on a `Process`, and `SelfUpdateInstall`'s swap script is still
+    /// shell text generated in Swift.
     static let forbidden = [
         "NSApplication.terminate",
         "NSApplication.shared.terminate",

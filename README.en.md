@@ -38,20 +38,24 @@ appears — and can be turned off — in 系统设置 ▸ 通用 ▸ 登录项�
 separate settings.
 
 **Update checks** run once a day by default, and can be run on demand from the 通用 pane or the
-menu bar. A new version is shown with its release notes, and the button matches how GitPic was
-installed: 立即更新 when Homebrew owns this copy, which runs `brew upgrade --cask gitpic`, and
-下载并更新 when it does not, which fetches the release's disk image and replaces the bundle.
-Either way GitPic quits first (nothing can replace a running bundle) and reopens when the
-install finishes.
+menu bar. A new version is shown with its release notes and one 下载并更新 button — whether this
+copy came from Homebrew or was installed by hand, GitPic fetches the release's disk image and
+replaces the bundle itself. It quits first (nothing can replace a running bundle) and reopens
+when the install finishes.
 
-A downloaded image is verified against the SHA-256 GitHub publishes for that file before
-anything is replaced, which is the same check Homebrew makes against a cask — **no checksum, no
-install** — and the download, verification and copy all happen before GitPic quits, so a failure
-changes nothing. Homebrew stays the installer whenever it owns the bundle: replacing a
-cask-managed app behind brew's back would leave its manifest describing a version that is no
-longer on disk. The in-app installer needs GitPic to be in `/Applications` or `~/Applications`;
-a copy kept elsewhere is sent to the release page, and the sheet says which reason applied. The
-terminal equivalent of the check is `gitpic update check`.
+The image is verified against the SHA-256 GitHub publishes for that file before anything is
+replaced, which is the same check Homebrew makes against a cask — **no checksum, no install** —
+and the download, verification and copy all happen before GitPic quits, so a failure changes
+nothing. The installer needs GitPic to be in `/Applications` or `~/Applications`; a copy kept
+elsewhere is sent to the release page, and the sheet says which reason applied. The terminal
+equivalent of the check is `gitpic update check`.
+
+A Homebrew install can still be upgraded with `brew upgrade --cask gitpic`, or a bare
+`brew upgrade`. The cask declares `auto_updates true`, so Homebrew compares the version in
+`/Applications/GitPic.app` against the tap rather than its own install receipt: it does nothing
+once the app has already updated itself, and upgrades when the bundle is genuinely behind. It also
+declares `uninstall quit:`, so a terminal upgrade quits the app before the swap and reopens it
+afterwards.
 
 **Nothing needs a terminal to get started.** Open the settings window → 图床 → 「使用
 GitHub 登录」: the one-time code appears in the window and the browser opens on its own.
