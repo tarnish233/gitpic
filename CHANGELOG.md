@@ -4,6 +4,93 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.9] - 2026-08-28
+
+### A Homebrew install updates in one click, without waiting on brew
+
+- One 下载并更新 button for everyone: it downloads and verifies first, then comes back in a second or two
+- Homebrew users previously had to quit first and wait for brew to download with no menu-bar icon at all
+- Opening the update sheet no longer stalls for tens of seconds
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+### App
+
+- The path used to fork on who installed the app: a cask-managed bundle went to
+  `brew upgrade --cask gitpic`, everything else installed in-app. The fork's reasoning was sound —
+  replacing a cask-managed bundle behind brew's back leaves its manifest describing a version that
+  is not on disk — but brew users got the worse half of it. The app had to quit *before* brew was
+  spawned, so the tap refresh and the whole download happened with an `.accessory` app's menu-bar
+  icon already gone: no progress, nothing to cancel, and a 900 s watchdog as the only bound.
+- It could also silently do nothing. When the tap lagged the Release (dispatch plus a six-hourly
+  cron, and that token has expired before), `brew upgrade --cask gitpic` prints "Warning: Not
+  upgrading gitpic, the latest version is already installed" and exits **0** — measured. The script
+  logged that as success and reopened the same build, so the user lost their app for nothing and was
+  offered the identical update again.
+- What resolved it is a stanza the cask was missing, not a change of mind about the danger.
+  `auto_updates true` is the Cask Cookbook's own definition of this case — an app menu with a
+  *Check for Updates…* that really downloads and installs. It does not mean brew stops managing
+  gitpic: for an auto_updates cask Homebrew reads the version out of the **installed bundle's**
+  `Info.plist` and compares that against the tap (`Cask#auto_updates_bundle_outdated?`, and
+  `HOMEBREW_UPGRADE_AUTO_UPDATES_CASKS` defaults on) rather than its own install receipt. Verified
+  against this machine's real install: `installed_app_info_plist` resolves to
+  `/Applications/GitPic.app/Contents/Info.plist`, and brew's own comparator gives behind → upgrade,
+  equal → nothing, bundle-ahead → nothing. That last row is the window right after a self-update,
+  and it is why this cannot cause a downgrade.
+- Depends on `auto_updates true` and `uninstall quit: "dev.gitpic.app"` landing in
+  `tarnish233/homebrew-tap`. The tap went first deliberately: an old app against the new cask still
+  works (it only calls brew when the bundle really is behind, which is the row that upgrades),
+  whereas this app against a cask without the stanzas leaves brew and the app both trying to own
+  `/Applications/GitPic.app`.
+- Deleted rather than disabled: `Route.homebrew`, `BrewOwnership`/`BrewVerdict`/`fold`/
+  `brewOwnership`, `ToolDiscovery`'s `locateBrewOutcome`/`brewCaskApp`/`brewCaskroom`,
+  `upgradeAndRelaunch` and the `writeScript` that generated the bash and its watchdog, the
+  立即更新 button and its confirm alert. Net -692 lines.
+- Two side-effects worth naming. Opening the sheet no longer pays an 8 s login-shell probe plus a
+  20 s `brew list --cask` per Homebrew prefix, so 「正在确认升级方式…」 is now nearly always
+  invisible — the route is a pure function of three local facts. And nothing produces
+  `retryable: true` any more, the probe having been its only source; that is documented on the case
+  rather than collapsed, since removing it would change nothing that runs.
+
+### Fixed
+
+- A transient `hdiutil attach` failure is no longer reported as a broken disk image. Measured in
+  this repository's own CI: seventeen seconds into a suite that attaches and detaches repeatedly,
+  every remaining attach began returning `Resource temporarily unavailable` inside 0.07 s and kept
+  doing so for the rest of the run, while the run before it and a re-run with no code change were
+  both green — the machine had stopped accepting attaches, and a user's Mac can be in that state
+  too. Three attempts a second apart, the same shape `detachMount` already uses. **A timeout is not
+  retried**: an attach that timed out may have landed anyway, which is why the detach `defer` is
+  installed before the attach, and attaching twice is worse than reporting once. **stderr is not
+  pattern-matched** to decide what is transient — that spelling is one of several, and a list of
+  them is a list to get wrong; the attempt count bounds the cost instead, so an unreadable image is
+  refused about two seconds later.
+
+### Tests
+
+- Covered the case that had **no** coverage at all: `stage` had never run against a cask-managed
+  bundle, because `route` returned `.homebrew` before reaching it — and `check-self-update.sh`
+  refuses to touch `/Applications` by design, which is where the cask installs. The new test builds
+  a fixture from the layout measured off a real install (two absolute-path symlinks), runs the real
+  stage and the real swap script, then *executes* the `bin/gitpic` symlink and reads the version it
+  prints — which proves the terminal got the new CLI, not merely that a link still resolves.
+- Both new assertions were verified to bite, not just to pass: with the attach retry cut to one
+  attempt the test fails at 1.14 s, and with the swap skipped the cask test's two assertions each
+  report what they should. A first attempt at falsifying the latter was a no-op —
+  `resolvingSymlinksInPath()` on a path containing no symlink returns it unchanged — which is
+  recorded in the commit as the reason the mutation that did work is the one described there.
+- Of the twelve route rows deleted with the fork, two assertions were worth more than the rows and
+  are kept, generalised: every refusal `route` can mint is now checked to be a Chinese sentence with
+  no option flag in it (the old row pinned that on one string, which is where the bug had been), and
+  the "these three facts and nothing else decide the route" claim is asserted structurally.
+
+### Docs
+
+- Grepped the whole tree for the removed mechanism and retired four claims this change falsified.
+  `src/commands/update.rs` saying "`GitPic.app` runs `brew upgrade` instead" was flatly false, and
+  it was the *stated reason* for a CLI behaviour that is still correct. `check-self-update.sh`'s
+  three-button check still works as written; only its account of why did not survive.
+
 ## [0.20.8] - 2026-08-28
 
 ### History, paste, and login no longer follow the wrong thing
