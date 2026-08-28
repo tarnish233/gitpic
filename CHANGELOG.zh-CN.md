@@ -4,6 +4,29 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.20.8] - 2026-08-28
+
+### 历史、粘贴和登录不再指错地方
+
+- 换过图床仓库后，历史里的链接和缩略图仍指向当初上传的那份
+- Finder 里复制的图片文件，终端 `gitpic paste` 也能上传了
+- 取消登录后，不会再被半路回来的结果改成已登录
+
+<!-- release-notes-end: 以上是 GitHub Release 与 App 内更新弹窗共用的文案；以下只留在本文件。上面每条保持一行——App 的更新弹窗用 .inlineOnlyPreservingWhitespace 渲染，换行会保留，折行会在 480pt 处断句 -->
+
+### App
+
+- `loginGeneration` 现在也挡住登录事件循环和随后的 `auth status` 回读，而不只是清掉 `loginTask`。管道里已经有的 `.done` / `.failed` 不能在取消之后再写 `auth`。`cancelLogin` / `logout` 把刚 bump 的世代传给 `refreshAuth(onlyIfLoginGeneration:)`，新登录在 `loginTask` 被清掉之后开始，也不会被这次回写盖掉。
+- `loadRepos` 返回之后、`loadBranches` 之前再核对世代。logout 已经 bump 了 `reposGeneration`，过期的 `loadRepos` 会提前返回；没有第二次核对的话，`loadBranches` 会自己 bump `branchesGeneration`，把 `clearBranches` 刚清空的选择器再填回去。
+- `HistoryPane` 看 `historyFailure`，不再看 `configFailure`。`gitpic list` 根本不打开 `config.toml`，残留的 `github.token`（`CONFIG_INVALID`）不会再把已经读出来的列表藏起来；冷启动 `list` 失败也不再显示「还没有上传记录」。
+- 历史记录会记下 `owner`/`repo`/`branch`，旧行从存储的 URL 解析。复制和缩略图跟上传时的目标走。今天的配置只是最后手段，不是默认。
+
+### CLI
+
+- `gitpic paste` 先读 `arboard` 的文件 URL，再读像素，顺序与 App 的 `clipboardImages` 一致。Finder ⌘C 放到剪贴板上的是 `public.file-url`，`get_image()` 看不见。文件才是更好的上传：原字节、扩展名、文件名都还在。
+- `--stdin` 边读边计数，超过 `CONTENTS_PUT_MAX` 时不把溢出的那一块追加进去。文件上传本来就先看 metadata；stdin 没有 metadata，以前是 `read_to_end`。
+- `--compress` 在 `from_decoder` 之前读 `dimensions()`，超过 4096×4096（16,777,216 像素）就退回原文件。100 MB 上限卡的是压缩后的文件；一张小得多的 PNG 也能解出一张几个 GB 的位图。
+
 ## [0.20.7] - 2026-08-27
 
 ### 安装更新时退出，不会再留下半成品

@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.8] - 2026-08-28
+
+### History, paste, and login no longer follow the wrong thing
+
+- History links and thumbnails stay on the repo they were uploaded to, not the one configured now
+- `gitpic paste` now sees an image file copied in Finder, not only pixels
+- Cancelling a login is no longer overwritten by a result already in flight
+
+<!-- release-notes-end: everything above is the GitHub Release and in-app update text; below stays in this file. Keep each bullet above on one line — the app's update sheet renders with .inlineOnlyPreservingWhitespace, which keeps newlines verbatim, so a wrapped line breaks mid-sentence at 480pt -->
+
+### App
+
+- `loginGeneration` now guards the login event loop and the `auth status` re-read, not only clearing `loginTask`. A `.done` or `.failed` already in the pipe cannot write `auth` after 取消. `cancelLogin` / `logout` pass the generation they just bumped into `refreshAuth(onlyIfLoginGeneration:)`, so a newer login that started once `loginTask` was nil is not overwritten.
+- After `loadRepos` returns, `refreshAuth` re-checks the generation before `loadBranches`. Logout already bumps `reposGeneration`, so the stale `loadRepos` returns early; without the second check `loadBranches` would bump `branchesGeneration` itself and refill the picker `clearBranches` just emptied.
+- `HistoryPane` gates on `historyFailure`, not `configFailure`. `gitpic list` never opens `config.toml`, so a leftover `github.token` (`CONFIG_INVALID`) no longer hides a list that loaded, and a failed `list` on a cold launch is no longer 「还没有上传记录」.
+- History rows persist `owner`/`repo`/`branch` and recover an older line from the stored URL. Copy and thumbnails follow the upload's target. Today's config is the last resort, not the default.
+
+### CLI
+
+- `gitpic paste` tries `arboard` file URLs first, then pixels, matching the app's `clipboardImages` order. Finder ⌘C puts `public.file-url` on the pasteboard; `get_image()` does not see it. The file is the better upload: original bytes, extension, and name.
+- `--stdin` counts while reading and refuses to grow past `CONTENTS_PUT_MAX` before appending the overflowing chunk. File uploads already checked metadata first; stdin had no metadata and used `read_to_end`.
+- `--compress` reads `dimensions()` before `from_decoder` and hands the original back above 4096×4096 (16,777,216 pixels). The 100 MB cap is the compressed file; a much smaller PNG can decode to a multi-gigabyte bitmap.
+
 ## [0.20.7] - 2026-08-27
 
 ### Quitting mid-update no longer leaves a half-copied GitPic
