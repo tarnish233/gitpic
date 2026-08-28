@@ -295,10 +295,12 @@ done
 [[ -n "$SHEET" ]] || fail "the update sheet never appeared (is $OLD_VERSION really older than $TARGET_VERSION?)"
 
 step "waiting for the upgrade route to resolve"
-# The action row is 「正在确认升级方式…」 until the route is known, and resolving it can cost
-# a 20 s `brew list --cask` — so the probe is the row's shape, not a fixed sleep. Three
-# buttons means a route was offered (下载并更新 or 立即更新, then 打开发布页 and 稍后); two
-# means `.unavailable`, which is a different failure and worth saying so.
+# The action row is 「正在确认升级方式…」 until the route is known. It is now resolved from three
+# local facts and settles in a frame, where it used to cost up to a 20 s `brew list --cask` per
+# Homebrew prefix — the probe is still the row's shape rather than a fixed sleep, because a
+# fixed sleep would be either a guess or a delay. Three buttons means a route was offered
+# (下载并更新, 打开发布页 and 稍后 — there is no 立即更新 any more, the Homebrew branch is gone);
+# two means `.unavailable`, which is a different failure and worth saying so.
 ROUTED=""
 BUTTONS=""
 for _ in $(seq 1 60); do

@@ -149,10 +149,12 @@ struct QuitPathContractTests {
     /// sequence, so every quit during an install was refused.
     ///
     /// **Asserted against `quit(_:)` and deliberately *not* against `prepareToQuit()`.** The
-    /// latter has two callers that do not exit — the `GITPIC_APP_DRY_RUN` branches of
-    /// `installAndRelaunch` and `upgradeAndRelaunch`, which call it and then `return` — so a
-    /// destructive drain there would run while the app keeps going. It is only the `exit(0)` in
-    /// `quit` that makes undoing this work necessary, so that is where it belongs.
+    /// latter has a caller that does not exit — the `GITPIC_APP_DRY_RUN` branch of
+    /// `installAndRelaunch`, which calls it and then `return`s — so a destructive drain there
+    /// would run while the app keeps going. There were two such callers until the Homebrew
+    /// upgrade path took its own dry-run branch with it; one is all the rule needs. It is only
+    /// the `exit(0)` in `quit` that makes undoing this work necessary, so that is where it
+    /// belongs.
     ///
     /// This is a grep, and a grep is the weaker half — what the drain *does* is covered
     /// behaviourally in `SelfUpdateInstallTests`, which can import `GitPicCore`. What only a
