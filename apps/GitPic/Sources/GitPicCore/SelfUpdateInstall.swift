@@ -408,11 +408,43 @@ extension SelfUpdate {
         // `-mountpoint` rather than letting it land in `/Volumes`: the name there is chosen
         // from the volume label and gets a numeric suffix when it collides, so the path this
         // reads from would be decided by whatever else happens to be mounted.
-        let attach = try? ChildProcess.run(
-            executable: URL(fileURLWithPath: "/usr/bin/hdiutil"),
-            args: ["attach", dmg.url.path, "-nobrowse", "-readonly",
-                   "-mountpoint", mount.path],
-            timeout: 120)
+        //
+        // **Retried, because "attach failed" is not always a fact about the image.** Measured on
+        // a GitHub `macos-latest` runner: seventeen seconds into a suite that attaches and
+        // detaches repeatedly, every remaining `hdiutil attach` started returning
+        // `hdiutil: attach failed - Resource temporarily unavailable` within 0.07 s and went on
+        // doing so for the rest of the run. That is the kernel declining one more attach, not a
+        // corrupt download — and the user on a machine in that state was shown
+        // 「磁盘映像有问题：hdiutil: attach failed - Resource temporarily unavailable」 and left
+        // with a failed update and nothing to do about it.
+        //
+        // **Only a fast non-zero exit is retried, never a timeout.** A timed-out attach may have
+        // landed anyway — the `defer` above is installed before this line for that exact reason —
+        // so a second attach could mount the same image twice. `stderr` is deliberately *not*
+        // pattern-matched to decide what is transient: that spelling is one of several the kernel
+        // and `hdiutil` can produce, and a list of them is a list to get wrong. The attempt count
+        // is what bounds the cost instead, so an image that really is unreadable is refused about
+        // two seconds later than it used to be. Same three-attempts-one-second shape as
+        // ``detachMount(at:)``, which retries for the mirror-image reason.
+        var attach: ProcessOutcome?
+        var attempt = 0
+        while attempt < 3 {
+            attempt += 1
+            try stopIfCancelled(isCancelled)
+            attach = try? ChildProcess.run(
+                executable: URL(fileURLWithPath: "/usr/bin/hdiutil"),
+                args: ["attach", dmg.url.path, "-nobrowse", "-readonly",
+                       "-mountpoint", mount.path],
+                timeout: 120)
+            if let attach, attach.status == 0, !attach.timedOut { break }
+            // A timeout is the one failure that must not be tried again.
+            if attach?.timedOut == true { break }
+            if attempt < 3 {
+                Diagnostics.log("update: hdiutil attach failed, retrying"
+                                + " (\(attempt)/3): \(reason(accepted: false, out: attach))")
+                Thread.sleep(forTimeInterval: 1)
+            }
+        }
         guard let attach, attach.status == 0, !attach.timedOut else {
             let detail = attach?.timedOut == true
                 ? "打开磁盘映像超时"

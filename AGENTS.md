@@ -50,6 +50,31 @@ file and cannot be at different versions. The two entries therefore compete for
 `bin/gitpic` — install one, not both — and the formula exists for Linux, Intel, CI, and
 anyone who wants no app.
 
+**Two cask stanzas the app's updater depends on. Do not drop either.**
+
+`auto_updates true` declares that the artifact updates itself, which is what lets the in-app
+installer replace a cask-managed bundle without brew fighting it — the Cask Cookbook defines the
+stanza as exactly this case, an app menu with a *Check for Updates…* that really downloads and
+installs. It is not "brew stops managing gitpic": current Homebrew reads the version out of
+`/Applications/GitPic.app/Contents/Info.plist` and compares *that* against the tap
+(`Cask#auto_updates_bundle_outdated?`; `HOMEBREW_UPGRADE_AUTO_UPDATES_CASKS` defaults on), so
+`brew upgrade` still upgrades a bundle that is genuinely behind and correctly does nothing once
+the app has updated itself. Without the stanza brew compares its own install receipt, which goes
+stale the moment the app self-updates, and reinstalls a version already on disk.
+
+`uninstall quit: "dev.gitpic.app"` makes brew quit the app before it swaps the bundle and reopen
+it afterwards (`Cask::Upgrade` passes `quit: true` by default). Without it a
+`brew upgrade --cask gitpic` typed into a terminal replaces a bundle that is still running. It
+does not interfere with the app's own update: brew skips the quit when the app is not running, so
+nothing gets opened twice.
+
+The app-side half of this is `SelfUpdate.route` and `Updater`, whose headers carry the full
+argument. **The two repositories have to move together** — the app has no Homebrew branch left,
+so a cask without these stanzas means brew and the app both trying to own the bundle.
+
+The tap's `update-gitpic.yml` rewrites only the `version`, `sha256` and `url` lines by targeted
+`sub!`, so hand-written stanzas survive a release. It does not regenerate the cask.
+
 **How the tap learns about a release.** Two paths, and the second one exists because the
 first cannot be trusted alone:
 

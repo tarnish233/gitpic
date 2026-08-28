@@ -232,6 +232,32 @@ struct SelfUpdateInstallTests {
             .filter { $0.hasPrefix("gitpic-mount-") })
     }
 
+    /// Attach a fixture image the way `stage` does, retries included.
+    ///
+    /// The one test here that mounts an image *itself* rather than through `stage` needs the same
+    /// tolerance `stage` now has, and for the reason that made it necessary there: measured on a
+    /// GitHub `macos-latest` runner, seventeen seconds into this suite every remaining
+    /// `hdiutil attach` began returning `Resource temporarily unavailable` inside 0.07 s and kept
+    /// doing so — twenty failures in a suite that had been passing, from a kernel that had simply
+    /// stopped accepting attaches. The run before and the run after were both green, so this is a
+    /// bound on how much of somebody else's machine this test is willing to depend on, not a
+    /// workaround for a defect of ours.
+    ///
+    /// A timeout is not retried, matching `stage`: an attach that timed out may have landed, and
+    /// attaching twice is worse than reporting once.
+    private static func attachWithRetries(_ dmg: URL, at mount: URL) throws -> ProcessOutcome {
+        var out: ProcessOutcome!
+        for attempt in 1...3 {
+            out = try ChildProcess.run(
+                executable: URL(fileURLWithPath: "/usr/bin/hdiutil"),
+                args: ["attach", dmg.path, "-nobrowse", "-readonly", "-mountpoint", mount.path],
+                timeout: 120)
+            if out.status == 0 || out.timedOut { break }
+            if attempt < 3 { Thread.sleep(forTimeInterval: 1) }
+        }
+        return out
+    }
+
     /// The digest has to cover the bytes that get mounted, not a path that once held them.
     ///
     /// `download` hashes through one descriptor and `hdiutil` opens the path again, with a
@@ -767,7 +793,87 @@ struct SelfUpdateInstallTests {
         }
     }
 
-    @Test("a file that is not a disk image is refused")
+    /// **The layout a Homebrew install leaves behind, and whether the swap survives it.**
+    ///
+    /// Until this change `route` returned `.homebrew` before `stage` could ever see a cask-managed
+    /// bundle, so the installer that now handles *every* copy had never once run against the shape
+    /// Homebrew creates. `check-self-update.sh` cannot close that gap either: it refuses to touch
+    /// `/Applications` by design, and that is where the cask installs. Hence a fixture, built to
+    /// what was measured off this machine's real install rather than to what seemed likely:
+    ///
+    ///     /opt/homebrew/bin/gitpic                        -> /Applications/GitPic.app/Contents/Resources/gitpic
+    ///     /opt/homebrew/Caskroom/gitpic/0.20.8/GitPic.app -> /Applications/GitPic.app
+    ///
+    /// Both are symlinks to **absolute paths inside or at** the bundle, and the swap is two renames
+    /// within the bundle's own directory — so both should come out resolving to the new version.
+    /// The CLI upgrading together with the app is nobody's feature; it is a consequence of that.
+    ///
+    /// **What this would and would not catch**, since the distinction is the point of having it: a
+    /// swap that left the new bundle at any other path, and anything that made the CLI link resolve
+    /// to the old version — the backup, say — both fail here, and the second of those is the one
+    /// `bundleVersion(of: target)` on its own would miss. A swap that replaced the bundle by copying
+    /// into the same path instead of renaming would *not* be caught, because a path-based symlink
+    /// cannot tell the difference. That is a real limit and not what this test is for.
+    ///
+    /// The `bin/gitpic` half is asserted by *running* it, because "the symlink still resolves" and
+    /// "the terminal now has the new CLI" are different claims and only the second one is the
+    /// promise the cask makes.
+    @Test("a Homebrew-shaped install comes out with its symlinks on the new bundle")
+    func swapKeepsCaskSymlinksOnTheNewBundle() throws {
+        let f = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+
+        // Stand in for HOMEBREW_PREFIX. Only the two links matter; the completions the cask also
+        // installs are real files rather than links — which is exactly why they go stale, and why
+        // there is nothing here to assert about them.
+        let prefix = f.root.appendingPathComponent("homebrew")
+        let caskroom = prefix.appendingPathComponent("Caskroom/gitpic/0.18.0")
+        try FileManager.default.createDirectory(at: prefix.appendingPathComponent("bin"),
+                                                withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: caskroom, withIntermediateDirectories: true)
+        let binLink = prefix.appendingPathComponent("bin/gitpic")
+        let caskLink = caskroom.appendingPathComponent("GitPic.app")
+        try FileManager.default.createSymbolicLink(
+            at: binLink, withDestinationURL: f.target.appendingPathComponent("Contents/Resources/gitpic"))
+        try FileManager.default.createSymbolicLink(at: caskLink, withDestinationURL: f.target)
+
+        // Both point at 0.18.0 to begin with, or the assertions below would prove nothing.
+        let before = try ChildProcess.run(executable: binLink, args: [], timeout: 30)
+        #expect(String(decoding: before.stdout, as: UTF8.self).trimmingCharacters(
+            in: .whitespacesAndNewlines) == "0.18.0", "the fixture's link is not wired up")
+
+        let staged = try SelfUpdate.stage(dmg: f.dmg, expectedVersion: "0.19.0",
+                                         replacing: f.target)
+        let log = f.root.appendingPathComponent("install.log")
+        let output = try Self.runScript(staged: staged, log: log, root: f.root)
+        #expect(SelfUpdate.bundleVersion(of: f.target) == "0.19.0", "log: \(output)")
+
+        // The command the cask put on PATH is now the new version's, without brew having run.
+        let after = try ChildProcess.run(executable: binLink, args: [], timeout: 30)
+        #expect(String(decoding: after.stdout, as: UTF8.self).trimmingCharacters(
+            in: .whitespacesAndNewlines) == "0.19.0",
+                "the CLI on PATH still resolves to the old bundle after the swap")
+
+        // And the Caskroom's own link still names a real bundle, so `brew list --cask` and
+        // `brew uninstall` keep working against the copy that is actually installed.
+        #expect(FileManager.default.fileExists(atPath: caskLink.path),
+                "the Caskroom link dangles after the swap")
+        #expect(SelfUpdate.bundleVersion(of: caskLink) == "0.19.0",
+                "the Caskroom link does not see the new version")
+    }
+
+    /// Also the only observable proof that the attach is retried.
+    ///
+    /// `stage` spawns `/usr/bin/hdiutil` by absolute path, so a transient failure cannot be
+    /// injected — but a file that is not an image fails the same way a transient refusal does, by
+    /// exiting non-zero fast. Three attempts one second apart therefore cannot finish in under two
+    /// seconds, and a lower bound on elapsed time is deterministic in the safe direction: a
+    /// `Thread.sleep` can overrun, never undershoot. Delete the retry and this assertion fails.
+    ///
+    /// It is also what the two seconds are: the stated cost of not pattern-matching `hdiutil`'s
+    /// stderr to decide what is worth retrying — a genuinely unreadable image is refused that much
+    /// later than it used to be.
+    @Test("a file that is not a disk image is refused, after retrying the attach")
     func refusesGarbage() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("gitpic-install-test-\(UUID().uuidString)")
@@ -777,10 +883,13 @@ struct SelfUpdateInstallTests {
         let notAnImage = root.appendingPathComponent("GitPic-0.19.0-macos-arm64.dmg")
         try Data("this is not a disk image".utf8).write(to: notAnImage)
 
+        let started = ContinuousClock.now
         #expect(throws: SelfUpdate.InstallFailure.self) {
             _ = try SelfUpdate.stage(dmg: Self.measured(notAnImage), expectedVersion: "0.19.0",
                                      replacing: root.appendingPathComponent("GitPic.app"))
         }
+        #expect(started.duration(to: .now) >= .seconds(2),
+                "the attach was not retried: three attempts a second apart cannot be faster")
         // Nothing was mounted, so the mount point was removed by the plain `rmdir` path — no
         // `hdiutil detach` was needed and none of it recursed into a volume.
         #expect(Self.mountLeftovers() == mountsBefore)
@@ -835,10 +944,7 @@ struct SelfUpdateInstallTests {
         let mount = FileManager.default.temporaryDirectory
             .appendingPathComponent("gitpic-mount-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
-        let attach = try ChildProcess.run(
-            executable: URL(fileURLWithPath: "/usr/bin/hdiutil"),
-            args: ["attach", f.dmg.url.path, "-nobrowse", "-readonly", "-mountpoint", mount.path],
-            timeout: 120)
+        let attach = try Self.attachWithRetries(f.dmg.url, at: mount)
         try #require(attach.status == 0 && !attach.timedOut,
                      "could not attach the fixture image: \(String(decoding: attach.stderr, as: UTF8.self))")
         // If the drain does not get it, this does — a leaked mount survives until reboot.
