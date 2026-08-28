@@ -1,29 +1,34 @@
 import AppKit
 import GitPicCore
 
-/// Installing a newer GitPic: `brew upgrade --cask gitpic` when Homebrew owns this bundle,
-/// and a verified download when it does not.
+/// Installing a newer GitPic: a disk image this process downloads and verifies, then a script
+/// that swaps the bundle once this process is gone.
 ///
-/// **Homebrew first, always.** Replacing a cask-managed bundle behind brew's back leaves its
-/// manifest describing a version that is no longer on disk, so the next `brew upgrade` fights
-/// it. Asking brew to do the install keeps one owner of what is in `/Applications`, and that
-/// argument is untouched by anything below — the in-app installer is not an alternative to
-/// brew, it is what happens when brew is not the owner.
+/// **One path now, for every install.** There used to be two: `brew upgrade --cask gitpic` when
+/// Homebrew owned the bundle, and this download when it did not. The argument for that split was
+/// sound — replacing a cask-managed bundle behind brew's back leaves its manifest describing a
+/// version that is no longer on disk, and the next `brew upgrade` fights it — but what brew users
+/// actually got was the worse half of it. The app had to quit *before* brew was spawned, so the
+/// tap refresh and the whole download happened with an `.accessory` app's menu-bar icon already
+/// gone: no progress, nothing to cancel, and a 900 s watchdog as the only bound on an upgrade
+/// that wedged. Worse, when the tap lagged the Release — dispatch plus a six-hourly cron, and
+/// AGENTS.md records that the dispatch token has expired before — `brew upgrade` exited **0**
+/// with "the latest version is already installed", the script logged that as success and
+/// reopened the same build. A user who lost their app for nothing and was then offered the
+/// identical update again.
 ///
-/// **What changed, and why it is not a weakening.** This file used to argue that self-update
-/// was unsafe here at all, because an ad-hoc signature gives no chain to verify a download
-/// against. That is true and it is also true of the Homebrew path: a cask's `sha256` is
-/// likewise a hash fetched over TLS from GitHub, and brew has no signature chain either. The
-/// in-app installer verifies the SHA-256 that `api.github.com` reports for the asset, so the
-/// trust root is the same one already shipped rather than a new, lower one. Neither survives
-/// a compromised GitHub account; the only real improvement is a Developer ID plus
-/// notarisation, which is out of reach for both. See `SelfUpdate` for the full statement.
+/// What resolved the split is a stanza the cask was missing, not a change of mind about the
+/// danger: `auto_updates true` tells Homebrew the artifact updates itself, and current Homebrew
+/// then decides by reading the *installed bundle's* `Info.plist` rather than its own receipt. So
+/// `brew upgrade` still upgrades a GitPic that is genuinely behind, and correctly does nothing
+/// once this installer has moved it on. `SelfUpdate.route`'s header carries the full argument
+/// with citations; the stanzas themselves live in `tarnish233/homebrew-tap`.
 ///
-/// **Why neither can happen in this process.** The thing being replaced is the bundle this
-/// code is executing from, so the work is handed to a detached script that waits for this
-/// process to exit first, and the app quits. Everything else follows: the script cannot report
-/// into a UI that no longer exists, so it logs; and it reopens the app whichever way the
-/// install went, because the alternative is a user left with no GitPic and no explanation.
+/// **Why the install cannot happen in this process.** The thing being replaced is the bundle this
+/// code is executing from, so the work is handed to a detached script that waits for this process
+/// to exit first, and the app quits. Everything else follows: the script cannot report into a UI
+/// that no longer exists, so it logs; and it reopens the app whichever way the install went,
+/// because the alternative is a user left with no GitPic and no explanation.
 ///
 /// This file used to justify that ordering with "measured: renaming a running executable's
 /// directory away gets the process `Killed: 9`". **That measurement was wrong** — re-run twice
@@ -34,80 +39,63 @@ import GitPicCore
 /// recorded on ``quitForUpdate(_:)`` — it was the excuse for treating the quit as something
 /// that could not fail.
 ///
-/// The two paths differ in what happens *after* the quit, and that is the interesting part.
-/// brew goes to the network with the app already gone, so a stall costs the user everything —
-/// hence the watchdog below. The in-app installer has already downloaded, verified and staged
-/// while the window was open, so all that is left is two renames.
+/// **What the trust root is, and is not.** This file once argued that self-update was unsafe here
+/// at all, because an ad-hoc signature gives no chain to verify a download against. That is true,
+/// and it was equally true of the Homebrew path: a cask's `sha256` is likewise a hash fetched
+/// over TLS from GitHub, and brew has no signature chain either. The installer verifies the
+/// SHA-256 that `api.github.com` reports for the asset, so the trust root is the one already
+/// shipped rather than a new, lower one. Neither survives a compromised GitHub account; the only
+/// real improvement is a Developer ID plus notarisation, which is out of reach for both. See
+/// `SelfUpdate` for the full statement.
 @MainActor
 enum Updater {
 
-    /// The cask's name, which is deliberately not the formula's.
+    /// Its own queue rather than `Task.detached`: staging blocks on `hdiutil`, `codesign` and
+    /// `ditto`, bounded at 120 s, 120 s and 300 s, and a cooperative thread parked that long is
+    /// one fewer for everything else in the app. Same reason `AppDelegate` gives tool discovery a
+    /// `discoveryQueue` instead of running it on the pool.
     ///
-    /// The tap ships two entries: the cask `gitpic` installs the app, the formula
-    /// `gitpic_cli` installs only the binary (see AGENTS.md). `brew upgrade gitpic` without
-    /// `--cask` is ambiguous and Homebrew resolves it in favour of a formula, so both the
-    /// flag and this spelling are load-bearing.
-    ///
-    /// `nonisolated` because ``resolve(report:)`` reads it from a detached task — an immutable
-    /// `String` needs no actor to be read safely, and the alternative was hoisting a copy
-    /// into every closure that mentions it.
-    nonisolated static let caskName = "gitpic"
-
-    /// Seconds `brew upgrade` gets in the generated script before the watchdog kills it.
-    ///
-    /// Interpolated into both the `sleep` and the message it logs, so the number in the log
-    /// cannot drift from the one that was waited.
-    private static let upgradeBound = 900
-
-    /// Its own queue rather than `Task.detached`: the probes below block for up to 8 s and
-    /// 20 s, and a cooperative thread parked that long is one fewer for everything else in
-    /// the app. Same reason `AppDelegate` gives tool discovery a `discoveryQueue` instead of
-    /// running it on the pool.
-    private nonisolated static let probeQueue = DispatchQueue(label: "dev.gitpic.app.brew-probe")
+    /// It was `probeQueue`, labelled `brew-probe`, and it was shared with the Homebrew ownership
+    /// probe — which is why ``installAndRelaunch`` still explains that staging could sit behind
+    /// somebody else's 20 s `brew list --cask` before it started. That probe is gone, so the
+    /// queue has one user and the name says which.
+    private nonisolated static let stagingQueue =
+        DispatchQueue(label: "dev.gitpic.app.staging")
 
     /// Which upgrade to offer for this install, if any.
     ///
-    /// Each question the probe asks rules out a way the button could do the wrong thing.
-    /// Finding `brew` says nothing about whether *this* app came from it — a drag-installed
-    /// copy on a machine that also has Homebrew is entirely ordinary, and `brew upgrade --cask
-    /// gitpic` there fails with "not installed". And the cask being installed still does not
-    /// make *this* bundle the one brew manages: a copy running from `dist-app/`, or a second
-    /// one in `~/Applications` while the cask is also installed, would upgrade
-    /// `/Applications/GitPic.app` and then be reopened *at its own path* — an old build, still
-    /// reporting the same update, with brew reporting nothing left to do. The user can repeat
-    /// that forever.
+    /// The decision itself is `SelfUpdate.route`, a pure function in `GitPicCore` so that every
+    /// row of it is testable; what is left here is reading the two facts it needs off the running
+    /// bundle.
     ///
-    /// The decision itself is `SelfUpdate.route`, a pure function in `GitPicCore` so that
-    /// every row of it is testable; what is left here is gathering the facts it needs off the
-    /// main actor.
+    /// **This used to be the expensive part of opening the sheet.** It asked whether Homebrew
+    /// owned this bundle, which meant up to an 8 s login-shell probe plus a 20 s
+    /// `brew list --cask` per Homebrew prefix, serialised on one queue — up to 28 seconds of
+    /// 「正在确认升级方式…」 before a button could be drawn. Each of those questions ruled out a
+    /// way the old brew branch could do the wrong thing: finding `brew` said nothing about
+    /// whether *this* app came from it, and the cask being installed still did not make *this*
+    /// bundle the one brew manages, so a copy in `~/Applications` beside a cask in
+    /// `/Applications` would have upgraded the other one and been reopened at its own path,
+    /// unchanged, still reporting the same update, forever. There is no brew branch to protect
+    /// now, so none of it is asked.
     ///
-    /// `brewOwnership` is written *inside* the call rather than computed into a local because
-    /// `route`'s `brew` parameter is an `@autoclosure`: the location question is free and is
-    /// asked first, so a copy outside the two Applications directories never pays the 8 s
-    /// login-shell probe or the 20 s `brew list --cask` at all.
+    /// Still `async`, though nothing in it suspends: `UpdateSheet`'s `.task(id:)` awaits it, and
+    /// `AppModel.resolveUpgradePath`'s guard against a report landing mid-resolve is worth
+    /// keeping whether or not the resolve is instant.
     static func resolve(report: UpdateReport) async -> SelfUpdate.Route {
         let bundle = Bundle.main.bundleURL
         // The bundle's own version, not `report.current` — that one is the CLI's, and this
         // replaces the bundle.
         let mine = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
-        let asset = report.installableAsset()
-        let latest = report.latest
-        let route: SelfUpdate.Route = await withCheckedContinuation { cont in
-            probeQueue.async {
-                cont.resume(returning: SelfUpdate.route(
-                    location: SelfUpdate.location(of: bundle),
-                    bundleVersion: mine,
-                    latest: latest,
-                    brew: SelfUpdate.brewOwnership(cask: Self.caskName, bundle: bundle),
-                    asset: asset))
-            }
-        }
+        let route = SelfUpdate.route(
+            location: SelfUpdate.location(of: bundle),
+            bundleVersion: mine,
+            latest: report.latest,
+            asset: report.installableAsset())
         switch route {
-        case .homebrew:
-            Diagnostics.log("update: Homebrew owns this bundle — offering brew upgrade")
         case .selfInstall(let asset, _, let version):
-            Diagnostics.log("update: Homebrew does not own this bundle — offering to install"
-                            + " \(version) from \(asset.name) (\(asset.size) bytes)")
+            Diagnostics.log("update: offering to install \(version) from \(asset.name)"
+                            + " (\(asset.size) bytes)")
         case .unavailable(let reason, let retryable):
             Diagnostics.log("update: no in-app upgrade — \(reason)"
                             + (retryable ? " (will ask again)" : ""))
@@ -135,8 +123,10 @@ enum Updater {
     /// costs nothing but a message — and `onProgress` is what the sheet draws. Only once a
     /// verified bundle is staged beside the old one does this hand off and terminate.
     ///
-    /// That ordering is the whole reason this path needs no watchdog while the brew one does:
-    /// brew goes to the network *after* the app is gone.
+    /// That ordering is why nothing here needs a watchdog. The path this replaced did: it spawned
+    /// brew *after* the app was gone, so a stall cost the user the whole application and only a
+    /// timer could end it. Here a stall costs a progress bar that stops moving, next to a 取消
+    /// that works.
     ///
     /// **Cancellation is honoured all the way to the handoff**, which it was not: the staging
     /// step was a bare `withCheckedThrowingContinuation` that nothing could interrupt, so 取消
@@ -174,12 +164,14 @@ enum Updater {
         let cancelled = CancellationFlag()
         let staged: SelfUpdate.Staged = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { cont in
-                probeQueue.async {
+                stagingQueue.async {
                     cont.resume(with: Result {
-                        // `probeQueue` is serial and shared with the upgrade-path probe, so
-                        // this block can sit behind a 20 s `brew list --cask` before it runs.
-                        // Nothing has been mounted at this point, so a 取消 that arrived in the
-                        // meantime costs nothing at all.
+                        // Checked on entry because dispatching is not instant: a 取消 can land
+                        // between the `Task` starting and this block running. It used to be able
+                        // to wait much longer than that — this queue was shared with the Homebrew
+                        // ownership probe, so staging could sit behind somebody else's 20 s
+                        // `brew list --cask` first. Nothing has been mounted at this point, so a
+                        // 取消 that arrived in the meantime costs nothing at all.
                         if cancelled.isSet { throw CancellationError() }
                         // `stage` reads this between its own steps — the attach, the version
                         // gate, the signature check, the copy — so a 取消 during a slow `ditto`
@@ -268,7 +260,7 @@ enum Updater {
         AppModel.shared.cancelLogin()
     }
 
-    /// Leave now, so the staged bundle — or brew — can replace the one this is running from.
+    /// Leave now, so the staged bundle can replace the one this is running from.
     ///
     /// **`exit()` and not `NSApp.terminate`, and that is a measurement rather than a
     /// preference.** `NSApp.terminate(nil)` is what 0.20.0 shipped on both update paths, and
@@ -404,140 +396,6 @@ enum Updater {
         }
     }
 
-    /// Quit, upgrade, reopen.
-    ///
-    /// Returns only if the handoff itself failed; on success this process is on its way
-    /// out — see ``quitForUpdate(_:)``, which is `Never` for exactly that reason. The caller
-    /// has already confirmed with the user — see `UpdateSheet` — because this closes their
-    /// window and takes the menu-bar icon away for as long as the download takes.
-    ///
-    /// The quit here had the same defect as the install path's and for the same reason: it is
-    /// reached from a button inside an alert on the update sheet, so `NSApp.terminate` was
-    /// refused here too. Untested against a real Homebrew-managed bundle, because this machine
-    /// has none at a path the app runs from; the code path is shared, and the one thing that
-    /// differs — the script — is the same shape.
-    static func upgradeAndRelaunch(brew: URL) throws {
-        let script = try writeScript(brew: brew)
-        if dryRun {
-            Diagnostics.log("update: DRY RUN — script written to \(script.path),"
-                            + " not spawned, not quitting")
-            // The same reason as the install path: everything but the `exit`.
-            prepareToQuit()
-            return
-        }
-        // Detached on purpose. The child is reparented when this process exits and keeps
-        // running, which is exactly what has to happen: the script's first job is to wait
-        // for that exit.
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/bash")
-        task.arguments = [script.path]
-        // Inherited, with `PATH` overridden — the policy `GitpicRunner.run` uses, rather than
-        // the two hand-picked keys this used to build. brew re-execs itself and shells out to
-        // `curl`, `git` and `ditto`, so it needs its own prefix on PATH; but it also needs
-        // whatever proxy configuration the app was launched with, and a two-key environment
-        // silently dropped `HTTPS_PROXY`/`ALL_PROXY` and left every fetch going direct. On a
-        // machine that reaches GitHub only through a local proxy that is the difference
-        // between an upgrade and a stall.
-        //
-        // Necessary rather than sufficient, and worth being honest about: a Finder-launched
-        // `.app` has no shell profile applied, so if the proxy is only exported in one there
-        // is nothing here to inherit. The bound in the script is what makes that survivable.
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "\(brew.deletingLastPathComponent().path):\(ToolPaths.childPATH)"
-        // `HOMEBREW_NO_AUTO_UPDATE` is deliberately *not* set: the tap has to be refreshed
-        // for the new cask to be visible at all, so suppressing that would reliably turn
-        // "upgrade" into "nothing to do".
-        task.environment = env
-        try task.run()
-
-        Diagnostics.log("update: handed off to \(script.path) (pid \(task.processIdentifier))")
-        quitForUpdate("brew will replace the bundle once this pid is gone")
-    }
-
-    /// The script, written to a temporary file rather than passed as `bash -c`.
-    ///
-    /// A file because it is worth being able to read afterwards when an upgrade went
-    /// wrong — the log names this path.
-    private static func writeScript(brew: URL) throws -> URL {
-        let log = Diagnostics.logURL.deletingLastPathComponent()
-            .appendingPathComponent("GitPic-update.log")
-        let bundle = Bundle.main.bundleURL
-        // Quoted with single quotes and the one escape that needs: a path containing a
-        // quote is absurd for an installed .app but this is shell code being generated,
-        // and "absurd" is not "impossible".
-        func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-
-        let script = """
-        #!/bin/bash
-        # Written by GitPic's Updater. Safe to delete.
-        exec >>\(q(log.path)) 2>&1
-        echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) upgrade \(Self.caskName) ==="
-
-        # Wait for GitPic to exit so brew is not replacing a running bundle. Bounded at
-        # 60 s: the app calls `exit(0)` immediately after spawning this script — see
-        # `Updater.quitForUpdate` — so the wait is normally a fraction of a second, and an
-        # app still here after a minute is in a state nothing in this script can mend.
-        #
-        # After the bound brew is allowed to try anyway. The reason is *not* that a
-        # surviving process is stopped by the move: this file used to claim that, citing
-        # `Killed: 9`, and the claim is false — re-measured twice, a `mv` of the bundle
-        # directory leaves the process running from the moved-aside copy, which is how
-        # 0.20.0's failed quit turned into `open -a` merely reactivating the old build.
-        # The reason is that the alternative is worse: bailing out here leaves an
-        # .accessory app with no upgrade and no explanation, whereas trying gets the user
-        # the new version and a log line either way. A brew that cannot complete the move
-        # reports non-zero and the old bundle stays.
-        for _ in $(seq 1 120); do
-          kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null || break
-          sleep 0.5
-        done
-
-        # Bounded too, and for a sharper reason than the loop above: the reopen at the
-        # bottom runs only after brew returns, so an upgrade that never returns costs the
-        # user the whole app. GitPic is .accessory — once it has quit there is no Dock
-        # icon, no menu-bar icon, and the dialog that named this log went with it — so the
-        # only way back would be `open -a GitPic` typed into a terminal. macOS ships no
-        # timeout(1), hence the watchdog.
-        #
-        # The bound is generous on purpose: a slow-but-progressing download must not be
-        # killed, and brew refreshes its taps over git before it fetches the disk image.
-        # What it buys is that a wedged upgrade is temporary. A killed one can leave the
-        # cask half-installed and the reopen below then falls through to `open -a GitPic`,
-        # which is worse than a clean upgrade and much better than never coming back.
-        \(q(brew.path)) upgrade --cask \(q(Self.caskName)) &
-        brew_pid=$!
-        (
-          sleep \(Self.upgradeBound)
-          kill -TERM "$brew_pid" 2>/dev/null || exit 0
-          echo "watchdog: brew exceeded \(Self.upgradeBound)s, sent SIGTERM"
-          sleep 10
-          kill -KILL "$brew_pid" 2>/dev/null && echo "watchdog: escalated to SIGKILL"
-        ) &
-        watchdog_pid=$!
-        wait "$brew_pid"
-        status=$?
-        kill "$watchdog_pid" 2>/dev/null
-
-        # 143 and 137 are SIGTERM and SIGKILL, so they are the watchdog's verdict rather
-        # than brew's. Worth telling apart in the only report this script can make.
-        case $status in
-          143|137) echo "brew was killed by the watchdog (status $status)" ;;
-          0)       echo "brew exited 0" ;;
-          *)       echo "brew failed (status $status)" ;;
-        esac
-
-        # Reopen either way. A failed upgrade must not cost the user their app: the old
-        # bundle is still on disk in that case, and this is the only thing that puts the
-        # menu-bar icon back.
-        open -a \(q(bundle.path)) || open -a GitPic || echo "could not reopen GitPic"
-        exit $status
-        """
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("gitpic-update-\(UUID().uuidString).sh")
-        try script.write(to: url, atomically: true, encoding: .utf8)
-        return url
-    }
-
     /// Delete what past upgrades left behind: the generated scripts, any disk image a
     /// cancelled download abandoned, and the staging or backup directories an interrupted
     /// install could not clean up itself.
@@ -607,8 +465,16 @@ enum Updater {
 
     /// The temporary-directory names this feature owns.
     ///
-    /// `gitpic-update-*` covers both the old upgrade scripts and an abandoned `.dmg`, because
-    /// the download names its file the same way; `gitpic-install-*.sh` is the swap script.
+    /// `gitpic-update-*` covers an abandoned `.dmg`, because the download names its file that way;
+    /// `gitpic-install-*.sh` is the swap script.
+    ///
+    /// **`.sh` under `gitpic-update-` is kept deliberately, and nothing writes one any more.**
+    /// That was the Homebrew upgrade script, generated by a `writeScript` this version deleted.
+    /// A machine upgrading from 0.20.x can still have one sitting in `$TMPDIR` — the script
+    /// cannot delete itself and neither can the app it relaunches, so its cleanup always landed
+    /// one launch later, which is exactly the launch that may now be running this code. Drop the
+    /// suffix and those files are orphaned for good. Removable once no supported version writes
+    /// them, which is a version or two away, not now.
     ///
     /// The bundle-sized leftovers — `.GitPic-update-*` staging directories and `.GitPic-old-*`
     /// backups, beside wherever the app is installed — are deliberately **not** listed here.
@@ -627,7 +493,7 @@ enum Updater {
 ///
 /// `NSLock` over a `Bool`, following `SelfUpdate`'s `DownloadDelegate` and `Auth`'s `LoginChild`:
 /// the setter runs in `withTaskCancellationHandler`'s `onCancel`, which can fire on any thread,
-/// while the reader is a block on `Updater.probeQueue`. `Synchronization.Mutex` would be the
+/// while the reader is a block on `Updater.stagingQueue`. `Synchronization.Mutex` would be the
 /// modern answer and is macOS 15; this package targets macOS 14 (`Package.swift`).
 private final class CancellationFlag: @unchecked Sendable {
     private let lock = NSLock()

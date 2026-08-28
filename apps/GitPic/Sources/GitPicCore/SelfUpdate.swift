@@ -161,9 +161,12 @@ public enum SelfUpdate {
         // `ephemeral` so nothing is written to a shared cache, and an explicit `User-Agent`
         // for the same reason `ThumbnailStore` sets one.
         //
-        // **No `connectionProxyDictionary`, deliberately, and this is the asymmetry with
-        // `Updater.upgradeAndRelaunch`** — which forwards `HTTPS_PROXY`/`ALL_PROXY` to brew
-        // and calls that "the difference between an upgrade and a stall". URLSession does not
+        // **No `connectionProxyDictionary`, deliberately.** This used to be introduced as "the
+        // asymmetry with `Updater.upgradeAndRelaunch`" — which forwarded `HTTPS_PROXY`/`ALL_PROXY`
+        // to brew and called that "the difference between an upgrade and a stall". That function
+        // went with the Homebrew install path, so there is no asymmetry left to explain: this is
+        // now the only thing that downloads an update, and it goes direct. The measurement the
+        // decision rests on is unchanged. URLSession does not
         // read those variables at all (measured: with every one of them pointed at a dead
         // port, a ranged GET of a real release asset still returned 206), so it honours only
         // System Settings. Forwarding them here was written and then rejected on the

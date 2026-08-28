@@ -1120,7 +1120,6 @@ final class AppModel {
     func resolveUpgradePath() async {
         if upgradePathGeneration == updateGeneration {
             if case .unavailable(_, retryable: false) = upgradePath { return }
-            if case .homebrew = upgradePath { return }
             if case .selfInstall = upgradePath { return }
         }
         // The old guard also did not hold across the `await`, so two sheet appearances could
@@ -1155,17 +1154,15 @@ final class AppModel {
         }
     }
 
-    /// Do whichever upgrade was resolved, and quit.
+    /// Do the upgrade that was resolved, and quit.
+    ///
+    /// One arm, where there were two. The other handed the install to `brew upgrade --cask gitpic`
+    /// and could fail *before* the app quit — hence the `catch` that used to be here, setting
+    /// 「启动升级失败」 while this process was still alive to show it. `performSelfInstall` reports
+    /// its own failures through `updateFailure` from inside its `Task`, so there is nothing to
+    /// catch at this level any more.
     func performUpgrade() {
         switch upgradePath {
-        case .homebrew(let brew):
-            do {
-                try Updater.upgradeAndRelaunch(brew: brew)
-            } catch {
-                // The handoff itself failed, so this process is still alive to say so.
-                updateFailure = "启动升级失败：\(error.localizedDescription)"
-                Diagnostics.log("update: handoff failed: \(String(describing: error))")
-            }
         case .selfInstall(let asset, let sha, let version):
             performSelfInstall(asset: asset, sha256: sha, version: version)
         case .unavailable, .none:

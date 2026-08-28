@@ -7,11 +7,18 @@
 //! whose config is missing or broken — including one where the answer is that the fix
 //! shipped in a release the user does not have yet.
 //!
-//! It checks, and it does not install. The app is distributed as a Homebrew cask and is
-//! signed ad-hoc rather than with a Developer ID (see `scripts/build-app.sh`), so a
-//! self-replacing updater would both fight Homebrew's manifest and have no signature chain
-//! to verify a download against. `GitPic.app` runs `brew upgrade` instead; the CLI's job is
-//! to report, and the human-readable output says how to upgrade rather than doing it.
+//! It checks, and it does not install. That is a statement about *this binary*, and the
+//! reason recorded here used to be "`GitPic.app` runs `brew upgrade` instead" — which stopped
+//! being true when the app took over installing its own updates for every copy, Homebrew's
+//! included. See `SelfUpdate.route` in the app for that argument and the cask stanzas it
+//! leans on.
+//!
+//! The half that still holds is the one about the CLI. A `gitpic` on `PATH` can have come
+//! from the cask (a symlink into the bundle, so it upgrades when the app upgrades itself),
+//! from the `gitpic_cli` formula, from `cargo install`, or from an unpacked tarball. Those
+//! want four different upgrade commands and this process could perform at most one of them,
+//! so it reports instead, and the human-readable output says how to upgrade rather than
+//! guessing which of the four applies.
 
 use crate::error::Result;
 use crate::output::Mode;

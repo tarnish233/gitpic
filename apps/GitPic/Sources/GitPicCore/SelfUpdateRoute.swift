@@ -2,26 +2,47 @@ import Foundation
 
 /// Putting a verified disk image in place of the running bundle.
 ///
-/// **Why this is a detached script and not code in this process.** The thing being replaced
-/// is the bundle this code is executing from, so the work has to outlive the app. Measured
-/// rather than assumed: renaming a running executable's directory away and putting a new one
-/// at the old path got the process `Killed: 9`. So the app quits first, and a script that
-/// nothing else depends on does two renames.
+/// **Why this is a detached script and not code in this process.** The thing being replaced is
+/// the bundle this code is executing from, so the work has to outlive the app. This file used to
+/// justify that with "measured: renaming a running executable's directory away and putting a new
+/// one at the old path got the process `Killed: 9`" — the same claim `Updater.swift:28` retracts,
+/// and for the same reason: re-measured twice, a `mv` of the bundle directory leaves the process
+/// running happily from the moved-aside copy. The ordering stands on the plainer argument
+/// instead. A half-replaced bundle is one whose executable, resources and embedded CLI need not
+/// be from the same version, and nothing here can put that back. So the app quits first, and a
+/// script that nothing else depends on does two renames.
 ///
-/// **What is different from the Homebrew path, and why it is safer.** `Updater` hands brew a
-/// script that then goes to the network, so a stall there costs the user the whole app — which
-/// is what its 900 s watchdog exists for. Here the download, the verification, the mount and
-/// the copy have all already happened while the app was alive, cancellable, and able to show
-/// an error. What is left after the app quits is two same-directory renames and an `open`:
-/// local, fast, and rollback-able. The irreversible window shrinks from "however long a
-/// download takes" to "between two renames".
+/// **This is the only install path now, including for a bundle Homebrew installed.** It used to
+/// be what happened when brew was *not* the owner, and the gap between the two is why that
+/// changed: brew was handed a script that went to the network *after* the app had quit, so an
+/// `.accessory` app's menu-bar icon was gone for the length of a tap refresh plus a download,
+/// with no progress, nothing to cancel, and a 900 s watchdog as the only bound. Here the
+/// download, the verification, the mount and the copy have all already happened while the app
+/// was alive, cancellable, and able to show an error. What is left after the quit is two
+/// same-directory renames and an `open`: local, fast, and rollback-able.
+///
+/// **What became of the argument for handing brew the install.** That argument was not wrong — a
+/// bundle replaced behind brew's back leaves its manifest describing a version that is not on
+/// disk, and the next `brew upgrade` fights it. Homebrew has a stanza for precisely this and the
+/// cask was missing it. `auto_updates true` asserts that the artifact updates itself, which the
+/// Cask Cookbook defines as the case where the app menu has a *Check for Updates…* that really
+/// downloads and installs; current Homebrew then decides by reading the **installed bundle's**
+/// `Info.plist` rather than its own receipt (`Cask#auto_updates_bundle_outdated?`, and
+/// `HOMEBREW_UPGRADE_AUTO_UPDATES_CASKS` defaults on). So `brew upgrade` still upgrades a GitPic
+/// that is genuinely behind, and now correctly does nothing when this installer has already
+/// moved it on — where comparing against the stale receipt used to make it reinstall a version
+/// already on disk. The cask also gained `uninstall quit: "dev.gitpic.app"`, so a
+/// `brew upgrade --cask gitpic` typed into a terminal quits the app before the swap and reopens
+/// it afterwards, instead of replacing a running bundle.
+///
+/// **Both stanzas live in `tarnish233/homebrew-tap`'s `Casks/gitpic.rb`, and this file's
+/// correctness depends on them being there** — a cross-repository premise, so it is also
+/// recorded in AGENTS.md's Homebrew section.
 extension SelfUpdate {
 
     /// Which upgrade this install can be offered, if any.
     public enum Route: Equatable, Sendable {
-        /// Homebrew owns this bundle. It stays the installer — see ``route``.
-        case homebrew(brew: URL)
-        /// Nothing else owns the bundle and there is a verifiable image to install.
+        /// There is a verifiable image to install over this bundle.
         ///
         /// `version` travels with the asset because both come out of one report and the
         /// install has to agree with itself. Read separately — the asset from a route the sheet
@@ -30,72 +51,22 @@ extension SelfUpdate {
         /// version gate with 「映像里是 0.20.0，不是预期的 0.21.0」, which reads like a tampered
         /// release rather than a stale sheet.
         case selfInstall(asset: ReleaseAsset, sha256: String, version: String)
-        /// Neither. `reason` is user-facing and therefore **Chinese**; `retryable` is whether
-        /// asking again could change the answer, which is what stops a one-off probe failure
-        /// being cached for the life of the process.
+        /// No install can be offered. `reason` is user-facing and therefore **Chinese**;
+        /// `retryable` is whether asking again could change the answer, which is what stops a
+        /// one-off probe failure being cached for the life of the process.
         ///
         /// `retryable` means "asking the machine again could answer differently" — a fact about
         /// *this install*, not about the release. Every refusal computed from the report is
         /// therefore `retryable: false` and relies on the caller dropping the whole route when
         /// the report changes; see `AppModel.resolveUpgradePath`.
+        ///
+        /// **Nothing produces `true` any more.** The one source was the Homebrew ownership
+        /// probe, whose "I could not get an answer" had to stay askable; ``route`` is now a pure
+        /// function of the report and this bundle's path, so every refusal is durable for as
+        /// long as the report is. The parameter and the guard in `AppModel` that reads it are
+        /// kept rather than collapsed because they are what documents that distinction, and
+        /// removing them would change nothing that runs.
         case unavailable(reason: String, retryable: Bool)
-    }
-
-    /// What Homebrew has to say about this bundle.
-    ///
-    /// Collapsed to three cases by ``brewOwnership(cask:bundle:)`` before it reaches ``route``,
-    /// so the decision itself is a pure function over facts rather than a thing that spawns
-    /// processes — which is what makes the table below testable at all.
-    public enum BrewOwnership: Equatable, Sendable {
-        /// brew is here and manages this cask, as this very bundle.
-        case ownsThisCask(brew: URL)
-        /// Definitively not brew's: every brew on the machine answered "I have nothing under
-        /// that token" or "I installed some other bundle", or there is no brew at all. A
-        /// durable fact.
-        case doesNotOwnIt
-        /// No answer. `reason` is user-facing Chinese. Must not be acted on and must not be
-        /// cached.
-        case unknown(reason: String)
-    }
-
-    /// What one `brew` said about one bundle.
-    ///
-    /// Gathered by ``brewOwnership(cask:bundle:)`` and reduced by ``fold(_:)``, split that way
-    /// so the reduction — which is where the safety rule lives — is testable without spawning
-    /// Homebrew.
-    public enum BrewVerdict: Equatable, Sendable {
-        /// This brew manages the cask, and one of the bundles it lists is the running one.
-        case ownsThisBundle(brew: URL)
-        /// This brew manages the cask, but as some other bundle. A drag-installed copy in
-        /// `~/Applications` on a machine whose cask went to `/Applications`.
-        case ownsAnotherBundle
-        /// This brew has installed nothing under this token.
-        case hasNothing
-        /// This brew gave no usable answer.
-        case noAnswer(reason: String)
-    }
-
-    /// Reduce what every `brew` on the machine said to one answer.
-    ///
-    /// **Homebrew owning the bundle always wins, and "I could not get an answer" is never an
-    /// install.** Both halves matter and the order encodes them:
-    ///
-    /// 1. Any brew that says it installed *this* bundle settles it. On a machine with two
-    ///    prefixes the cask may have been installed by either, and this is what stops
-    ///    `/opt/homebrew/bin/brew`'s "not mine" from overruling `/usr/local/bin/brew`'s "mine".
-    /// 2. Otherwise a single unanswered brew makes the whole answer unknown, because that brew
-    ///    is exactly the one that could have been the owner. Replacing a bundle brew manages
-    ///    leaves the cask manifest describing a version that is not on disk.
-    /// 3. Only when every brew answered, and none of them owns this bundle, is this bundle
-    ///    definitively not brew's.
-    ///
-    /// An empty list is `doesNotOwnIt`: no brew means nothing brew installed. That case is the
-    /// user this whole feature exists for, and it is only reached when
-    /// ``ToolDiscovery/locateBrewOutcome()`` positively established absence.
-    public static func fold(_ verdicts: [BrewVerdict]) -> BrewOwnership {
-        for case .ownsThisBundle(let brew) in verdicts { return .ownsThisCask(brew: brew) }
-        for case .noAnswer(let reason) in verdicts { return .unknown(reason: reason) }
-        return .doesNotOwnIt
     }
 
     /// Whether the running bundle sits somewhere an update may be installed.
@@ -105,41 +76,30 @@ extension SelfUpdate {
         case elsewhere(path: String)
     }
 
-    /// Decide how — or whether — to upgrade.
+    /// Decide whether to offer an upgrade, and for which asset.
     ///
-    /// **Homebrew wins whenever it owns the bundle**, and that is the surviving half of the
-    /// argument this file's predecessor made against self-update at all: replacing a
-    /// cask-managed bundle behind brew's back leaves its manifest describing a version that
-    /// is no longer on disk, and the next `brew upgrade` fights it. So the in-app installer
-    /// is not an alternative to brew, it is what happens when brew is not the owner.
+    /// **A pure function of the report and this bundle's path.** It used to spawn Homebrew: the
+    /// first question was who owns the bundle, and a cask-managed one was sent to
+    /// `brew upgrade --cask gitpic` instead. That question is gone — the cask now declares
+    /// `auto_updates true`, so this installer is what upgrades every copy and brew defers to it
+    /// (the file header has the full argument). Everything left here is a string comparison, a
+    /// version comparison and a lookup in the report's asset list.
     ///
-    /// **An unknown answer is never treated as "not brew's".** A probe that timed out could
-    /// be hiding a working Homebrew, and installing over a cask on that guess is precisely
-    /// the damage the paragraph above describes.
+    /// **What that removal bought, since it is the point of the change.** The brew questions cost
+    /// up to 8 s for a login-shell probe and up to 20 s per `brew list --cask`, on a serial queue,
+    /// every time the sheet opened — up to 28 seconds of 「正在确认升级方式…」 before a button
+    /// could be drawn. `brew` used to be an `@autoclosure` purely so that a bundle outside the
+    /// two Applications directories could refuse without paying it. There is nothing left to
+    /// defer, so the parameter and the laziness are both gone.
     ///
-    /// **The location rule is shared with the brew path** rather than being a second, looser
-    /// test, and it is asked *first* because it is the only question here that is free. `brew`
-    /// is an `@autoclosure` for exactly that reason: passed as a plain argument it was evaluated
-    /// before this function was entered, so a development build in `dist-app/` — or any copy
-    /// outside the two Applications directories — spawned a login shell and a `brew list --cask`,
-    /// serialised on one queue, before the sheet could print a refusal a string comparison had
-    /// already decided. Measured on a warm machine that pays it: 0.04 s for the shell and
-    /// 0.42–0.81 s for `brew list` across three runs — but the *bounds* are 8 s and 20 s, and
-    /// they exist because both really do take that long sometimes (`brew list`'s own doc comment
-    /// names Homebrew's housekeeping). Up to 28 seconds of 「正在确认升级方式…」, every time the
-    /// sheet opened, for an answer that needed none of it.
-    ///
-    /// Its cost, stated in full: a copy kept outside `/Applications` or `~/Applications` is sent
-    /// to the release page — **including** one Homebrew installed there with a custom
-    /// `--appdir`, which used to be offered `brew upgrade` because the brew question was asked
-    /// first. That user is not stranded: the sheet's fallback line spells out
-    /// `brew upgrade --cask gitpic`. What the ordering buys is that the free answer is free
-    /// again, and that no location gets a looser rule than the one this comment claims.
+    /// **The location rule survives on its own merits**, not as a shared test with a brew path
+    /// that no longer exists: a copy running from `dist-app/` or a Downloads folder must not have
+    /// its directory written into, and the sheet sends it to the release page. It is still asked
+    /// first, now simply because it is the one refusal that does not depend on the report.
     public static func route(
         location: BundleLocation,
         bundleVersion: String?,
         latest: String,
-        brew: @autoclosure () -> BrewOwnership,
         asset: AssetChoice
     ) -> Route {
         if case .elsewhere(let path) = location {
@@ -147,14 +107,6 @@ extension SelfUpdate {
                 reason: "这份 GitPic 在 \(path)，不是 /Applications 或 ~/Applications，"
                     + "所以不能在这里直接替换",
                 retryable: false)
-        }
-        switch brew() {
-        case .ownsThisCask(let brew):
-            return .homebrew(brew: brew)
-        case .unknown(let reason):
-            return .unavailable(reason: reason, retryable: true)
-        case .doesNotOwnIt:
-            break
         }
 
         // The gate is the *bundle's* version, not the report's `current` — that one is the
@@ -224,48 +176,5 @@ extension SelfUpdate {
             URL(fileURLWithPath: $0).resolvingSymlinksInPath().standardizedFileURL.path == parent
         }
         return matches ? .applicationsDir : .elsewhere(path: bundle.path)
-    }
-
-    /// Ask Homebrew whether it owns **this** bundle. Blocking: call it off the main actor.
-    ///
-    /// The bundle is a parameter because "is the cask installed" is not the question — see
-    /// `ToolDiscovery.brewCaskApp`. A copy in `~/Applications` on a machine whose cask
-    /// installed to `/Applications` must come back `.doesNotOwnIt`, or it gets handed to brew,
-    /// brew replaces the *other* bundle, and this one is reopened unchanged still reporting the
-    /// same update. That is not hypothetical: it is what this returned before the end-to-end
-    /// run caught it.
-    ///
-    /// **Every brew is asked, not the first one found.** A machine that has had both an Intel
-    /// and an Apple Silicon Homebrew has two prefixes with two independent Caskrooms; asking
-    /// only `/opt/homebrew/bin/brew` about a cask installed by `/usr/local/bin/brew` gets a
-    /// perfectly truthful "I have nothing under that token", which folded straight into
-    /// "not brew's" and an install over a bundle the other brew manages. The second
-    /// `brew list --cask` costs a second bound, not a second 20 seconds — measured at 0.44 s on
-    /// this machine — and it is the price of not breaking that install.
-    ///
-    /// The reduction is ``fold(_:)``, which is where the precedence rule is written down and
-    /// tested.
-    public static func brewOwnership(cask: String, bundle: URL) -> BrewOwnership {
-        switch ToolDiscovery.locateBrewOutcome() {
-        case .unknown(let reason):
-            return .unknown(reason: reason)
-        case .absent:
-            // A definite answer, and the common one for the users this path exists for.
-            return fold([])
-        case .found(let brews):
-            let mine = bundle.resolvingSymlinksInPath().standardizedFileURL.path
-            return fold(brews.map { brew in
-                switch ToolDiscovery.brewCaskApp(cask, brew: brew) {
-                case .notInstalled:
-                    return .hasNothing
-                case .unusable(let reason):
-                    return .noAnswer(reason: reason)
-                case .installedAt(let apps):
-                    return apps.contains { $0.path == mine }
-                        ? .ownsThisBundle(brew: brew)
-                        : .ownsAnotherBundle
-                }
-            })
-        }
     }
 }

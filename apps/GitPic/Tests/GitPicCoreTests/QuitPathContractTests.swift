@@ -34,9 +34,12 @@ struct QuitPathContractTests {
     /// tripwire whose whole purpose was to catch it.
     ///
     /// Anchored on the receiver (`NSApp` / `NSApplication`) or on the selector's colon, never on
-    /// the bare word `terminate`: the generated brew script in `Updater.swift` contains `SIGTERM`
-    /// and `SIGKILL` inside string literals, `AppModel` speaks of "terminates the `gitpic` child",
-    /// and `LoginChild.terminate()` is a legitimate thing to call on a `Process`.
+    /// the bare word `terminate`. The original motive was the generated Homebrew upgrade script in
+    /// `Updater.swift`, which carried `SIGTERM` and `SIGKILL` inside string literals — that script
+    /// is gone, and the anchoring is kept because the other reasons never depended on it:
+    /// `AppModel` speaks of "terminates the `gitpic` child", `LoginChild.terminate()` is a
+    /// legitimate thing to call on a `Process`, and `SelfUpdateInstall`'s swap script is still
+    /// shell text generated in Swift.
     static let forbidden = [
         "NSApplication.terminate",
         "NSApplication.shared.terminate",
@@ -146,10 +149,12 @@ struct QuitPathContractTests {
     /// sequence, so every quit during an install was refused.
     ///
     /// **Asserted against `quit(_:)` and deliberately *not* against `prepareToQuit()`.** The
-    /// latter has two callers that do not exit — the `GITPIC_APP_DRY_RUN` branches of
-    /// `installAndRelaunch` and `upgradeAndRelaunch`, which call it and then `return` — so a
-    /// destructive drain there would run while the app keeps going. It is only the `exit(0)` in
-    /// `quit` that makes undoing this work necessary, so that is where it belongs.
+    /// latter has a caller that does not exit — the `GITPIC_APP_DRY_RUN` branch of
+    /// `installAndRelaunch`, which calls it and then `return`s — so a destructive drain there
+    /// would run while the app keeps going. There were two such callers until the Homebrew
+    /// upgrade path took its own dry-run branch with it; one is all the rule needs. It is only
+    /// the `exit(0)` in `quit` that makes undoing this work necessary, so that is where it
+    /// belongs.
     ///
     /// This is a grep, and a grep is the weaker half — what the drain *does* is covered
     /// behaviourally in `SelfUpdateInstallTests`, which can import `GitPicCore`. What only a
