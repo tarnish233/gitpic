@@ -8,9 +8,15 @@ import GitPicCore
 /// the daily check found — never by the daily check itself, which reports through
 /// Notification Center instead of interrupting whatever the window was being used for.
 ///
-/// It used to offer two actions, chosen by who installed the app: 「立即更新」 handed a
-/// Homebrew-managed copy to `brew upgrade --cask gitpic`, and 「下载并更新」 was for everyone else.
-/// There is one action now — see `Updater`'s header for why the split went away.
+/// The prominent action depends on who installed the app, and only one of the two installs
+/// anything. 「下载并更新」 downloads and swaps the bundle; 「复制升级命令」 puts
+/// `brew upgrade --cask gitpic` on the pasteboard for a bundle a cask owns, and this sheet stays
+/// open behind it because the user's next move is a terminal. A third outcome has neither: when
+/// the tap has not caught up with the release yet, there is nothing to install and no command
+/// worth running — see `Updater`'s header and `SelfUpdate.Route`.
+///
+/// The button it replaced, 「立即更新」, quit the app and spawned brew. This one copies a line of
+/// text.
 struct UpdateSheet: View {
     @Bindable var model: AppModel
     let report: UpdateReport
@@ -202,10 +208,11 @@ struct UpdateSheet: View {
             // that can go wrong happens while the window is still here.
             //
             // It no longer opens by saying 「这份 GitPic 不是 Homebrew 装的，所以由 GitPic 自己
-            // 安装更新」. That sentence explained a fork that existed — brew-installed copies were
-            // sent to `brew upgrade` instead — and became false for those users the moment this
-            // became the only path. Nothing here needs to explain where the app came from; what
-            // the reader wants to know is what is about to happen to it.
+            // 安装更新」. That sentence explained a fork by *denying* one of its branches, and
+            // it was wrong for brew users when it was written. There is a fork again, but this
+            // alert is now only reachable from 下载并更新 — a bundle a cask owns is offered a
+            // command and never gets here — so provenance is settled before the reader arrives
+            // and does not need restating. What they want to know is what is about to happen.
             Text("会先下载并校验，全部通过之后才退出并替换，完成后自动重新打开——"
                  + "下载或校验失败的话什么都不会改动。\n\n"
                  + "替换那一步记录在 GitPic-update.log 里；万一失败，原来的版本仍然可用。\n\n"

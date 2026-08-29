@@ -58,10 +58,11 @@ struct GeneralPane: View {
                 // The label is short; the caption carries the two facts it dropped — that
                 // this checks rather than installs, and that it does so daily. Nothing here
                 // ever replaces the app on its own: a found update is reported, and the
-                // sheet's button is the only thing that installs anything — by downloading
-                // the release's disk image, verifying it against the SHA-256 GitHub
-                // publishes, and swapping the bundle. There is no brew branch: who owns the
-                // bundle stopped being a question the app asks (see `SelfUpdate.route`).
+                // sheet's button is the only thing that acts on it — by downloading the
+                // release's disk image, verifying it against the SHA-256 GitHub publishes and
+                // swapping the bundle, or, for a bundle a Homebrew cask owns, by handing over
+                // `brew upgrade --cask gitpic` and installing nothing at all. Which of the two
+                // is `SelfUpdate.route`'s first question; see `CaskOwnership`.
                 CaptionedToggle(
                     label: "自动更新",
                     caption: "每天检查一次，发现新版本会告诉你，不会自动装。"
