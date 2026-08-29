@@ -4,25 +4,31 @@ import GitPicCore
 /// Installing a newer GitPic: a disk image this process downloads and verifies, then a script
 /// that swaps the bundle once this process is gone.
 ///
-/// **One path now, for every install.** There used to be two: `brew upgrade --cask gitpic` when
-/// Homebrew owned the bundle, and this download when it did not. The argument for that split was
-/// sound — replacing a cask-managed bundle behind brew's back leaves its manifest describing a
-/// version that is no longer on disk, and the next `brew upgrade` fights it — but what brew users
-/// actually got was the worse half of it. The app had to quit *before* brew was spawned, so the
+/// **One path per owner, and only one of them installs.** `brew upgrade --cask gitpic` for a
+/// bundle a cask owns; this download for everyone else. The split is back, but it is not the
+/// split `bb07783` deleted, and the difference is the whole design: that one *ran* brew, and both
+/// of its measured defects came from that. The app had to quit *before* brew was spawned, so the
 /// tap refresh and the whole download happened with an `.accessory` app's menu-bar icon already
 /// gone: no progress, nothing to cancel, and a 900 s watchdog as the only bound on an upgrade
-/// that wedged. Worse, when the tap lagged the Release — dispatch plus a six-hourly cron, and
+/// that wedged. And when the tap lagged the Release — dispatch plus a six-hourly cron, and
 /// AGENTS.md records that the dispatch token has expired before — `brew upgrade` exited **0**
 /// with "the latest version is already installed", the script logged that as success and
 /// reopened the same build. A user who lost their app for nothing and was then offered the
 /// identical update again.
 ///
-/// What resolved the split is a stanza the cask was missing, not a change of mind about the
-/// danger: `auto_updates true` tells Homebrew the artifact updates itself, and current Homebrew
-/// then decides by reading the *installed bundle's* `Info.plist` rather than its own receipt. So
-/// `brew upgrade` still upgrades a GitPic that is genuinely behind, and correctly does nothing
-/// once this installer has moved it on. `SelfUpdate.route`'s header carries the full argument
-/// with citations; the stanzas themselves live in `tarnish233/homebrew-tap`.
+/// Nothing is spawned now and nothing quits on that branch: the app prints the command, offers to
+/// copy it, and stays where it is. Neither failure has anywhere left to happen. What replaces
+/// them is a narrower cost, stated plainly on `SelfUpdate.Route.homebrewUpToDate`: inside the
+/// tap's lag a brew user is told to wait rather than offered an install, because the command that
+/// would run in that window does nothing. `CaskOwnership.verdict` is what avoids handing it over
+/// blindly — it asks what the cask actually offers first, which is what Claude Code does in the
+/// same spot.
+///
+/// The stanza that makes the handed-over command safe is `uninstall quit: "dev.gitpic.app"`, in
+/// `tarnish233/homebrew-tap`: `Cask::Upgrade` passes `quit: true`, so brew quits the app,
+/// re-registers the new bundle with Launch Services and reopens it — and for an `.accessory` app
+/// that reopen is the only thing that puts the menu-bar icon back. `SelfUpdate.route`'s header
+/// carries the argument and what becomes of the cask's other stanza.
 ///
 /// **Why the install cannot happen in this process.** The thing being replaced is the bundle this
 /// code is executing from, so the work is handed to a detached script that waits for this process

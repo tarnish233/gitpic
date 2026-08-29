@@ -4,6 +4,89 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### A Homebrew install is upgraded by Homebrew, and GitPic says so
+
+- Installed with `brew`? The update sheet hands you `brew upgrade --cask gitpic` with a 复制升级命令 button, and installs nothing itself
+- It checks what the cask actually offers first, so you are never given a command that would do nothing
+- `gitpic update` now prints the one upgrade command your install really wants, instead of two to choose between
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+### App
+
+- 0.20.9 made the app install every update itself, a cask-managed bundle included. This reverses
+  that for Homebrew users — but not by restoring what 0.20.9 deleted. Both of that version's
+  measured defects came from *running* brew after the app had quit: the vanished menu-bar icon with
+  no progress and nothing to cancel, and `brew upgrade` exiting **0** with "the latest version is
+  already installed" while the script logged success and reopened the same build. Nothing is
+  spawned now and nothing quits. The app prints the command and stays where it is, so neither
+  failure has anywhere left to happen.
+- The version it compares against is the **cask's**, not the release's, and that is the half that
+  makes it safe to hand a command over at all. Read out of Claude Code 2.1.251's own binary, which
+  does the same thing: it asks what the cask offers, then prints either "Update available: X → Y"
+  with the command or "Claude is up to date!" with none. A release exists the moment it is
+  published while the tap follows by dispatch with a six-hourly cron behind it, so those two facts
+  genuinely differ — and in that window GitPic now says 「已是 Homebrew 提供的最新版本」 rather than
+  offering a command that no-ops. The cost is stated rather than papered over: inside the tap's lag
+  a brew user waits, and the app does not install over a cask-managed bundle to fill the gap.
+- Ownership is asked *before* the location rule, which fixes a case that was always broken:
+  `brew install --cask gitpic --appdir ~/Apps` produces a bundle the app called 「不是 /Applications
+  或 ~/Applications」 and refused, when `brew upgrade --cask gitpic` was exactly right for it.
+- Detection asks about the **bundle**, not the machine. `brew list --cask gitpic` — what 0.20.9
+  deleted — is true whenever a cask is installed anywhere, so a copy in `~/Applications` beside a
+  cask in `/Applications` could be told to upgrade the other one. Reading the Caskroom's own
+  symlink answers about this bundle, works at any `--appdir`, and costs a directory scan instead of
+  up to 8 s of login shell plus 20 s per prefix.
+- The tap lookup is off `GitpicRunner`'s spawn gate and bounded at 10 s. On the gate its worst case
+  — the CLI's 20 s request plus one anonymous retry — would have sat in front of every upload, on
+  the sheet-open path, which is the shape 0.20.9 was written to delete. The tap's local clone is
+  read first and settles the answer for free whenever it already names something newer, so the
+  common case costs no request at all.
+- **Fixed, and it was live since before this change:** the update sheet appended 「或在终端运行
+  `brew upgrade --cask gitpic`」 to *every* refusal, so a copy running from `~/Downloads` on a
+  machine with no cask was told to run a command that answers `Error: Cask 'gitpic' is not
+  installed`. That sentence now appears only for a bundle a cask really owns.
+
+### CLI
+
+- `gitpic update` printed the cask's command and the formula's side by side and left the reader to
+  pick, which had no answer at all for a hand-installed `GitPic.app`, a `cargo install --git` build
+  or an unpacked tarball. It now detects the install and prints one command.
+- The detection turns on canonicalising `current_exe()`, and the naive version gets the commonest
+  install wrong. The cask links `HOMEBREW_PREFIX/bin/gitpic` at the copy inside the app bundle, and
+  on Apple platforms `current_exe()` is `_NSGetExecutablePath` with no canonicalisation — measured:
+  `/opt/homebrew/bin/gitpic` has no `.app` ancestor while its realpath does. Both answers it would
+  otherwise fall to are wrong ones, and one of them prints `brew upgrade gitpic_cli`, the exact "no
+  available formula" failure the two-command note existed to avoid.
+- `gitpic` is not on crates.io (verified against the API), so the cargo hint carries `--git`. The
+  bare spelling would have been a command that cannot work.
+- New `gitpic update cask`, which reports what the tap's cask declares. The origin is a
+  compile-time constant, pinned by the same test as the release feed: what it returns is rendered
+  in GitPic's own window next to a command the user is being told to run.
+
+### Homebrew
+
+- **`auto_updates true` is being removed from the cask**, after this release ships — never before,
+  or brew's receipt comparison and an older app's installer both write `/Applications/GitPic.app`.
+  It asserts that the artifact updates itself, which stops being true of a cask-managed copy now
+  that the app defers.
+- Two claims this file and AGENTS.md made about that stanza were wrong, and are corrected there:
+  it never governed `brew upgrade --cask gitpic`, because a named cask takes
+  `outdated?(greedy: true)` (`cask/upgrade.rb:70`) and skips the `auto_updates` comparison
+  entirely; and `HOMEBREW_UPGRADE_AUTO_UPDATES_CASKS`, cited here as "defaults on", is marked
+  `odeprecated`.
+- **Transitional, one release wide:** a 0.20.9 cask user who self-updated has a bundle ahead of
+  brew's receipt, so once the stanza is gone a bare `brew upgrade` can reinstall an older tap
+  version over it. The common shape is one redundant download that repairs the receipt; a real
+  downgrade needs the bundle ahead of the *tap*, which takes skipping a version in-app inside the
+  tap's lag. It closes after one `brew upgrade`. The app cannot cause it — it compares the tap
+  against the installed bundle, so it never prints a command that moves backwards.
+- `uninstall quit: "dev.gitpic.app"` stays and is now load-bearing rather than a courtesy: it is
+  what makes the command the app hands out safe, and for an `.accessory` app brew's reopen is the
+  only thing that puts the menu-bar icon back.
+
 ## [0.20.9] - 2026-08-28
 
 ### A Homebrew install updates in one click, without waiting on brew
