@@ -53,8 +53,30 @@ enum HomebrewShape {
     /// Written as a whole cask rather than one line, so the parser is exercised against the
     /// shape it will really meet — comments above the stanza included, since the tap's own
     /// `Casks/gitpic.rb` opens with a long one.
-    static func tapClone(under prefix: URL, declaring version: String) throws {
-        let casks = prefix
+    ///
+    /// **`repositorySubpath` is what makes the Intel layout expressible**, and it exists because
+    /// this fixture used to hardcode `<prefix>/Library/Taps` and so could not have caught the
+    /// bug it was covering. Taps hang off `HOMEBREW_REPOSITORY`, which equals the prefix only
+    /// when `bin/brew` is a real file: on Intel `/usr/local/bin/brew` links into
+    /// `/usr/local/Homebrew`, so the clone is at `/usr/local/Homebrew/Library/Taps` while the
+    /// Caskroom stays at `/usr/local/Caskroom`. Pass `"Homebrew"` for that shape.
+    ///
+    /// `lineEnding` is the other axis a single fixture hid. A clone checked out with
+    /// `core.autocrlf` set has CRLF line endings, and Swift treats `"\r\n"` as one `Character`
+    /// that does not equal `"\n"` — so a parser splitting on `"\n"` saw the whole file as a
+    /// single line and read no version at all, while the Rust parser on the same bytes read it
+    /// correctly.
+    static func tapClone(
+        under prefix: URL,
+        declaring version: String,
+        repositorySubpath: String? = nil,
+        lineEnding: String = "\n"
+    ) throws {
+        var repository = prefix
+        if let repositorySubpath {
+            repository = repository.appendingPathComponent(repositorySubpath)
+        }
+        let casks = repository
             .appendingPathComponent("Library/Taps/tarnish233/homebrew-tap/Casks")
         try FileManager.default.createDirectory(at: casks, withIntermediateDirectories: true)
         let cask = """
@@ -66,7 +88,11 @@ enum HomebrewShape {
               app "GitPic.app"
             end
             """
-        try cask.write(to: casks.appendingPathComponent("gitpic.rb"), atomically: true,
+        let text = lineEnding == "\n"
+            ? cask
+            : cask.split(separator: "\n", omittingEmptySubsequences: false)
+                .joined(separator: lineEnding)
+        try text.write(to: casks.appendingPathComponent("gitpic.rb"), atomically: true,
                        encoding: .utf8)
     }
 

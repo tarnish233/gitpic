@@ -28,22 +28,36 @@ import Foundation
 /// bundle, flipped the test copy onto the Homebrew branch, and broken the script.
 public enum CaskOwnership: Equatable, Sendable {
 
-    /// Where a cask keeps its record of an installed bundle, and the two prefixes to look in.
+    /// Where a cask keeps its record of an installed bundle, and the prefixes to look in.
     ///
     /// An Intel and an Apple Silicon Homebrew are independent installations with independent
     /// Caskrooms, so both are searched rather than one being derived from the other. This
     /// mirrors `install_source.rs`'s `default_prefixes` on the Rust side; the two answer
     /// different questions (that one is about a *binary*'s origin, this one about a *bundle*'s
     /// owner) and share only this list.
+    ///
+    /// `HOMEBREW_PREFIX` is honoured when it is set and absolute, which is the only way a
+    /// Homebrew somewhere else can be found without spawning `brew --prefix`. It is worth
+    /// little to the app and a lot to the CLI: a Finder-launched bundle inherits an
+    /// environment that has never sourced `brew shellenv`, so in the app this fires only for a
+    /// copy launched from a terminal — including the one `check-self-update.sh` drives.
     public static var defaultPrefixes: [URL] {
-        [URL(fileURLWithPath: "/opt/homebrew"), URL(fileURLWithPath: "/usr/local")]
+        var prefixes = [URL(fileURLWithPath: "/opt/homebrew"), URL(fileURLWithPath: "/usr/local")]
+        if let declared = ProcessInfo.processInfo.environment["HOMEBREW_PREFIX"],
+           declared.hasPrefix("/") {
+            let extra = URL(fileURLWithPath: declared).standardizedFileURL
+            if !prefixes.contains(where: { $0.standardizedFileURL.path == extra.path }) {
+                prefixes.append(extra)
+            }
+        }
+        return prefixes
     }
 
     /// The cask token, and the tap that defines it as Homebrew lays it out on disk.
     ///
     /// Spelled here as well as in `release.rs` because nothing can share a constant across the
-    /// two languages. They have to agree, and the test that pins the Rust side
-    /// (`the_release_feed_is_a_compile_time_constant`) has a counterpart here for the same
+    /// two languages. They have to agree, and `theTapPathIsBuiltFromPinnedConstants` pins this
+    /// side the way `the_release_feed_is_a_compile_time_constant` pins that one, for the same
     /// reason: a version read out of the wrong file would be shown next to a command the user
     /// is being told to run.
     public static let cask = "gitpic"
@@ -62,12 +76,22 @@ public enum CaskOwnership: Equatable, Sendable {
 
     /// Whether any `Caskroom/<cask>/*/GitPic.app` under `prefixes` resolves to `bundle`.
     ///
-    /// Conclusive by construction: a directory either holds such a link or it does not, so
-    /// there is no third "could not tell" state to propagate. That is what keeps
+    /// There is no third "could not tell" state to propagate: a directory either holds such a
+    /// link or it does not, and nothing here can time out. That is what keeps
     /// `SelfUpdate.Route.unavailable`'s `retryable` flag dead — the flag's one former source was
-    /// the probe this replaces, which could time out.
+    /// the probe this replaces, which could.
+    ///
+    /// **It is decisive, not omniscient**, and the difference is a false negative worth naming.
+    /// A cask installed under a prefix that is neither Homebrew default nor named by
+    /// `HOMEBREW_PREFIX` is not found, and its owner is then offered the in-app install — which
+    /// replaces the bundle behind brew's back and leaves the receipt describing a version that
+    /// is no longer on disk. What keeps that from being severe is that it is the same
+    /// self-healing shape as the migration AGENTS.md describes: the receipt is now unequal to
+    /// what is installed, so the next `brew upgrade` reinstalls over it once. Homebrew does not
+    /// support casks outside its own prefixes, which is why this is a documented edge and not a
+    /// probe.
     public static func detect(bundle: URL, prefixes: [URL] = defaultPrefixes) -> Install? {
-        let bundle = bundle.resolvingSymlinksInPath().standardizedFileURL
+        let bundle = bundle.resolvingSymlinksInPath().standardizedFileURL.path
         for prefix in prefixes {
             let versions = prefix.appendingPathComponent("Caskroom").appendingPathComponent(cask)
             let entries = (try? FileManager.default.contentsOfDirectory(
@@ -75,7 +99,11 @@ public enum CaskOwnership: Equatable, Sendable {
             for entry in entries {
                 let link = entry.appendingPathComponent("GitPic.app")
                 guard FileManager.default.fileExists(atPath: link.path) else { continue }
-                let target = link.resolvingSymlinksInPath().standardizedFileURL
+                // `.path`, not `URL ==`: that compares `absoluteString`, so the same directory
+                // can compare unequal purely from how the two URLs were built (a trailing
+                // slash from a directory hint is enough). `location(of:)` already compares
+                // paths for the same reason.
+                let target = link.resolvingSymlinksInPath().standardizedFileURL.path
                 if target == bundle {
                     return Install(cask: cask, prefix: prefix)
                 }
@@ -87,24 +115,40 @@ public enum CaskOwnership: Equatable, Sendable {
     /// The version the tap's cask declares, read off the clone Homebrew already keeps, or `nil`.
     ///
     /// **A lower bound on what `brew upgrade` would find, never an upper one.** Homebrew clones
-    /// a third-party tap rather than serving it from its API, so the file is right there at
-    /// `<prefix>/Library/Taps/<owner>/<repo>/Casks/<cask>.rb` and costs nothing to read. But it
-    /// is only as fresh as the last `brew update`, and `brew upgrade` auto-updates before it
-    /// resolves anything — so this file saying "nothing newer" does not mean the command would
-    /// do nothing. It is worth reading first precisely because the *useful* direction is
-    /// reliable: if this already names a version newer than the installed bundle, then
-    /// `brew upgrade` will certainly find at least that, and no request has to be made at all.
+    /// a third-party tap rather than serving it from its API, so the file is right there and
+    /// costs nothing to read. But it is only as fresh as the last `brew update`, and
+    /// `brew upgrade` auto-updates before it resolves anything — so this file saying "nothing
+    /// newer" does not mean the command would do nothing. It is worth reading first precisely
+    /// because the *useful* direction is reliable: if this already names a version newer than
+    /// the installed bundle, then `brew upgrade` will certainly find at least that, and no
+    /// request has to be made at all.
     ///
     /// Returning `nil` therefore means "ask something authoritative", not "up to date".
+    ///
+    /// **Taps hang off `HOMEBREW_REPOSITORY`, which is not the prefix**, and getting that wrong
+    /// is why this reads two candidates instead of one. Read from Homebrew's own `bin/brew`:
+    /// the repository starts equal to the prefix and is then re-derived from the `bin/brew`
+    /// symlink target when there is one, after which an x86_64 install forces the prefix back
+    /// to `/usr/local`. On Apple Silicon `bin/brew` is a real file, so repository == prefix ==
+    /// `/opt/homebrew`; on Intel `/usr/local/bin/brew` is a link into `/usr/local/Homebrew`, so
+    /// the Caskroom is at `/usr/local/Caskroom` while the taps are at
+    /// `/usr/local/Homebrew/Library/Taps`. Reading only `<prefix>/Library/Taps` therefore found
+    /// nothing on any Intel Mac — `detect` still worked, so the failure was invisible: the
+    /// short-circuit simply never fired and every sheet paid for a request the clone on disk
+    /// could have answered.
     public static func localTapVersion(prefix: URL) -> String? {
-        let file = prefix
-            .appendingPathComponent("Library/Taps")
-            .appendingPathComponent(tapOwner)
-            .appendingPathComponent(tapRepository)
-            .appendingPathComponent("Casks")
-            .appendingPathComponent("\(cask).rb")
-        guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
-        return declaredVersion(in: text)
+        // The prefix itself first: that is the Apple Silicon layout and the common case.
+        for repository in [prefix, prefix.appendingPathComponent("Homebrew")] {
+            let file = repository
+                .appendingPathComponent("Library/Taps")
+                .appendingPathComponent(tapOwner)
+                .appendingPathComponent(tapRepository)
+                .appendingPathComponent("Casks")
+                .appendingPathComponent("\(cask).rb")
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            if let version = declaredVersion(in: text) { return version }
+        }
+        return nil
     }
 
     /// The version a cask declares, or `nil` for anything this cannot compare.
@@ -119,11 +163,21 @@ public enum CaskOwnership: Equatable, Sendable {
     /// upgrade command with a caveat; a version invented out of an unparseable string could
     /// instead show 「已是 Homebrew 提供的最新版本」 over a real update — the one outcome that
     /// hides a pending upgrade behind a reassuring sentence.
+    ///
+    /// **Split on `isNewline`, not on `"\n"`, or a CRLF cask parses as nothing at all.** Swift
+    /// treats `"\r\n"` as a single grapheme cluster, so it is one `Character` that is not equal
+    /// to `"\n"` — measured, `split(separator: "\n")` returns the whole file as one piece for a
+    /// CRLF cask, which does not begin with `version ` and yields `nil`, while Rust's
+    /// `str::lines()` splits it correctly and returns the version. That made the two parsers
+    /// disagree on the same bytes, against the claim above, for any clone checked out with
+    /// `core.autocrlf` set or a `.gitattributes` asking for CRLF. `.whitespacesAndNewlines` for
+    /// the trim rather than `.whitespaces`, which excludes CR and would leave one behind.
     static func declaredVersion(in cask: String) -> String? {
-        for line in cask.split(separator: "\n", omittingEmptySubsequences: false) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+        for line in cask.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard trimmed.hasPrefix("version ") else { continue }
-            let rest = trimmed.dropFirst("version ".count).trimmingCharacters(in: .whitespaces)
+            let rest = trimmed.dropFirst("version ".count)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             guard rest.hasPrefix("\""), let literal = rest.dropFirst().split(
                 separator: "\"", omittingEmptySubsequences: false).first else { return nil }
             let candidate = String(literal)
@@ -133,15 +187,24 @@ public enum CaskOwnership: Equatable, Sendable {
     }
 }
 
-/// What `gitpic update cask --json` reports.///
+/// What `gitpic update cask --json` reports.
+///
 /// A `Decodable` mirror of `release.rs`'s `TapCask`, and its field spellings are a contract
 /// between the two in the same way `UpdateReport`'s are. All three are single words, so unlike
-/// `UpdateReport` there is nothing here for `CodingKeys` to translate.
+/// `UpdateReport` there is nothing here for `CodingKeys` to translate. `theWireShapeIsAContract`
+/// decodes a canned payload so that renaming a field on either side fails a test rather than
+/// silently turning every Homebrew answer into a caveat.
 ///
 /// `version` is `nil` for a cask that was *read* and declares nothing comparable. A thrown
 /// error is the other way the answer can be missing: the cask was not read at all. Those are
 /// different facts that happen to have the same consequence, so nothing here merges them —
 /// the caller decides once, in one place.
+///
+/// `cask` echoes the token the CLI looked up. Nothing reads it today: ownership is established
+/// by `detect`, which finds a `Caskroom/<token>/` directory and so already knows the token,
+/// and taking the command's token from the *tap's* reply instead would name a cask this machine
+/// may not have installed. It is decoded rather than dropped because it is what makes the
+/// reply self-describing in a log, and `theWireShapeIsAContract` pins it.
 public struct TapCask: Decodable, Equatable, Sendable {
     public let ok: Bool
     public let cask: String
@@ -211,15 +274,34 @@ extension CaskOwnership {
         do {
             let tap = try await askTap()
             guard let version = tap.version else {
+                Diagnostics.log(
+                    "tap: cask \(tap.cask) was read but declares no comparable version")
                 return .homebrews(
                     cask: install.cask,
                     offers: .unknown(reason: "Homebrew 的 cask 里没有可比较的版本号"))
             }
             return .homebrews(cask: install.cask, offers: .version(version))
         } catch {
+            // Logged here because the caption above deliberately says nothing specific, and
+            // that made six different failures — no runner, a 10 s timeout, a rate limit, a 404
+            // on the cask path, undecodable output, a CLI too old to have the subcommand —
+            // produce byte-identical output with nothing left to diagnose from. The caption
+            // stays constant; the cause goes on the record.
+            Diagnostics.log("tap: could not read what Homebrew offers — "
+                            + Self.describe(error))
             return .homebrews(
                 cask: install.cask,
                 offers: .unknown(reason: "暂时读不到 Homebrew 提供的版本"))
         }
+    }
+
+    /// The thrown error as one line for the log, preferring `RunFailure`'s own wording.
+    ///
+    /// `RunFailure.message` is written for a label in the window, which is exactly the level of
+    /// detail a maintainer reading the log wants too — and it is the only rendering that does
+    /// not print Swift syntax. Anything else falls back to `String(describing:)`, which is what
+    /// the rest of this app logs for an unknown error.
+    private static func describe(_ error: Error) -> String {
+        (error as? RunFailure)?.message ?? String(describing: error)
     }
 }
