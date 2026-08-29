@@ -60,32 +60,33 @@ is now **load-bearing rather than a courtesy**: the app's update sheet hands tha
 every Homebrew user instead of installing anything itself, and GitPic is `.accessory`, so brew's
 reopen is the only thing that puts the menu-bar icon back.
 
-**`auto_updates true` is on its way out, and the order matters.** It asserts that the artifact
-updates itself, which stopped being true of a cask-managed copy when `SelfUpdate.route` began
-deferring to brew for those bundles. Remove it *after* the app that defers is released, never
-before: an `auto_updates`-free cask against an older app leaves brew's receipt comparison and the
-app's installer both writing `/Applications/GitPic.app`.
+**The cask intentionally does not declare `auto_updates true`. Do not add it back.** It was
+removed only after 0.20.10 — the first version whose `SelfUpdate.route` defers every cask-managed
+bundle to brew — was published and the tap's 0.20.10 version and SHA-256 were verified against the
+release. The order mattered: removing it before the app policy changed would have left brew's
+receipt comparison and the old app installer both writing `/Applications/GitPic.app`. Now the
+stanza would be a false assertion that the artifact updates itself, while plain receipt comparison
+is the behaviour the cask wants.
 
-Two things about that stanza are worth recording, because both were stated wrongly here before:
+Two details explain why the absence is deliberate:
 
-- **It never governed the command the app prints.** `brew upgrade --cask gitpic` names the cask
-  explicitly, and `Cask::Upgrade` takes the `cask.outdated?(greedy: true)` branch for a named
-  cask (`cask/upgrade.rb:70`), which skips the `auto_updates` comparison entirely and falls
-  through to plain receipt inequality (`cask/cask.rb:442`). The stanza only ever affected a bare
-  `brew upgrade` and `brew outdated`.
+- **The stanza never governed the command the app prints.** `brew upgrade --cask gitpic` names the
+  cask explicitly, and `Cask::Upgrade` takes the `cask.outdated?(greedy: true)` branch for a named
+  cask (`cask/upgrade.rb:70`), which skips the `auto_updates` comparison entirely and falls through
+  to plain receipt inequality (`cask/cask.rb:442`). The stanza affects only bare `brew upgrade` and
+  `brew outdated`.
 - `HOMEBREW_UPGRADE_AUTO_UPDATES_CASKS`, which the old text cited as "defaults on", is marked
   `odeprecated` with `replacement: "the default behaviour"` (`env_config.rb:745-755`). It was a
   knob to point at, and it is going away.
 
-Removing it means brew compares its own receipt again, which is correct once the app no longer
-touches a cask-managed bundle. **One transitional hazard, worth a CHANGELOG line rather than
-code:** a 0.20.9 cask user who self-updated has a bundle ahead of that receipt, so a bare
-`brew upgrade` can reinstall an older tap version over it. The common shape (bundle 0.20.10,
-receipt 0.20.9, tap 0.20.10) is one redundant download that repairs the receipt, not a downgrade;
-a real downgrade needs the bundle to be ahead of the *tap*, which takes skipping a version in-app
-inside the tap's lag window. It closes after one `brew upgrade`. The app itself cannot cause it:
-`route` compares the tap against the installed bundle, so it never prints a command that would
-move backwards.
+Without the stanza, brew compares its receipt again. **One transitional hazard remains for old
+0.20.9 installs, worth a CHANGELOG line rather than code:** a cask user who self-updated has a
+bundle ahead of that receipt, so a bare `brew upgrade` can reinstall an older tap version over it.
+The common shape (bundle 0.20.10, receipt 0.20.9, tap 0.20.10) is one redundant download that
+repairs the receipt, not a downgrade; a real downgrade needs the bundle to be ahead of the *tap*,
+which takes skipping a version in-app inside the tap's lag window. It closes after one
+`brew upgrade`. The app itself cannot cause it: `route` compares the tap against the installed
+bundle, so it never prints a command that would move backwards.
 
 The app-side half of this is `SelfUpdate.route`, `CaskOwnership` and `Updater`, whose headers
 carry the full argument. **The two repositories still have to move together**, just in the other
