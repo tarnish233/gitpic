@@ -1187,6 +1187,16 @@ final class AppModel {
         // one that has to notice, and discard a route it computed from a report the user is no
         // longer looking at. It converges: `checkForUpdates` allows one check at a time, so each
         // extra pass is a real new report and not a spin.
+        //
+        // **This runs inside a task SwiftUI has already cancelled, and the second pass depends
+        // on `GitpicRunner.run` ignoring that.** Moving the generation is exactly what makes
+        // `.task(id:)` tear this task down, so by the time `continue` is reached
+        // `Task.isCancelled` is true. Measured: with a `withTaskCancellationHandler` in `run`,
+        // the first probe is killed mid-flight and the re-query is killed *before it starts*,
+        // because `onCancel` fires immediately on an already-cancelled task — and since
+        // `CaskOwnership.verdict` turns every failure into `Offer.unknown`, the new report
+        // resolved to 「暂时读不到 Homebrew 提供的版本」 instead of a real comparison. The
+        // prohibition is recorded on `run` itself; this is the caller it exists for.
         while true {
             guard let report = update else { return }
             let generation = updateGeneration
