@@ -34,6 +34,7 @@
 //! credential, only against the compile-time base, and never on a redirect.
 
 use crate::error::{AppError, ErrorCode, Result};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -281,12 +282,62 @@ fn best_effort_token() -> Option<String> {
 }
 
 /// One attempt, and enough of its outcome for the caller to decide about a second.
-enum Attempt {
-    Ok(LatestRelease),
+///
+/// Generic over the decoded body because two endpoints share it: the release feed and the
+/// tap's cask file. What is worth sharing is not the request — that part is three headers —
+/// but the retry rule and its third branch; see [`get_json`].
+enum Attempt<T> {
+    Ok(T),
     /// GitHub rejected the credential itself — the one outcome worth retrying anonymously,
     /// because a stale image-host token must not be able to break update checks.
     CredentialRejected,
     Failed(AppError),
+}
+
+/// The client both lookups use: bounded, and structurally unable to carry a credential to
+/// another host.
+///
+/// Nothing either endpoint asks for redirects — `releases/latest` and a contents read both
+/// answer 200 directly — so refusing to follow one costs nothing and makes "the credential
+/// cannot travel" structural rather than a property of whichever reqwest release is linked.
+/// reqwest does strip sensitive headers across hosts on its own; this does not depend on it.
+fn client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(UA)
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| AppError::network(format!("http client: {e}")))
+}
+
+/// One GET carrying the credential, and — only if GitHub refused *the credential* — one more
+/// without it.
+///
+/// Shared rather than written twice because the interesting part is the third branch. An
+/// anonymous retry has no credential left to reject, so that arm is unreachable in practice;
+/// it is still stated instead of `unreachable!()`, because a panic inside a background update
+/// check would be a worse answer than a sentence.
+async fn get_json<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+    what: &str,
+) -> Result<T> {
+    match fetch(client, url, token, what).await {
+        Attempt::Ok(value) => Ok(value),
+        // Anonymous retry, and only from here: the first attempt carried a credential that
+        // GitHub refused, which says nothing about whether the resource is readable.
+        Attempt::CredentialRejected => match fetch(client, url, None, what).await {
+            Attempt::Ok(value) => Ok(value),
+            Attempt::Failed(e) => Err(e),
+            Attempt::CredentialRejected => Err(AppError::new(
+                ErrorCode::General,
+                format!("{what}: GitHub rejected an anonymous request as unauthorised"),
+            )),
+        },
+        Attempt::Failed(e) => Err(e),
+    }
 }
 
 /// The same, against an explicit API base and with an explicit credential.
@@ -302,45 +353,19 @@ enum Attempt {
 /// on CI and fail on any developer who had run `gitpic auth login` — a security assertion
 /// whose verdict depends on the machine is not one.
 async fn check_against(api: &str, token: Option<&str>) -> Result<UpdateReport> {
-    let client = reqwest::Client::builder()
-        .user_agent(UA)
-        .timeout(REQUEST_TIMEOUT)
-        .connect_timeout(CONNECT_TIMEOUT)
-        // Nothing here redirects — `releases/latest` answers 200 directly — so refusing to
-        // follow one costs nothing and makes "the credential cannot travel to another host"
-        // structural rather than a property of whichever reqwest release is linked. reqwest
-        // does strip sensitive headers across hosts on its own; this does not depend on it.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AppError::network(format!("http client: {e}")))?;
-
+    let client = client()?;
     let url = format!("{api}/repos/{RELEASES_REPO}/releases/latest");
-
-    let latest = match fetch(&client, &url, token).await {
-        Attempt::Ok(latest) => latest,
-        // Anonymous retry, and only from here: the first attempt carried a credential that
-        // GitHub refused, which says nothing about whether the release feed is readable.
-        Attempt::CredentialRejected => match fetch(&client, &url, None).await {
-            Attempt::Ok(latest) => latest,
-            Attempt::Failed(e) => return Err(e),
-            // Unreachable in practice — there is no credential left to reject — but stated
-            // rather than `unreachable!()`, because a panic in a background update check
-            // would be a worse answer than an error message.
-            Attempt::CredentialRejected => {
-                return Err(AppError::new(
-                    ErrorCode::General,
-                    "check for updates: GitHub rejected an anonymous request as unauthorised",
-                ))
-            }
-        },
-        Attempt::Failed(e) => return Err(e),
-    };
-
+    let latest: LatestRelease = get_json(&client, &url, token, "check for updates").await?;
     report(CURRENT, latest)
 }
 
 /// One request, decoded, with the credential attached only if there is one.
-async fn fetch(client: &reqwest::Client, url: &str, token: Option<&str>) -> Attempt {
+async fn fetch<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+    what: &str,
+) -> Attempt<T> {
     let mut req = client
         .get(url)
         .header("Accept", "application/vnd.github+json")
@@ -350,7 +375,7 @@ async fn fetch(client: &reqwest::Client, url: &str, token: Option<&str>) -> Atte
     }
     let resp = match req.send().await {
         Ok(resp) => resp,
-        Err(e) => return Attempt::Failed(AppError::network(format!("check for updates: {e}"))),
+        Err(e) => return Attempt::Failed(AppError::network(format!("{what}: {e}"))),
     };
 
     let status = resp.status();
@@ -366,12 +391,117 @@ async fn fetch(client: &reqwest::Client, url: &str, token: Option<&str>) -> Atte
         let body = resp.text().await.unwrap_or_default();
         return Attempt::Failed(status_error(status, &headers, &body));
     }
-    match resp.json::<LatestRelease>().await {
-        Ok(latest) => Attempt::Ok(latest),
-        Err(e) => Attempt::Failed(AppError::network(format!(
-            "check for updates: unreadable reply: {e}"
-        ))),
+    match resp.json::<T>().await {
+        Ok(value) => Attempt::Ok(value),
+        Err(e) => Attempt::Failed(AppError::network(format!("{what}: unreadable reply: {e}"))),
     }
+}
+
+/// Where the Homebrew cask that installs GitPic is defined.
+///
+/// A constant for the same reason [`RELEASES_REPO`] is one, and the reason bites harder here:
+/// the version this reads is shown in GitPic's update sheet *next to a command the user is
+/// being told to type into a terminal*. A settable origin would be a way to put an attacker's
+/// version string — and with it an attacker's argument for running something — in front of the
+/// user inside GitPic's own window.
+const TAP_REPO: &str = "tarnish233/homebrew-tap";
+/// The cask, not the formula: this answers "what would `brew upgrade --cask gitpic` install".
+const TAP_CASK_PATH: &str = "Casks/gitpic.rb";
+
+/// The cask and the formula the tap defines.
+///
+/// Here rather than beside the code that prints them, because they are one fact with two
+/// readers — [`crate::install_source`] names them in an upgrade command and builds a Caskroom
+/// path out of the cask token, and [`tap_cask`] echoes it back to the app so the app does not
+/// spell it a third time. They are separate installs, and `brew upgrade` on the wrong one
+/// reports "no available formula".
+pub(crate) const CASK: &str = "gitpic";
+pub(crate) const FORMULA: &str = "gitpic_cli";
+
+/// What the tap's cask currently declares.
+///
+/// Separate from [`UpdateReport`] and from a separate request on purpose: this costs a round
+/// trip that only a Homebrew-managed install has any use for, and folding it into
+/// `update check` would spend it on every check for everybody.
+#[derive(Debug, Serialize)]
+pub struct TapCask {
+    pub ok: bool,
+    /// Echoed so the caller can build `brew upgrade --cask <token>` without hardcoding it.
+    pub cask: String,
+    /// `null` when the file was read but declares no version this can compare — see
+    /// [`cask_version`]. Distinct from an error, which means the file was not read at all;
+    /// both leave the app unable to tell, so both send it to the same outcome.
+    pub version: Option<String>,
+}
+
+/// The Contents API reply, narrowed to what this reads.
+#[derive(Deserialize)]
+struct ContentsFile {
+    content: String,
+    encoding: String,
+}
+
+/// Ask the tap what version its cask declares.
+pub async fn tap_cask() -> Result<TapCask> {
+    tap_cask_against(API, best_effort_token().as_deref()).await
+}
+
+/// The same, against an explicit API base and credential — the seam every test uses, for the
+/// reasons on [`check_against`].
+async fn tap_cask_against(api: &str, token: Option<&str>) -> Result<TapCask> {
+    let client = client()?;
+    let url = format!("{api}/repos/{TAP_REPO}/contents/{TAP_CASK_PATH}");
+    let what = "read the Homebrew tap";
+    let file: ContentsFile = get_json(&client, &url, token, what).await?;
+
+    // GitHub sends `encoding: "none"` for a file too large to inline. A cask is a few
+    // kilobytes so this should not happen, and saying so beats decoding an empty string into
+    // "the tap declares nothing".
+    if file.encoding != "base64" {
+        return Err(AppError::general(format!(
+            "{what}: the cask came back {}-encoded, which this cannot read",
+            file.encoding
+        )));
+    }
+    // The Contents API wraps its base64 at column 60, and the decoder rejects the newlines.
+    let packed: String = file
+        .content
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&packed)
+        .map_err(|e| AppError::general(format!("{what}: the cask is not readable base64: {e}")))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|e| AppError::general(format!("{what}: the cask is not UTF-8: {e}")))?;
+
+    Ok(TapCask {
+        ok: true,
+        cask: CASK.to_string(),
+        version: cask_version(&text).map(str::to_string),
+    })
+}
+
+/// The version a cask declares, or `None`.
+///
+/// Deliberately not a Ruby parser: it takes the first `version` stanza that is a plain quoted
+/// literal parsing as three numbers, and answers `None` for everything else — an
+/// interpolation, `version :latest`, or Homebrew's comma-separated `version "1.2,345"` form
+/// (`Cask#version.csv`).
+///
+/// `None` is the safe answer and a guess is not. It reaches the app as "could not tell", which
+/// shows the upgrade command with a caveat; a version invented out of an unparseable string
+/// could instead show 「已是 Homebrew 提供的最新版本」 over a real update, which is the one
+/// outcome that hides a pending upgrade behind a reassuring sentence.
+fn cask_version(cask: &str) -> Option<&str> {
+    for line in cask.lines() {
+        let Some(rest) = line.trim().strip_prefix("version ") else {
+            continue;
+        };
+        let literal = rest.trim().strip_prefix('"')?.split('"').next()?;
+        return Version::parse(literal).map(|_| literal);
+    }
+    None
 }
 
 /// Turn a fetched release into the report, or explain why it cannot be compared.
@@ -804,13 +934,102 @@ mod tests {
         595..=600
     }
 
-    /// The update feed is fixed at compile time. A config key or an environment variable
-    /// here would let something else choose the repository whose release notes get
-    /// rendered inside GitPic's window.
+    /// Both origins are fixed at compile time. A config key or an environment variable here
+    /// would let something else choose the repository whose release notes get rendered inside
+    /// GitPic's window — and, for the tap, the version string shown beside a command the user
+    /// is being told to run.
     #[test]
     fn the_release_feed_is_a_compile_time_constant() {
         assert_eq!(RELEASES_REPO, "tarnish233/gitpic");
+        assert_eq!(TAP_REPO, "tarnish233/homebrew-tap");
+        assert_eq!(TAP_CASK_PATH, "Casks/gitpic.rb");
         assert!(API.starts_with("https://"));
+    }
+
+    /// Not a Ruby parser, and the rows that matter are the refusals. A csv version is a real
+    /// Homebrew spelling (`Cask#version.csv`) and comparing against `"1.2,345"` as though it
+    /// were a version would let the app claim 「已是最新」 over a pending upgrade.
+    #[test]
+    fn a_cask_version_is_read_only_when_it_is_plainly_comparable() {
+        assert_eq!(
+            cask_version("cask \"gitpic\" do\n  version \"0.20.9\"\n"),
+            Some("0.20.9")
+        );
+        // Whatever else is in the file, including a comment that mentions the word.
+        assert_eq!(
+            cask_version("# the version below is rewritten by the tap\n  version \"1.2.3\"\nend"),
+            Some("1.2.3")
+        );
+        for refused in [
+            "  version \"1.2,345\"\n",     // csv — two fields, not a version
+            "  version :latest\n",         // a symbol, not a literal
+            "  version \"#{ENV['V']}\"\n", // interpolated
+            "  version \"0.20\"\n",        // not three components
+            "  version \"0.20.0-rc1\"\n",  // prerelease, which `Version` refuses
+            "cask \"gitpic\" do\nend\n",   // no stanza at all
+            "",
+        ] {
+            assert_eq!(cask_version(refused), None, "{refused:?}");
+        }
+    }
+
+    /// The happy path, against the wire shape GitHub actually sends: base64 **wrapped**, which
+    /// the decoder rejects until the whitespace is stripped. Encoding it unwrapped here would
+    /// have tested a reply this code never receives.
+    #[tokio::test]
+    async fn reads_the_version_the_tap_declares() {
+        let cask = "cask \"gitpic\" do\n  version \"9.9.9\"\n  sha256 \"ab\"\nend\n";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(cask);
+        let mid = encoded.len() / 2;
+        let wrapped = format!("{}\\n{}", &encoded[..mid], &encoded[mid..]);
+        let body = format!(r#"{{"content":"{wrapped}","encoding":"base64"}}"#);
+        let (addr, served) = crate::testutil::stub(vec![crate::testutil::http("200 OK", &body)]);
+
+        let out = tap_cask_against(&addr, None).await.unwrap();
+        assert!(out.ok);
+        assert_eq!(out.version.as_deref(), Some("9.9.9"));
+        assert_eq!(out.cask, CASK);
+
+        let req = served.join().unwrap().remove(0);
+        assert!(
+            req.contains(&format!("GET /repos/{TAP_REPO}/contents/{TAP_CASK_PATH}")),
+            "unexpected request: {req}"
+        );
+        assert!(
+            !req.to_lowercase().contains("authorization:"),
+            "no credential was given, so none may be sent: {req}"
+        );
+    }
+
+    /// A cask that parsed but says nothing comparable is `version: null` and **not** an error:
+    /// the file was read. The app treats both as "could not tell", but conflating them here
+    /// would report a network failure that did not happen.
+    #[tokio::test]
+    async fn an_uncomparable_cask_is_read_as_no_version_rather_than_an_error() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode("  version \"1.2,345\"\n");
+        let body = format!(r#"{{"content":"{encoded}","encoding":"base64"}}"#);
+        let (addr, served) = crate::testutil::stub(vec![crate::testutil::http("200 OK", &body)]);
+
+        let out = tap_cask_against(&addr, None).await.unwrap();
+        assert!(out.ok);
+        assert_eq!(out.version, None);
+        served.join().unwrap();
+    }
+
+    /// GitHub sends `encoding: "none"` for a file too large to inline. A cask is kilobytes so
+    /// this should not happen — and if it does, decoding an empty string into "the tap declares
+    /// nothing" would be a silent wrong answer where an error is the honest one.
+    #[tokio::test]
+    async fn an_unexpected_encoding_is_an_error_and_not_an_empty_version() {
+        let body = r#"{"content":"","encoding":"none"}"#;
+        let (addr, served) = crate::testutil::stub(vec![crate::testutil::http("200 OK", body)]);
+
+        let err = tap_cask_against(&addr, None).await.unwrap_err();
+        assert!(
+            err.to_string().contains("none-encoded"),
+            "should name the encoding it could not read: {err}"
+        );
+        served.join().unwrap();
     }
 
     /// The same rule as `UpdateCheck.summary` in `GitPicCore`, and the same two near-misses
