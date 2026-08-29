@@ -40,10 +40,37 @@ use std::path::{Path, PathBuf};
 /// app — see [`crate::release::CASK`].
 use crate::release::{CASK, FORMULA};
 
-/// The two prefixes an Apple Silicon and an Intel Homebrew use. Independent installations with
-/// independent Caskrooms, so both are searched rather than one being derived from the other.
+/// The prefixes an Apple Silicon and an Intel Homebrew use, plus `HOMEBREW_PREFIX` when it is
+/// set. The first two are independent installations with independent Caskrooms, so both are
+/// searched rather than one being derived from the other.
+///
+/// `HOMEBREW_PREFIX` matters much more here than it does to the app: `brew shellenv` exports it,
+/// so a terminal that can run `brew` at a non-default prefix almost always has it, whereas a
+/// Finder-launched bundle has never sourced anything.
 fn default_prefixes() -> Vec<PathBuf> {
-    vec![PathBuf::from("/opt/homebrew"), PathBuf::from("/usr/local")]
+    let mut prefixes = vec![PathBuf::from("/opt/homebrew"), PathBuf::from("/usr/local")];
+    if let Some(declared) = std::env::var_os("HOMEBREW_PREFIX") {
+        let declared = PathBuf::from(declared);
+        if declared.is_absolute() && !prefixes.contains(&declared) {
+            prefixes.push(declared);
+        }
+    }
+    prefixes
+}
+
+/// Where `cargo install` puts a binary for the user running this one: `CARGO_HOME` if set,
+/// otherwise `~/.cargo`.
+///
+/// Read at runtime and not baked in, because the question is where *this* file sits, and the
+/// answer that matters is the one `cargo install --force` would write to now.
+fn cargo_root() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("CARGO_HOME") {
+        let home = PathBuf::from(home);
+        if home.is_absolute() {
+            return Some(home);
+        }
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo"))
 }
 
 /// How this copy of `gitpic` was installed.
@@ -94,7 +121,7 @@ impl InstallSource {
 /// [`InstallSource::Unknown`] rather than guessing when the path cannot be resolved at all.
 pub fn detect() -> InstallSource {
     match std::env::current_exe().and_then(|p| p.canonicalize()) {
-        Ok(exe) => classify(&exe, &default_prefixes()),
+        Ok(exe) => classify(&exe, &default_prefixes(), cargo_root().as_deref()),
         Err(_) => InstallSource::Unknown,
     }
 }
@@ -105,7 +132,17 @@ pub fn detect() -> InstallSource {
 /// arbitrary: an app bundle is checked first because a cask's bundle sits in an Applications
 /// directory with no Cellar above it, while a Cellar path never contains a bundle, so only the
 /// bundle case needs the Caskroom lookup to refine it.
-fn classify(exe: &Path, prefixes: &[PathBuf]) -> InstallSource {
+///
+/// **Both remaining tests are anchored to a root, and were not.** They asked whether `Cellar` or
+/// `.cargo` appeared *anywhere* in the path, which is true of `/Users/x/Cellar/gitpic`, of an
+/// unpacked tarball or restored backup under a directory somebody happened to name `Cellar`, and
+/// of `~/backup/.cargo/bin/gitpic`. Each then printed a command that fails — `brew upgrade
+/// gitpic_cli` answers "No available formula with the name", and the cargo line would rebuild a
+/// different binary than the one running. That is the mistake the module header says the old
+/// two-command note existed to avoid, and an unanchored match printed it with confidence rather
+/// than offering it as one of two. A path under no root this machine actually installs into is
+/// [`InstallSource::Unknown`], which points at the page.
+fn classify(exe: &Path, prefixes: &[PathBuf], cargo_root: Option<&Path>) -> InstallSource {
     if let Some(bundle) = app_bundle(exe) {
         return if cask_owns(bundle, prefixes) {
             InstallSource::CaskApp
@@ -113,14 +150,13 @@ fn classify(exe: &Path, prefixes: &[PathBuf]) -> InstallSource {
             InstallSource::App
         };
     }
-    let components: Vec<_> = exe.components().map(|c| c.as_os_str()).collect();
-    if components.iter().any(|c| *c == "Cellar") {
+    if prefixes
+        .iter()
+        .any(|prefix| exe.starts_with(prefix.join("Cellar")))
+    {
         return InstallSource::Formula;
     }
-    // `CARGO_HOME` can move this, in which case the answer is `Unknown` and the page gets
-    // printed. Reading the variable would be guessing about the environment of whoever built
-    // the binary, not the one running it.
-    if components.iter().any(|c| *c == ".cargo") {
+    if cargo_root.is_some_and(|root| exe.starts_with(root)) {
         return InstallSource::Cargo;
     }
     InstallSource::Unknown
@@ -163,15 +199,30 @@ mod tests {
     /// The case the un-canonicalised version gets wrong, stated as a path table. Each row is a
     /// real shape: the cask's symlink target, the formula's Cellar file, a cargo bin, a build
     /// directory.
+    ///
+    /// **The bundle rows are scanned against a prefix that does not exist, and that is not
+    /// laziness.** `cask_owns` touches the filesystem, so handing these rows the real Homebrew
+    /// prefixes makes the answer depend on the machine: on a developer's Mac that has the cask
+    /// installed, `/Applications/GitPic.app` is genuinely `CaskApp` and the row asserting `App`
+    /// fails — measured, exactly that way round. Ownership is covered on a synthesized tree in
+    /// `a_caskroom_link_is_what_makes_a_bundle_the_casks` instead. The non-bundle rows use the
+    /// real prefixes freely, because `starts_with` is path arithmetic and reads no disk.
     #[test]
     fn paths_map_to_the_source_that_installed_them() {
-        // No Caskroom in these prefixes, so a bundle is a hand-installed one.
-        let none = vec![PathBuf::from("/nonexistent-prefix")];
-        for (path, want) in [
-            (
-                "/Applications/GitPic.app/Contents/Resources/gitpic",
+        let unowned = vec![PathBuf::from("/nonexistent-prefix")];
+        let brews = vec![PathBuf::from("/opt/homebrew"), PathBuf::from("/usr/local")];
+        let cargo = PathBuf::from("/Users/x/.cargo");
+        for path in [
+            "/Applications/GitPic.app/Contents/Resources/gitpic",
+            "/Users/x/Applications/GitPic.app/Contents/Resources/gitpic",
+        ] {
+            assert_eq!(
+                classify(Path::new(path), &unowned, Some(&cargo)),
                 InstallSource::App,
-            ),
+                "{path}"
+            );
+        }
+        for (path, want) in [
             (
                 "/opt/homebrew/Cellar/gitpic_cli/0.20.9/bin/gitpic",
                 InstallSource::Formula,
@@ -187,7 +238,38 @@ mod tests {
             ),
             ("/usr/local/bin/gitpic", InstallSource::Unknown),
         ] {
-            assert_eq!(classify(Path::new(path), &none), want, "{path}");
+            assert_eq!(
+                classify(Path::new(path), &brews, Some(&cargo)),
+                want,
+                "{path}"
+            );
+        }
+    }
+
+    /// `Cellar` and `.cargo` are only meaningful *under a root this machine installs into*, and
+    /// an unanchored component match said otherwise. Every row here is a path that names one of
+    /// those words while belonging to neither — a directory somebody called `Cellar`, a restored
+    /// backup holding a `.cargo`, a Homebrew at a prefix this machine does not have — and each
+    /// would otherwise be handed a command that fails rather than the release page.
+    #[test]
+    fn a_familiar_word_in_the_path_is_not_evidence_of_an_installer() {
+        let brews = vec![PathBuf::from("/opt/homebrew")];
+        let cargo = PathBuf::from("/Users/x/.cargo");
+        for path in [
+            // `brew upgrade gitpic_cli` here answers "No available formula with the name".
+            "/Users/x/Cellar/gitpic",
+            "/Users/x/Downloads/Cellar/gitpic_cli/0.20.9/bin/gitpic",
+            // A different Homebrew's Cellar, which this machine cannot upgrade from.
+            "/usr/local/Cellar/gitpic_cli/0.20.9/bin/gitpic",
+            // Copied out of a backup: `cargo install --force` would replace a *different* file.
+            "/Users/x/backup/.cargo/bin/gitpic",
+            "/Users/y/.cargo/bin/gitpic",
+        ] {
+            assert_eq!(
+                classify(Path::new(path), &brews, Some(&cargo)),
+                InstallSource::Unknown,
+                "{path}"
+            );
         }
     }
 
@@ -201,7 +283,7 @@ mod tests {
             "/Users/x/Apps/GitPic.app/Contents/Resources/gitpic",
         ] {
             assert_eq!(
-                classify(Path::new(path), &none),
+                classify(Path::new(path), &none, None),
                 InstallSource::App,
                 "{path}"
             );
@@ -215,6 +297,10 @@ mod tests {
     #[test]
     fn a_caskroom_link_is_what_makes_a_bundle_the_casks() {
         let root = std::env::temp_dir().join(format!("gitpic-src-{}", std::process::id()));
+        // Cleared going in as well as coming out: the name reuses the pid, and the cleanup at
+        // the end is skipped when an assertion panics, so a failed run would otherwise leave a
+        // tree that makes the *next* run fail somewhere unrelated.
+        std::fs::remove_dir_all(&root).ok();
         let bundle = root.join("Applications/GitPic.app");
         let exe = bundle.join("Contents/Resources/gitpic");
         let caskroom = root.join("prefix/Caskroom/gitpic/0.20.9");
@@ -226,17 +312,17 @@ mod tests {
         // `classify` needs a canonical path, which is what `detect` hands it.
         let exe = exe.canonicalize().unwrap();
         let bundle = bundle.canonicalize().unwrap();
-        assert_eq!(classify(&exe, &prefixes), InstallSource::App);
+        assert_eq!(classify(&exe, &prefixes, None), InstallSource::App);
 
         std::os::unix::fs::symlink(&bundle, caskroom.join("GitPic.app")).unwrap();
-        assert_eq!(classify(&exe, &prefixes), InstallSource::CaskApp);
+        assert_eq!(classify(&exe, &prefixes, None), InstallSource::CaskApp);
 
         // A link that points somewhere else is not evidence about this bundle.
         std::fs::remove_file(caskroom.join("GitPic.app")).unwrap();
         let other = root.join("Applications/Other.app");
         std::fs::create_dir_all(&other).unwrap();
         std::os::unix::fs::symlink(&other, caskroom.join("GitPic.app")).unwrap();
-        assert_eq!(classify(&exe, &prefixes), InstallSource::App);
+        assert_eq!(classify(&exe, &prefixes, None), InstallSource::App);
 
         std::fs::remove_dir_all(&root).ok();
     }

@@ -318,17 +318,35 @@ fn client() -> Result<reqwest::Client> {
 /// anonymous retry has no credential left to reject, so that arm is unreachable in practice;
 /// it is still stated instead of `unreachable!()`, because a panic inside a background update
 /// check would be a worse answer than a sentence.
+/// What a request was for, carried far enough down to describe its own failures.
+///
+/// Both fields used to be constants inside `status_error`, which was written when this module
+/// had one endpoint. Generalising the client for the tap lookup left them behind, so a 404 on
+/// `Casks/gitpic.rb` reported `tarnish233/gitpic has published no releases yet` — wrong
+/// repository, wrong resource, wrong failure, from a command that never touched the release
+/// feed. Every arm now names the endpoint it actually failed on, which is what makes one log
+/// line enough to tell "the tap moved" from "GitHub is down".
+#[derive(Clone, Copy)]
+struct Endpoint<'a> {
+    /// What the caller was doing, in the imperative: "check for updates".
+    what: &'a str,
+    /// What a 404 means *here*, as a whole sentence. A missing release feed and a missing cask
+    /// file are different facts and neither is worth guessing from a status code alone.
+    missing: &'a str,
+}
+
 async fn get_json<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     url: &str,
     token: Option<&str>,
-    what: &str,
+    endpoint: Endpoint<'_>,
 ) -> Result<T> {
-    match fetch(client, url, token, what).await {
+    let what = endpoint.what;
+    match fetch(client, url, token, endpoint).await {
         Attempt::Ok(value) => Ok(value),
         // Anonymous retry, and only from here: the first attempt carried a credential that
         // GitHub refused, which says nothing about whether the resource is readable.
-        Attempt::CredentialRejected => match fetch(client, url, None, what).await {
+        Attempt::CredentialRejected => match fetch(client, url, None, endpoint).await {
             Attempt::Ok(value) => Ok(value),
             Attempt::Failed(e) => Err(e),
             Attempt::CredentialRejected => Err(AppError::new(
@@ -355,7 +373,16 @@ async fn get_json<T: serde::de::DeserializeOwned>(
 async fn check_against(api: &str, token: Option<&str>) -> Result<UpdateReport> {
     let client = client()?;
     let url = format!("{api}/repos/{RELEASES_REPO}/releases/latest");
-    let latest: LatestRelease = get_json(&client, &url, token, "check for updates").await?;
+    let latest: LatestRelease = get_json(
+        &client,
+        &url,
+        token,
+        Endpoint {
+            what: "check for updates",
+            missing: &format!("{RELEASES_REPO} has published no releases yet"),
+        },
+    )
+    .await?;
     report(CURRENT, latest)
 }
 
@@ -364,8 +391,9 @@ async fn fetch<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     url: &str,
     token: Option<&str>,
-    what: &str,
+    endpoint: Endpoint<'_>,
 ) -> Attempt<T> {
+    let what = endpoint.what;
     let mut req = client
         .get(url)
         .header("Accept", "application/vnd.github+json")
@@ -389,7 +417,7 @@ async fn fetch<T: serde::de::DeserializeOwned>(
         // `AppError::with_retry_hint` existed unused for want of a number.
         let headers = resp.headers().clone();
         let body = resp.text().await.unwrap_or_default();
-        return Attempt::Failed(status_error(status, &headers, &body));
+        return Attempt::Failed(status_error(status, &headers, &body, endpoint));
     }
     match resp.json::<T>().await {
         Ok(value) => Attempt::Ok(value),
@@ -452,7 +480,19 @@ async fn tap_cask_against(api: &str, token: Option<&str>) -> Result<TapCask> {
     let client = client()?;
     let url = format!("{api}/repos/{TAP_REPO}/contents/{TAP_CASK_PATH}");
     let what = "read the Homebrew tap";
-    let file: ContentsFile = get_json(&client, &url, token, what).await?;
+    let file: ContentsFile = get_json(
+        &client,
+        &url,
+        token,
+        Endpoint {
+            what,
+            // The likeliest 404 by far, and the one worth naming: Homebrew moved third-party
+            // casks into sharded directories (`Casks/g/gitpic.rb`), so a tap that follows suit
+            // makes this path vanish while the repository stays perfectly readable.
+            missing: &format!("{TAP_REPO} has no {TAP_CASK_PATH}"),
+        },
+    )
+    .await?;
 
     // GitHub sends `encoding: "none"` for a file too large to inline. A cask is a few
     // kilobytes so this should not happen, and saying so beats decoding an empty string into
@@ -619,26 +659,25 @@ fn status_error(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
     body: &str,
+    endpoint: Endpoint<'_>,
 ) -> AppError {
+    let Endpoint { what, missing } = endpoint;
     let code = status.as_u16();
     match code {
-        404 => AppError::new(
-            ErrorCode::RemoteNotFound,
-            format!("{RELEASES_REPO} has published no releases yet"),
-        ),
+        404 => AppError::new(ErrorCode::RemoteNotFound, missing.to_string()),
         // Reachable only when the anonymous retry is itself refused as unauthorised, since a
         // rejected credential is retried without one before it gets here. Named honestly
         // rather than folded into `General`: 401 has exactly one meaning.
         401 => AppError::new(
             ErrorCode::AuthFailed,
-            "check for updates: GitHub rejected the request as unauthorised".to_string(),
+            format!("{what}: GitHub rejected the request as unauthorised"),
         ),
         // Unauthenticated api.github.com allows 60 requests an hour per address. One
         // daily check cannot reach that alone, but it shares the quota with everything
         // else on the network, so this is a state real users will meet.
         _ if is_rate_limited(code, headers, body) => AppError::new(
             ErrorCode::RateLimited,
-            "GitHub rate-limited the update check; try again later".to_string(),
+            format!("GitHub rate-limited the request to {what}; try again later"),
         )
         .with_retry_hint(retry_after_secs(headers)),
         // A 403 that is not a rate limit. Named as itself rather than dressed up as one:
@@ -646,7 +685,7 @@ fn status_error(
         // "try again later" leaves nothing to act on.
         403 => AppError::new(
             ErrorCode::General,
-            format!("check for updates: GitHub refused the request (403){}", {
+            format!("{what}: GitHub refused the request (403){}", {
                 let detail = body.trim();
                 if detail.is_empty() {
                     String::new()
@@ -657,7 +696,7 @@ fn status_error(
         ),
         _ => AppError::new(
             ErrorCode::General,
-            format!("check for updates: GitHub returned {status}"),
+            format!("{what}: GitHub returned {status}"),
         ),
     }
 }
@@ -791,21 +830,34 @@ mod tests {
         map
     }
 
+    /// The endpoint every `status_error` row below is asked about.
+    ///
+    /// One fixture rather than the real constants, so these rows assert the *mapping* from
+    /// status to `ErrorCode` and not the wording of either endpoint. What the wording has to do
+    /// is stay attached to its own endpoint, which is what
+    /// `a_tap_failure_does_not_describe_the_release_feed` pins.
+    fn probe() -> Endpoint<'static> {
+        Endpoint {
+            what: "do the thing",
+            missing: "the thing is not there",
+        }
+    }
+
     #[test]
     fn statuses_map_to_the_codes_a_caller_can_act_on() {
         use reqwest::StatusCode;
         let none = headers(&[]);
         assert_eq!(
-            status_error(StatusCode::NOT_FOUND, &none, "").code,
+            status_error(StatusCode::NOT_FOUND, &none, "", probe()).code,
             ErrorCode::RemoteNotFound
         );
         assert_eq!(
-            status_error(StatusCode::INTERNAL_SERVER_ERROR, &none, "").code,
+            status_error(StatusCode::INTERNAL_SERVER_ERROR, &none, "", probe()).code,
             ErrorCode::General
         );
         // 429 is a rate limit whatever else it carries.
         assert_eq!(
-            status_error(StatusCode::TOO_MANY_REQUESTS, &none, "").code,
+            status_error(StatusCode::TOO_MANY_REQUESTS, &none, "", probe()).code,
             ErrorCode::RateLimited
         );
     }
@@ -823,6 +875,7 @@ mod tests {
             reqwest::StatusCode::FORBIDDEN,
             &headers(&[]),
             "Request forbidden by administrative rules",
+            probe(),
         );
         assert_eq!(err.code, ErrorCode::General, "{}", err.message);
         assert!(
@@ -861,7 +914,7 @@ mod tests {
             ),
         ];
         for (what, hdrs, body) in cases {
-            let err = status_error(reqwest::StatusCode::FORBIDDEN, &hdrs, body);
+            let err = status_error(reqwest::StatusCode::FORBIDDEN, &hdrs, body, probe());
             assert_eq!(err.code, ErrorCode::RateLimited, "{what}: {}", err.message);
         }
     }
@@ -874,6 +927,7 @@ mod tests {
             reqwest::StatusCode::FORBIDDEN,
             &headers(&[("retry-after", "90")]),
             "",
+            probe(),
         );
         assert!(
             err.message.contains("retry after 90s"),
@@ -894,6 +948,7 @@ mod tests {
                 ("x-ratelimit-reset", &soon.to_string()),
             ]),
             "",
+            probe(),
         );
         assert_eq!(err.code, ErrorCode::RateLimited);
         let secs: u64 = err
@@ -919,6 +974,7 @@ mod tests {
                 ("x-ratelimit-reset", "1000000000"),
             ]),
             "",
+            probe(),
         );
         assert_eq!(err.code, ErrorCode::RateLimited);
         assert!(
@@ -944,6 +1000,49 @@ mod tests {
         assert_eq!(TAP_REPO, "tarnish233/homebrew-tap");
         assert_eq!(TAP_CASK_PATH, "Casks/gitpic.rb");
         assert!(API.starts_with("https://"));
+    }
+
+    /// Two endpoints share one client, so each has to describe its own failures.
+    ///
+    /// `status_error` was written when this module had a single endpoint and hardcoded the
+    /// release feed into three of its arms. Generalising the client for the tap lookup left them
+    /// alone, so a 404 on the cask reported that `tarnish233/gitpic has published no releases
+    /// yet` — the wrong repository and the wrong resource, from a command that never touched the
+    /// release feed — and a consumer branching on `RemoteNotFound` for the feed started
+    /// receiving it from the tap as well.
+    #[test]
+    fn a_tap_failure_does_not_describe_the_release_feed() {
+        let none = headers(&[]);
+        let tap = Endpoint {
+            what: "read the Homebrew tap",
+            missing: &format!("{TAP_REPO} has no {TAP_CASK_PATH}"),
+        };
+        let missing = status_error(reqwest::StatusCode::NOT_FOUND, &none, "", tap);
+        assert_eq!(missing.code, ErrorCode::RemoteNotFound);
+        assert!(
+            missing.message.contains(TAP_REPO) && missing.message.contains(TAP_CASK_PATH),
+            "a 404 has to name the file that is missing: {}",
+            missing.message
+        );
+        assert!(
+            !missing.message.contains(RELEASES_REPO),
+            "and must not name the release feed: {}",
+            missing.message
+        );
+        // The same for every other arm: they all used to say "check for updates".
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            let err = status_error(status, &none, "", tap);
+            assert!(
+                !err.message.contains("check for updates"),
+                "{status} still blames the update check: {}",
+                err.message
+            );
+        }
     }
 
     /// Not a Ruby parser, and the rows that matter are the refusals. A csv version is a real

@@ -451,6 +451,7 @@ mod tests {
             vec!["branches"],
             vec!["paste"],
             vec!["update", "check"],
+            vec!["update", "cask"],
         ] {
             for global in [vec!["--json"], vec!["-q"], vec!["-vv"]] {
                 let mut argv = vec!["gitpic"];
@@ -693,21 +694,38 @@ mod tests {
         ));
     }
 
-    /// The only subcommand that had no parse test, which is how it also ended up missing
-    /// from the global-flag table below.
+    /// `update`'s verbs, and the flag table below, kept in step by hand.
+    ///
+    /// `check` was once the only subcommand with no parse test, "which is how it also ended up
+    /// missing from the global-flag table below" — and `cask` then repeated the omission exactly,
+    /// arriving with neither. That is why both verbs are named here and both are rows in the
+    /// table: the note is only worth keeping if the next verb trips over it.
     ///
     /// `check` is required, and that is the part worth pinning: a bare `gitpic update` must
     /// not parse, because it reads as "install the update" — which this does not do and,
     /// per `commands::update`, should not. Requiring the verb keeps an `apply` possible later
     /// without today's spelling having promised it.
+    ///
+    /// `gitpic --json update cask` is the exact invocation `GitpicRunner.tapCask` makes, and the
+    /// app's whole Homebrew branch is downstream of it parsing. When it does not, the app shows
+    /// every cask user the upgrade command with a 「暂时读不到」 caveat and nothing fails, so a
+    /// green suite would have been the only signal.
     #[test]
-    fn update_check_parses_and_the_verb_is_required() {
+    fn update_verbs_parse_and_the_verb_is_required() {
         assert!(matches!(
             Cli::try_parse_from(["gitpic", "update", "check"])
                 .unwrap()
                 .command,
             Some(Command::Update {
                 action: UpdateAction::Check
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["gitpic", "update", "cask"])
+                .unwrap()
+                .command,
+            Some(Command::Update {
+                action: UpdateAction::Cask
             })
         ));
         assert!(Cli::try_parse_from(["gitpic", "update"]).is_err());
