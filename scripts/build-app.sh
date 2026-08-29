@@ -42,23 +42,36 @@ echo "==> resolving the gitpic binary to embed"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 GITPIC_BIN="${GITPIC_BIN:-}"
 if [[ -z "$GITPIC_BIN" ]]; then
-  if [[ -x "$TARGET_DIR/release/gitpic" ]]; then
-    GITPIC_BIN="$TARGET_DIR/release/gitpic"
-  else
-    echo "    no $TARGET_DIR/release/gitpic; building it"
-    ( cd "$ROOT" && cargo build --release --locked )
-    GITPIC_BIN="$TARGET_DIR/release/gitpic"
-  fi
+  # Always build, rather than trusting a binary that happens to be there.
+  #
+  # This used to reuse `$TARGET_DIR/release/gitpic` whenever it existed, and the version
+  # check below was described as what made that safe. It is not: it compares *versions*, so
+  # it catches a binary left over from before a version bump and is blind to one left over
+  # from earlier the same day. Measured — a `target/release/gitpic` from the previous
+  # evening, still 0.20.9, was embedded into an 0.20.9 bundle and shipped without the
+  # `update cask` subcommand that had been added since. Nothing failed. The app degrades
+  # quietly in that state (a missing subcommand reads as "could not read the tap", so every
+  # Homebrew user gets the command with a caveat instead of the real answer), which makes it
+  # harder to notice rather than easier.
+  #
+  # `cargo build` is incremental, so this is a no-op when the binary is already current —
+  # the reuse saved nothing worth this failure mode. `release.yml` was never exposed because
+  # it builds the CLI in its own step first, and CI's checkout is clean; the machine this
+  # matters on is a developer's, which is also where `check-self-update.sh` builds the app it
+  # tests the real updater with.
+  echo "    building $TARGET_DIR/release/gitpic"
+  ( cd "$ROOT" && cargo build --release --locked )
+  GITPIC_BIN="$TARGET_DIR/release/gitpic"
 fi
 [[ -x "$GITPIC_BIN" ]] || { echo "error: gitpic binary not found at $GITPIC_BIN" >&2; exit 1; }
 CLI_VERSION="$("$GITPIC_BIN" --version | awk '{print $2}')"
-# The one runtime check that the merged version is real rather than asserted.
+# Still worth keeping, now for the case it can actually decide: an explicit `GITPIC_BIN`
+# pointing at some other build.
 #
 # APP_VERSION comes from Cargo.toml; CLI_VERSION comes from asking the binary
 # that is about to be copied into the bundle. Those two agreeing is the whole
-# claim of a unified release, and nothing else verifies it — a stale
-# target/release/gitpic (or a GITPIC_BIN pointing somewhere else) would otherwise
-# ship silently inside an app stamped with a version it does not contain.
+# claim of a unified release. It is a necessary check and not a sufficient one —
+# see the note above on what it cannot see.
 if [[ "$CLI_VERSION" != "$APP_VERSION" ]]; then
   echo "error: embedded gitpic is $CLI_VERSION but this build is $APP_VERSION" >&2
   echo "       $GITPIC_BIN is stale — rebuild it (cargo build --release) or set GITPIC_BIN" >&2
