@@ -134,6 +134,30 @@ pub fn detect() -> InstallSource {
     }
 }
 
+/// An anchor in the same spelling `exe` arrives in.
+///
+/// [`detect`] canonicalises the executable, so every comparison in [`classify`] is against a
+/// *resolved* path — while the anchors are built straight out of the environment and are not.
+/// Comparing the two spellings directly worked only while they happened to agree, and there are
+/// two ways they do not:
+///
+/// - **Windows, unconditionally.** `std::fs::canonicalize` returns an extended-length
+///   `\\?\C:\…` path there, so `exe.parent()` can never equal a `C:\Users\x\.cargo\bin` built
+///   from `CARGO_HOME` — every ordinary `cargo install` was classified
+///   [`InstallSource::Unknown`] and sent to the release page. Documented behaviour rather than
+///   something measured here; there is no Windows in this checkout to measure on.
+/// - **Any platform, when a root is reached through a symlink.** Canonicalising the executable
+///   resolves the link while the raw anchor still names it. Measured, on Unix, by
+///   `anchors_are_compared_in_the_same_spelling_as_the_exe`.
+///
+/// Falls back to the path as given when it cannot be resolved, which is the right answer rather
+/// than a compromise: an anchor that does not exist cannot have `exe` underneath it, so the
+/// comparison should fail — and it does, on the raw spelling, exactly as before. That fallback
+/// is also what lets [`classify`]'s table be written against synthesized paths.
+fn resolved(path: PathBuf) -> PathBuf {
+    path.canonicalize().unwrap_or(path)
+}
+
 /// The pure half, so the table can be tested without installing anything.
 ///
 /// `exe` is expected to be canonical — [`detect`] guarantees it. The order of the tests is not
@@ -165,7 +189,7 @@ fn classify(exe: &Path, prefixes: &[PathBuf], cargo_root: Option<&Path>) -> Inst
     // some other formula's Cellar is not ours to upgrade.
     if prefixes
         .iter()
-        .any(|prefix| exe.starts_with(prefix.join("Cellar").join(FORMULA)))
+        .any(|prefix| exe.starts_with(resolved(prefix.join("Cellar").join(FORMULA))))
     {
         return InstallSource::Formula;
     }
@@ -176,7 +200,7 @@ fn classify(exe: &Path, prefixes: &[PathBuf], cargo_root: Option<&Path>) -> Inst
     // replaces: that would rewrite `CARGO_HOME/bin/gitpic`, a different file from the one
     // running. Comparing the parent directory also means the executable's name is not spelled
     // here, so Windows' `gitpic.exe` needs no separate case.
-    if cargo_root.is_some_and(|root| exe.parent() == Some(root.join("bin").as_path())) {
+    if cargo_root.is_some_and(|root| exe.parent() == Some(resolved(root.join("bin")).as_path())) {
         return InstallSource::Cargo;
     }
     InstallSource::Unknown
@@ -297,6 +321,61 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    /// **The anchors have to be compared in the same spelling as `exe`, and they were not.**
+    ///
+    /// [`detect`] canonicalises `exe` and then hands [`classify`] anchors built straight out of
+    /// the environment, so every comparison here assumes the two spellings agree. They do not
+    /// always agree, and where they diverge the answer is [`InstallSource::Unknown`] and the
+    /// release page instead of the command that would actually work.
+    ///
+    /// This row measures the case that can be measured on a Unix box: a `CARGO_HOME` or a
+    /// Homebrew prefix reached through a symlink, where canonicalising the executable resolves
+    /// the link and the raw anchor still names it. The motivating case is Windows, where it is
+    /// unconditional rather than a configuration — `std::fs::canonicalize` returns an
+    /// extended-length `\\?\C:\…` path there, so `exe.parent()` could never equal a
+    /// `C:\Users\x\.cargo\bin` built from the environment, and every ordinary
+    /// `cargo install` on Windows was classified `Unknown`. Not measured here — there is no
+    /// Windows to measure on — but it is the same comparison this row exercises.
+    #[cfg(unix)]
+    #[test]
+    fn anchors_are_compared_in_the_same_spelling_as_the_exe() {
+        let root = std::env::temp_dir().join(format!("gitpic-anchor-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        // `CARGO_HOME=<root>/cargo-link`, with the real tree at `<root>/real/cargo`.
+        let cargo_real = root.join("real/cargo");
+        std::fs::create_dir_all(cargo_real.join("bin")).unwrap();
+        std::fs::write(cargo_real.join("bin/gitpic"), "").unwrap();
+        let cargo_link = root.join("cargo-link");
+        std::os::unix::fs::symlink(&cargo_real, &cargo_link).unwrap();
+        let exe = cargo_link.join("bin/gitpic").canonicalize().unwrap();
+        assert_eq!(
+            classify(&exe, &[], Some(&cargo_link)),
+            InstallSource::Cargo,
+            "a cargo bin reached through a symlinked CARGO_HOME is still a cargo install"
+        );
+
+        // The same for a Homebrew prefix behind a link.
+        let brew_real = root.join("real/brew");
+        let keg = brew_real.join("Cellar/gitpic_cli/0.20.9/bin");
+        std::fs::create_dir_all(&keg).unwrap();
+        std::fs::write(keg.join("gitpic"), "").unwrap();
+        let brew_link = root.join("brew-link");
+        std::os::unix::fs::symlink(&brew_real, &brew_link).unwrap();
+        let exe = brew_link
+            .join("Cellar/gitpic_cli/0.20.9/bin/gitpic")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(
+            classify(&exe, std::slice::from_ref(&brew_link), None),
+            InstallSource::Formula,
+            "a keg under a symlinked HOMEBREW_PREFIX is still the formula's"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A bundle in a user's own Applications directory, or at a custom `--appdir`, is still a
