@@ -8,17 +8,19 @@
 //! shipped in a release the user does not have yet.
 //!
 //! It checks, and it does not install. That is a statement about *this binary*, and the
-//! reason recorded here used to be "`GitPic.app` runs `brew upgrade` instead" — which stopped
-//! being true when the app took over installing its own updates for every copy, Homebrew's
-//! included. See `SelfUpdate.route` in the app for that argument and the cask stanzas it
-//! leans on.
+//! reason is the one about the CLI: a `gitpic` on `PATH` can have come from the cask (a
+//! symlink into the app bundle, so it upgrades when the app upgrades), from a `GitPic.app`
+//! installed by hand, from the `gitpic_cli` formula, from `cargo install --git`, or from an
+//! unpacked tarball. Those want different upgrade commands and this process could perform at
+//! most one of them, so it reports instead. How the *app* decides what to do is a separate
+//! question with a separate answer; see `SelfUpdate.route` in `GitPicCore`.
 //!
-//! The half that still holds is the one about the CLI. A `gitpic` on `PATH` can have come
-//! from the cask (a symlink into the bundle, so it upgrades when the app upgrades itself),
-//! from the `gitpic_cli` formula, from `cargo install`, or from an unpacked tarball. Those
-//! want four different upgrade commands and this process could perform at most one of them,
-//! so it reports instead, and the human-readable output says how to upgrade rather than
-//! guessing which of the four applies.
+//! What it no longer does is make the reader pick. The note used to print the cask's command
+//! and the formula's command side by side, on the grounds that this process could not tell
+//! them apart — which was true of the code and not of the machine. [`crate::install_source`]
+//! tells them apart, so exactly one command is printed, and the reader for whom neither of
+//! the old two was right (a hand-installed bundle, a cargo build, a tarball) gets an answer
+//! instead of a wrong command that fails with "no available formula".
 
 use crate::error::Result;
 use crate::output::Mode;
@@ -71,12 +73,10 @@ fn human(report: &UpdateReport) {
         }
         crate::output::line("");
         crate::output::line(&report.url);
-        // Both paths, because the cask and the formula are different installs and
-        // `brew upgrade` on the wrong one reports "no available formula".
-        crate::output::note(
-            "upgrade with `brew upgrade --cask gitpic` (app) or \
-             `brew upgrade gitpic_cli` (CLI only)",
-        );
+        // One command, for the install this binary actually came from. Printing the cask's and
+        // the formula's side by side was wrong for whoever had neither, and `brew upgrade` on
+        // the wrong one of the two reports "no available formula".
+        crate::output::note(&crate::install_source::detect().upgrade_hint());
         return;
     }
     if report.ahead {

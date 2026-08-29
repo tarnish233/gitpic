@@ -289,11 +289,17 @@ pub enum Command {
 
 /// A subcommand rather than a bare `gitpic update`, and the shape is a promise.
 ///
-/// `gitpic update` on its own would read as "install the update", which this does not do
-/// and — see [`crate::commands::update`] — should not: the app is a Homebrew cask signed
-/// ad-hoc, so there is no signature chain to verify a self-downloaded replacement against.
-/// Requiring the verb keeps the door open for an `apply` later without today's spelling
-/// having promised it.
+/// `gitpic update` on its own would read as "install the update", which this does not do. The
+/// reason is not the one recorded here before — "the app is a Homebrew cask signed ad-hoc, so
+/// there is no signature chain to verify a self-downloaded replacement against" — which
+/// `Updater`'s header retracts: the installer verifies the SHA-256 `api.github.com` reports for
+/// the asset, which is the same trust root a cask's own `sha256` rests on, so ad-hoc signing
+/// never separated the two.
+///
+/// What holds is that for most installs the right actor is somebody else. A cask or a formula
+/// is brew's to upgrade, and [`crate::install_source`] now says which — so the verb keeps the
+/// door open for an `apply` that could only ever mean the installs nobody else manages, without
+/// today's spelling having promised it.
 #[derive(Debug, Subcommand)]
 pub enum UpdateAction {
     /// Report the latest release and what changed in it

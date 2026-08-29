@@ -8,6 +8,7 @@ mod error;
 mod github;
 mod history;
 mod imageproc;
+mod install_source;
 mod link;
 mod naming;
 mod oauth;
