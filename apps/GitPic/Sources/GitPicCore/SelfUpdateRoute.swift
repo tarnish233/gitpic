@@ -87,7 +87,15 @@ extension SelfUpdate {
         /// installed" and exits 0, and handing someone a command that does nothing is worse
         /// than saying so. This is the accepted cost of the policy; the app does not install
         /// over a cask-managed bundle to fill the gap.
-        case homebrewUpToDate(installed: String)
+        ///
+        /// **`offered` travels alongside `installed` because the two are not always equal**, and
+        /// the case is reached whenever the bundle is not *older*. It carried only `installed`
+        /// at first, which the sheet rendered as 「已是 Homebrew 提供的最新版本（X）」 — a
+        /// statement about what Homebrew provides, made from the bundle's own number. For a user
+        /// who self-installed 0.20.10 while the tap still declares 0.20.9 that sentence asserts
+        /// Homebrew provides 0.20.10 and tells them to wait for a version they already have.
+        /// Both numbers are here so the sheet can say which is which.
+        case homebrewUpToDate(installed: String, offered: String)
         /// Homebrew owns this bundle and what its cask offers could not be established.
         ///
         /// The command is still offered, with the caveat, because a network that is down says
@@ -164,7 +172,7 @@ extension SelfUpdate {
                         command: command, reason: "读不懂 Homebrew 提供的版本号")
                 }
                 guard mine < theirs else {
-                    return .homebrewUpToDate(installed: bundleVersion)
+                    return .homebrewUpToDate(installed: bundleVersion, offered: offered)
                 }
                 return .homebrewManaged(
                     command: command, installed: bundleVersion, available: offered)

@@ -198,14 +198,20 @@ struct SelfUpdateRouteTests {
         let lagging = SelfUpdate.route(
             cask: Self.brews("0.18.0"), location: .applicationsDir,
             bundleVersion: "0.18.0", latest: "0.19.0", asset: Self.choice)
-        #expect(lagging == .homebrewUpToDate(installed: "0.18.0"))
+        #expect(lagging == .homebrewUpToDate(installed: "0.18.0", offered: "0.18.0"))
 
         // A bundle *ahead* of the tap — which a self-updated copy from before this change is —
         // is also nothing for brew to do, and must not be offered a downgrade.
+        //
+        // Both numbers travel, and the asymmetry is the point: `installed` is 0.19.0 while
+        // `offered` is 0.18.0, so the sheet can say which is which. Carrying only `installed`
+        // let it print 「已是 Homebrew 提供的最新版本（0.19.0）」 — a claim about what Homebrew
+        // provides, made out of the bundle's number, telling this user to wait for a version
+        // they are already running.
         let behindTap = SelfUpdate.route(
             cask: Self.brews("0.18.0"), location: .applicationsDir,
             bundleVersion: "0.19.0", latest: "0.19.0", asset: Self.choice)
-        #expect(behindTap == .homebrewUpToDate(installed: "0.19.0"))
+        #expect(behindTap == .homebrewUpToDate(installed: "0.19.0", offered: "0.18.0"))
 
         let unreadable = SelfUpdate.route(
             cask: .homebrews(cask: "gitpic", offers: .unknown(reason: "暂时读不到 Homebrew 提供的版本")),
@@ -303,7 +309,43 @@ struct SelfUpdateRouteTests {
         let upToDate = SelfUpdate.route(
             cask: Self.brews("0.18.0"), location: .applicationsDir,
             bundleVersion: "0.18.0", latest: "0.19.0", asset: Self.choice)
-        #expect(upToDate == .homebrewUpToDate(installed: "0.18.0"))
+        #expect(upToDate == .homebrewUpToDate(installed: "0.18.0", offered: "0.18.0"))
+    }
+
+    /// The reasons **`route` itself writes**, which the check above cannot see.
+    ///
+    /// The row above hands `route` a `reason` and then asserts that string is Chinese and
+    /// flag-free — which it is, because the test wrote it. That is a tautology, and it left the
+    /// two captions `route` actually mints covered by nothing. Both are reached only when a
+    /// version fails to parse, so neither has a natural call site to notice them.
+    ///
+    /// `verdict`'s own two are pinned in `CaskOwnershipTests.everyCaptionIsWrittenForTheWindow`;
+    /// between them the four user-facing Homebrew strings in the codebase are all exercised.
+    @Test("the captions the route writes are Chinese sentences, not command lines")
+    func theRoutesOwnCaptionsAreWrittenForTheWindow() {
+        let minted = [
+            // The bundle's own version is unreadable.
+            SelfUpdate.route(cask: Self.brews("0.19.0"), location: .applicationsDir,
+                             bundleVersion: nil, latest: "0.19.0", asset: Self.choice),
+            // The cask declares something that will not parse. Defensive rather than reachable
+            // — both parsers refuse what they cannot compare — and a caveat is still the right
+            // answer to an impossible string.
+            SelfUpdate.route(cask: Self.brews("not-a-version"), location: .applicationsDir,
+                             bundleVersion: "0.18.0", latest: "0.19.0", asset: Self.choice),
+        ]
+        for route in minted {
+            guard case .homebrewUnverified(let command, let reason) = route else {
+                Issue.record("expected an unverified hand-over, got \(route)")
+                return
+            }
+            #expect(command == "brew upgrade --cask gitpic")
+            #expect(!reason.isEmpty)
+            #expect(!reason.contains("--"),
+                    "\(reason) reads like a command line, and the command has its own row")
+            #expect(reason.contains(where: { $0.unicodeScalars.first.map {
+                (0x4E00...0x9FFF).contains($0.value)
+            } == true }), "\(reason) is rendered in a Chinese-only sheet and has to be Chinese")
+        }
     }
 
     /// The gate is the *bundle's* version, not the report's `current` — that one comes from
