@@ -132,3 +132,19 @@ public enum CaskOwnership: Equatable, Sendable {
         return nil
     }
 }
+
+/// What `gitpic update cask --json` reports.
+///
+/// A `Decodable` mirror of `release.rs`'s `TapCask`, and its field spellings are a contract
+/// between the two in the same way `UpdateReport`'s are. All three are single words, so unlike
+/// `UpdateReport` there is nothing here for `CodingKeys` to translate.
+///
+/// `version` is `nil` for a cask that was *read* and declares nothing comparable. A thrown
+/// error is the other way the answer can be missing: the cask was not read at all. Those are
+/// different facts that happen to have the same consequence, so nothing here merges them —
+/// the caller decides once, in one place.
+public struct TapCask: Decodable, Equatable, Sendable {
+    public let ok: Bool
+    public let cask: String
+    public let version: String?
+}
