@@ -8,9 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### A Homebrew install is upgraded by Homebrew, and GitPic says so
 
-- Installed with `brew`? The update sheet hands you `brew upgrade --cask gitpic` with a 复制升级命令 button, and installs nothing itself
-- It checks what the cask actually offers first, so you are never given a command that would do nothing
-- `gitpic update` now prints the one upgrade command your install really wants, instead of two to choose between
+- Installed with `brew`? The sheet hands you `brew upgrade --cask gitpic` and installs nothing itself
+- When the cask has nothing newer it says so, rather than giving you a command that does nothing
+- `gitpic update` prints the one upgrade command your install wants, not two to choose between
 
 <!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
 

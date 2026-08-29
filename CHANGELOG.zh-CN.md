@@ -8,9 +8,9 @@
 
 ### Homebrew 装的交给 Homebrew 升，而且会告诉你
 
-- 用 brew 装的，更新弹窗直接给出 `brew upgrade --cask gitpic` 和一个「复制升级命令」按钮，自己不再替换 bundle
-- 给命令之前会先确认 cask 那边真的有新版，不会塞给你一条跑了也没用的命令
-- `gitpic update` 现在只打印你这份安装真正需要的那一条升级命令，不再让你从两条里猜
+- 用 brew 装的，弹窗直接给出 `brew upgrade --cask gitpic`，自己不再替换 bundle
+- cask 那边没有更新时会直说，而不是塞给你一条跑了也没用的命令
+- `gitpic update` 只打印你这份安装真正需要的那一条升级命令
 
 <!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
 

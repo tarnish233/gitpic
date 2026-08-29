@@ -59,8 +59,10 @@ Before offering the command GitPic asks the tap which version its cask actually 
 than assuming the release's — the two are not always in step. A release exists the moment it is
 published, while the tap follows by dispatch with a six-hourly cron behind it. So when Homebrew
 has not caught up you are told 已是 Homebrew 提供的最新版本 instead of being handed a command that
-would do nothing; wait for Homebrew and it will arrive. The terminal equivalents are
-`gitpic update check` and `gitpic update cask`.
+would do nothing; wait for Homebrew and it will arrive. When that version cannot be read at all —
+offline, rate-limited, or the tap moved the file — the command is still offered, with a note that
+this time it went unchecked: a network that is down says nothing about whether your upgrade path
+works. The terminal equivalents are `gitpic update check` and `gitpic update cask`.
 
 **Nothing needs a terminal to get started.** Open the settings window → 图床 → 「使用
 GitHub 登录」: the one-time code appears in the window and the browser opens on its own.
