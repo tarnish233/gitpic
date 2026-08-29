@@ -93,9 +93,13 @@ async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
         Some(Command::Skill { action }) => commands::skill::run(action, mode),
         // Config-free too, and pointedly so: "is there a newer gitpic" is worth answering
         // on a machine whose config is broken — the fix may well be in the release the
-        // user does not have yet. It reads no credential either; the endpoint is public.
+        // user does not have yet. It does read the image-host credential when there is one,
+        // to raise GitHub's rate limit, but every way that can fail collapses to an
+        // anonymous request (`release::best_effort_token`), so a broken login cannot stop
+        // either of these answering.
         Some(Command::Update { action }) => match action {
             cli::UpdateAction::Check => commands::update::run(mode).await,
+            cli::UpdateAction::Cask => commands::update::cask(mode).await,
         },
 
         Some(Command::Doctor { .. }) => {

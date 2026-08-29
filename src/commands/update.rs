@@ -47,6 +47,51 @@ pub async fn run(mode: Mode) -> Result<u8> {
     Ok(0)
 }
 
+/// `gitpic update cask` — what would `brew upgrade --cask gitpic` actually install?
+///
+/// A command rather than something the app does for itself, because everything network-shaped
+/// in this project goes through this binary: `GitPicCore` never talks to `api.github.com`, and
+/// the origin has to stay a compile-time constant for the reason recorded on the tap constant
+/// in [`crate::release`].
+///
+/// It answers about the *cask*, not the release, and that difference is the whole point. The
+/// app learns a release exists the moment it is published, while the tap follows by dispatch
+/// with a six-hourly cron behind it — so "there is a new version" and "brew can install it"
+/// are different questions, and only this one decides whether telling someone to run
+/// `brew upgrade` would do anything.
+pub async fn cask(mode: Mode) -> Result<u8> {
+    let tap = crate::release::tap_cask().await?;
+
+    if mode.is_json() {
+        crate::output::print_json(&tap);
+        return Ok(0);
+    }
+    if mode.is_quiet() {
+        // The version or nothing, the same rule `check` follows: "could not tell" must not be
+        // a string a script has to match on.
+        if let Some(version) = &tap.version {
+            crate::output::line(version);
+        }
+        return Ok(0);
+    }
+    match &tap.version {
+        Some(version) => {
+            crate::output::line(&format!("the {} cask offers {version}", tap.cask));
+            crate::output::note(&format!(
+                "this is what `brew upgrade --cask {}` would install",
+                tap.cask
+            ));
+        }
+        // Not an error: the file was read. It just says something this cannot compare, and a
+        // guess here would be worse than admitting it.
+        None => crate::output::line(&format!(
+            "the {} cask declares no version this can compare",
+            tap.cask
+        )),
+    }
+    Ok(0)
+}
+
 fn human(report: &UpdateReport) {
     if report.update_available {
         crate::output::line(&format!(

@@ -304,6 +304,13 @@ pub enum Command {
 pub enum UpdateAction {
     /// Report the latest release and what changed in it
     Check,
+    /// Report which version the Homebrew cask offers, installing nothing
+    ///
+    /// A separate verb rather than part of `check`, because it costs a second request that
+    /// only a Homebrew-managed install has any use for. GitPic's update sheet asks this when
+    /// it finds a cask owns its bundle, so that it can say whether `brew upgrade` would
+    /// actually do something before telling anyone to run it.
+    Cask,
 }
 
 #[derive(Debug, Subcommand)]

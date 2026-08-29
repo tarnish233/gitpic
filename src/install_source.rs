@@ -36,10 +36,9 @@
 
 use std::path::{Path, PathBuf};
 
-/// The cask and the formula are separate installs with separate names, and `brew upgrade` on
-/// the wrong one reports "no available formula". Both live in `tarnish233/homebrew-tap`.
-const CASK: &str = "gitpic";
-const FORMULA: &str = "gitpic_cli";
+/// One spelling of each, shared with the tap lookup that echoes the cask token back to the
+/// app — see [`crate::release::CASK`].
+use crate::release::{CASK, FORMULA};
 
 /// The two prefixes an Apple Silicon and an Intel Homebrew use. Independent installations with
 /// independent Caskrooms, so both are searched rather than one being derived from the other.
