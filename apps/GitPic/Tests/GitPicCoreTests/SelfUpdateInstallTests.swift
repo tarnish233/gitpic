@@ -823,19 +823,14 @@ struct SelfUpdateInstallTests {
         let f = try Self.fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
 
-        // Stand in for HOMEBREW_PREFIX. Only the two links matter; the completions the cask also
-        // installs are real files rather than links — which is exactly why they go stale, and why
-        // there is nothing here to assert about them.
-        let prefix = f.root.appendingPathComponent("homebrew")
-        let caskroom = prefix.appendingPathComponent("Caskroom/gitpic/0.18.0")
-        try FileManager.default.createDirectory(at: prefix.appendingPathComponent("bin"),
-                                                withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: caskroom, withIntermediateDirectories: true)
-        let binLink = prefix.appendingPathComponent("bin/gitpic")
-        let caskLink = caskroom.appendingPathComponent("GitPic.app")
-        try FileManager.default.createSymbolicLink(
-            at: binLink, withDestinationURL: f.target.appendingPathComponent("Contents/Resources/gitpic"))
-        try FileManager.default.createSymbolicLink(at: caskLink, withDestinationURL: f.target)
+        // Stand in for HOMEBREW_PREFIX. Built by `HomebrewShape`, which is shared with
+        // `CaskOwnershipTests` — the shape is measured off one real install and two suites want
+        // it for different reasons, so it is described in one place. Only the two links matter;
+        // the completions the cask also installs are real files rather than links, which is
+        // exactly why they go stale and why there is nothing here to assert about them.
+        let layout = try HomebrewShape.install(bundle: f.target, under: f.root, version: "0.18.0")
+        let binLink = layout.binLink
+        let caskLink = layout.caskLink
 
         // Both point at 0.18.0 to begin with, or the assertions below would prove nothing.
         let before = try ChildProcess.run(executable: binLink, args: [], timeout: 30)

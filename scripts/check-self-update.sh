@@ -193,8 +193,16 @@ awk -v v="$OLD_VERSION" '
 ' "$WORK/Cargo.toml.orig" > "$ROOT/Cargo.toml"
 [[ "$(cargo_version)" == "$OLD_VERSION" ]] || fail "could not rewrite Cargo.toml's version"
 
-# The binary first, then the bundle: build-app.sh rejects a CARGO_TARGET_DIR/release/gitpic
-# whose --version disagrees with Cargo.toml, which is exactly what a stale one is.
+# The binary first, then the bundle — still required, but no longer for the reason it was added
+# for. `build-app.sh` used to reuse whatever `CARGO_TARGET_DIR/release/gitpic` happened to exist
+# and reject it only when its `--version` disagreed with Cargo.toml; it now always builds, so a
+# stale binary is no longer a thing this step prevents.
+#
+# What it does prevent is a lockfile failure. The version rewrite above edits `Cargo.toml`, which
+# leaves `Cargo.lock` describing the old version, and `build-app.sh` builds with `--locked` — which
+# refuses to update the lock rather than doing it silently. This build carries no `--locked`, so it
+# syncs the lock and the bundle build then succeeds. Remove this line and the run dies inside
+# `build-app.sh` with cargo's lockfile error instead.
 ( cd "$ROOT" && cargo build --release )
 OUT="$WORK/dist-app" "$ROOT/scripts/build-app.sh" >"$WORK/build.log" 2>&1 \
   || { cat "$WORK/build.log"; fail "build-app.sh failed"; }
@@ -295,12 +303,19 @@ done
 [[ -n "$SHEET" ]] || fail "the update sheet never appeared (is $OLD_VERSION really older than $TARGET_VERSION?)"
 
 step "waiting for the upgrade route to resolve"
-# The action row is 「正在确认升级方式…」 until the route is known. It is now resolved from three
-# local facts and settles in a frame, where it used to cost up to a 20 s `brew list --cask` per
-# Homebrew prefix — the probe is still the row's shape rather than a fixed sleep, because a
-# fixed sleep would be either a guess or a delay. Three buttons means a route was offered
-# (下载并更新, 打开发布页 and 稍后 — there is no 立即更新 any more, the Homebrew branch is gone);
+# The action row is 「正在确认升级方式…」 until the route is known. Ownership is a directory scan
+# and a readlink, where it used to cost up to a 20 s `brew list --cask` per Homebrew prefix — the
+# probe is still the row's shape rather than a fixed sleep, because a fixed sleep would be either
+# a guess or a delay. Three buttons means a route was offered (下载并更新, 打开发布页 and 稍后);
 # two means `.unavailable`, which is a different failure and worth saying so.
+#
+# **This test copy must land on the self-install branch, and that is now a real question.** A
+# cask-managed bundle is handed `brew upgrade --cask gitpic` instead of being installed over, and
+# button 1 is then 复制升级命令 — which this script would click, copy a string, and then wait
+# forever for a process that was never going to be replaced. The copy lives in `~/Applications`
+# and no Caskroom entry points at it, so `CaskOwnership.detect` answers "not cask" and the
+# self-install branch is the right one. Asserted rather than assumed, because the failure mode
+# without the assertion is a 60 s timeout reading "never settled", which says nothing about why.
 ROUTED=""
 BUTTONS=""
 for _ in $(seq 1 60); do
@@ -312,6 +327,20 @@ if [[ -z "$ROUTED" ]]; then
   [[ "$BUTTONS" == "2" ]] && fail "the sheet offers no upgrade route here (only 打开发布页 and
       稍后). The log line beginning 'update: no in-app upgrade' says which reason."
   fail "the sheet's action row never settled (found $BUTTONS button(s))"
+fi
+# `Updater.resolve` logs the ownership verdict unconditionally, before the route.
+#
+# Scoped to this run's bytes with `LOG_MARK`, the way the wait at the top of the script is. The
+# log is append-only and machine-wide (line 23), and the *installed* /Applications/GitPic.app
+# writes to the same file — so a bare `grep` over the whole thing passes for ever after any
+# earlier run, or any sheet ever opened on a non-cask copy, has written the line once. That is a
+# guard that cannot fail, which is worse than no guard: the regression it exists for would sail
+# past it into the click below, copy a string, and time out saying nothing was replaced — exactly
+# the uninformative failure this was added to replace.
+if ! tail -c "+$((LOG_MARK + 1))" "$APP_LOG" | grep -q 'update: not cask'; then
+  fail "this copy was taken for a Homebrew-managed bundle, so button 1 is 复制升级命令 and not
+      下载并更新. The log line beginning 'update: cask' says which cask claimed it — a Caskroom
+      entry under /opt/homebrew or /usr/local resolving to $TEST_APP would do it."
 fi
 
 step "下载并更新"

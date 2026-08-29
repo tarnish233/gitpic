@@ -975,9 +975,37 @@ final class AppModel {
     /// launch is not being quiet. Nothing else is suppressed — 设置 ▸ 通用 and the sheet still
     /// say so for as long as the update stands, which is where someone who wants to act on it
     /// later goes looking.
+    ///
+    /// **``forgetAnnouncement()`` exists because one situation can spend this record on a
+    /// moment the user could not act on.** The banner is posted when the check finds a release;
+    /// which upgrade is actually on offer is only worked out later, when the sheet opens. A
+    /// Homebrew user inside the tap's lag therefore gets their one banner for a version the
+    /// sheet then declines to install, and once `announcedVersion` equals that release no
+    /// further banner for it can ever fire — including after the tap lands and
+    /// `brew upgrade` would work. Before this policy the single notification was always
+    /// actionable, because the app installed for everyone.
     private(set) var announcedVersion: String? = AppModel.defaults
         .string(forKey: AppModel.announcedKey) {
         didSet { Self.defaults.set(announcedVersion, forKey: Self.announcedKey) }
+    }
+
+    /// Drop the record of the banner for `version`, so a later check may announce it again.
+    ///
+    /// Called only for `homebrewUpToDate` — the one outcome that offers nothing at all.
+    /// `homebrewUnverified` hands over the command, so its banner was actionable and stays
+    /// spent.
+    ///
+    /// The cost is at most one banner per daily check for as long as the tap lags, and that is
+    /// the right trade rather than a nag: the tap normally follows a release by dispatch within
+    /// minutes and by cron within six hours, so a daily check almost never lands twice inside
+    /// the window. When it does lag for days, AGENTS.md records how that happens — an expired
+    /// dispatch token, which went unnoticed across three releases — and a daily reminder that
+    /// Homebrew has not caught up is precisely the signal that was missing.
+    func forgetAnnouncement(of version: String) {
+        guard announcedVersion == version else { return }
+        announcedVersion = nil
+        Diagnostics.log("update: \(version) was announced but Homebrew cannot install it yet"
+                        + " — allowing it to be announced again")
     }
 
     fileprivate static let defaults = UserDefaults.standard
@@ -1121,6 +1149,25 @@ final class AppModel {
         if upgradePathGeneration == updateGeneration {
             if case .unavailable(_, retryable: false) = upgradePath { return }
             if case .selfInstall = upgradePath { return }
+            // **No Homebrew case is listed here, and adding one would be a bug.** This is an
+            // allowlist, so they fall through and are recomputed — which is what they need. The
+            // report's generation is not a sufficient key for them: the *tap* can move without
+            // the report moving at all, since a release is published the moment it exists while
+            // the tap follows by dispatch with a six-hourly cron behind it. Cache
+            // `homebrewUpToDate` and reopening the sheet would keep repeating 「已是 Homebrew
+            // 提供的最新版本」 with no command even after `brew upgrade` had started working —
+            // the same shape as the bug described above, arriving from the other direction.
+            //
+            // **What that buys is a fresh answer per sheet opening, and no more than that.**
+            // `resolveUpgradePath` has one caller, `UpdateSheet`'s `.task(id:)`, so a sheet left
+            // open does not re-ask: the id only moves when a new check lands. Someone who leaves
+            // it open across the tap catching up still reads the old sentence until they close
+            // and reopen it. That is a real limit and is accepted here — the alternative is
+            // polling the tap behind an idle window — but it is narrower than "for the life of
+            // the process", which is what caching would cost.
+            //
+            // The recomputation is bounded: `GitpicRunner.tapCask` is off the spawn gate with a
+            // 10 s ceiling, and `resolvingUpgradePath` below stops two from stacking.
         }
         // The old guard also did not hold across the `await`, so two sheet appearances could
         // both spawn the probe.
@@ -1140,34 +1187,76 @@ final class AppModel {
         // one that has to notice, and discard a route it computed from a report the user is no
         // longer looking at. It converges: `checkForUpdates` allows one check at a time, so each
         // extra pass is a real new report and not a spin.
+        //
+        // **This runs inside a task SwiftUI has already cancelled, and the second pass depends
+        // on `GitpicRunner.run` ignoring that.** Moving the generation is exactly what makes
+        // `.task(id:)` tear this task down, so by the time `continue` is reached
+        // `Task.isCancelled` is true. Measured: with a `withTaskCancellationHandler` in `run`,
+        // the first probe is killed mid-flight and the re-query is killed *before it starts*,
+        // because `onCancel` fires immediately on an already-cancelled task — and since
+        // `CaskOwnership.verdict` turns every failure into `Offer.unknown`, the new report
+        // resolved to 「暂时读不到 Homebrew 提供的版本」 instead of a real comparison. The
+        // prohibition is recorded on `run` itself; this is the caller it exists for.
         while true {
             guard let report = update else { return }
             let generation = updateGeneration
-            let route = await Updater.resolve(report: report)
+            let route = await Updater.resolve(report: report, runner: runner)
             guard generation == updateGeneration else {
                 Diagnostics.log("update: a newer report landed mid-probe — resolving again")
                 continue
             }
             upgradePath = route
             upgradePathGeneration = generation
+            // The banner for this release was spent on a version Homebrew cannot install yet,
+            // so let a later check announce it again — see `forgetAnnouncement(of:)`.
+            if case .homebrewUpToDate = route { forgetAnnouncement(of: report.latest) }
             return
         }
     }
 
     /// Do the upgrade that was resolved, and quit.
     ///
-    /// One arm, where there were two. The other handed the install to `brew upgrade --cask gitpic`
-    /// and could fail *before* the app quit — hence the `catch` that used to be here, setting
-    /// 「启动升级失败」 while this process was still alive to show it. `performSelfInstall` reports
-    /// its own failures through `updateFailure` from inside its `Task`, so there is nothing to
-    /// catch at this level any more.
+    /// Still one arm that installs. The Homebrew cases are here to say so explicitly rather than
+    /// through a `default:` — nothing is installed over a cask-managed bundle, and the command
+    /// the user copies is `copyUpgradeCommand`'s business, not an upgrade this process performs.
+    /// That is the difference from the arm `bb07783` deleted, which handed the install to
+    /// `brew upgrade --cask gitpic` and could fail *before* the app quit — hence the `catch` that
+    /// used to be here, setting 「启动升级失败」 while this process was still alive to show it.
+    /// `performSelfInstall` reports its own failures through `updateFailure` from inside its
+    /// `Task`, so there is nothing to catch at this level any more.
     func performUpgrade() {
         switch upgradePath {
         case .selfInstall(let asset, let sha, let version):
             performSelfInstall(asset: asset, sha256: sha, version: version)
-        case .unavailable, .none:
+        case .unavailable, .homebrewManaged, .homebrewUpToDate, .homebrewUnverified, .none:
             return
         }
+    }
+
+    /// Put the Homebrew upgrade command on the pasteboard.
+    ///
+    /// Reads the command off the route rather than taking it as a parameter, so what the user
+    /// copies is what the decision produced — the sheet cannot compose a command of its own, and
+    /// the cask token in it came from the Caskroom entry that actually owns this bundle.
+    ///
+    /// Returns whether the write happened, because `Clipboard.write` can fail and reporting
+    /// 「已复制」 anyway is worse than not copying: the user pastes something stale and never
+    /// learns why. The failure is also surfaced through `notify`, since a sheet that closes
+    /// takes any inline message with it.
+    @discardableResult
+    func copyUpgradeCommand() -> Bool {
+        let command: String
+        switch upgradePath {
+        case .homebrewManaged(let c, _, _), .homebrewUnverified(let c, _):
+            command = c
+        case .selfInstall, .unavailable, .homebrewUpToDate, .none:
+            return false
+        }
+        guard Clipboard.write(command) else {
+            notify(title: "写剪贴板失败", body: "升级命令没有复制，请手动输入 \(command)")
+            return false
+        }
+        return true
     }
 
     /// Download, verify, stage and hand off — reporting each stage into the sheet.

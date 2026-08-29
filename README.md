@@ -31,18 +31,24 @@ brew install tarnish233/tap/gitpic      # App + 终端命令
 macOS 自己的登录项，所以「系统设置 ▸ 通用 ▸ 登录项与扩展」里也能看到、也能关掉，两边永远是同一个开关。
 
 **检查更新**默认每天自动查一次，也可以在「通用」页或菜单栏里随时手动查。发现新版本时会显示这一版
-的更新内容，一个「下载并更新」按钮 —— 不管这份 GitPic 是 Homebrew 装的还是手动装的，都由 GitPic
-自己下载该版本的磁盘映像来替换。替换前会先退出（没有办法替换正在运行的 bundle），装完自动重开。
+的更新内容，接下来分两种情况，取决于这份 GitPic 是谁装的。
 
-替换之前会先核对 GitHub 为该文件公布的 SHA-256 —— 和 Homebrew 校验 cask 是同一件事，**拿不到校验和
-就不装**；而且下载、校验、复制全都发生在退出之前，失败什么都不会改动。安装要求 GitPic 位于
-`/Applications` 或 `~/Applications`，放在别处的副本会被指向发布页，弹窗里会说明是哪一种原因。终端里
-等价的查询命令是 `gitpic update check`。
+**手动装的**（DMG 解压到 `/Applications` 或 `~/Applications`）：一个「下载并更新」按钮，由 GitPic
+自己下载该版本的磁盘映像来替换。替换前会先核对 GitHub 为该文件公布的 SHA-256 —— 和 Homebrew 校验
+cask 是同一件事，**拿不到校验和就不装**；而且下载、校验、复制全都发生在退出之前，失败什么都不会改动。
+替换本身要先退出（没有办法替换正在运行的 bundle），装完自动重开。放在别处的副本会被指向发布页，
+弹窗里会说明是哪一种原因。
 
-用 Homebrew 装的照样可以用 `brew upgrade --cask gitpic`（或者不带参数的 `brew upgrade`）。cask 声明了
-`auto_updates true`，所以 Homebrew 比对的是 `/Applications/GitPic.app` 里的真实版本而不是它自己的安装
-记录：app 已经自己更新到位时它什么都不做，真的落后了才升。它还声明了 `uninstall quit:`，所以终端里
-升级会先退出 app、装完再打开它。
+**Homebrew 装的**：GitPic 不会自己替换 bundle，而是把 `brew upgrade --cask gitpic` 交给你，旁边有个
+「复制升级命令」。这样 Homebrew 始终是这份安装的唯一管理者，它的安装记录不会和磁盘上的版本脱节。
+按下命令之后 brew 会先退出 app、装完再打开它（cask 声明了 `uninstall quit:`）。
+
+给出命令之前 GitPic 会先问 tap 里的 cask 到底是哪个版本，而不是拿 GitHub 上的发布版本充数 —— 这两个
+不一定同步：release 一发布就存在，tap 要靠 dispatch 跟进（后面还垫了一个六小时的 cron）。所以如果
+Homebrew 那边还没跟上，你看到的是「已是 Homebrew 提供的最新版本」而**不是**一条跑了也没用的命令 ——
+这种情况下等 Homebrew 跟上即可。要是这个版本号一时读不到（离线、被限流、tap 改了路径），命令还是会给
+你，只是旁边会写明这次没能核对 —— 网络不通并不说明你的升级路径有问题。终端里等价的两条查询命令是
+`gitpic update check` 和 `gitpic update cask`。
 
 **第一次用不需要开终端。** 打开设置窗口 → 图床页 → 「使用 GitHub 登录」，一次性码会显示在窗口里、
 浏览器自动打开；授权完成后下面的下拉框会列出你可以上传的仓库，选一个，按右上角「保存」写进配置文件。
