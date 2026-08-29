@@ -378,6 +378,61 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// The same property, on **every** platform including the one it matters most for.
+    ///
+    /// The symlink row above is `cfg(unix)`, so it never ran on the Windows runner — where the
+    /// divergence is unconditional and the whole `Cargo` case was broken. This needs no symlink
+    /// and no `cfg`, because `std::env::temp_dir()` is already spelled non-canonically on two of
+    /// the three platforms CI builds: measured, macOS returns `/var/folders/…` which canonicalises
+    /// to `/private/var/folders/…`, and Windows canonicalises to an extended-length `\\?\C:\…`
+    /// while the environment gives a plain `C:\…`. On Linux `/tmp` is usually already canonical,
+    /// so there it asserts the ordinary case still holds.
+    ///
+    /// Using `temp_dir()` *as the anchor without canonicalising it* is the point: that is exactly
+    /// how `cargo_root` and `default_prefixes` hand their values over — straight from the
+    /// environment, unresolved.
+    #[test]
+    fn an_anchor_from_the_environment_need_not_be_spelled_canonically() {
+        let root = std::env::temp_dir().join(format!("gitpic-spelling-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let cargo = root.join("cargo");
+        let cargo_bin = cargo.join("bin");
+        std::fs::create_dir_all(&cargo_bin).unwrap();
+        std::fs::write(cargo_bin.join("gitpic"), "").unwrap();
+
+        // What `detect` hands over: a canonical exe, and an anchor exactly as the environment
+        // spelled it.
+        let exe = cargo_bin.join("gitpic").canonicalize().unwrap();
+        assert_eq!(
+            classify(&exe, &[], Some(&cargo)),
+            InstallSource::Cargo,
+            "exe {} vs anchor {}",
+            exe.display(),
+            cargo.display()
+        );
+
+        let prefix = root.join("brew");
+        // Joined a component at a time: this test runs on the Windows runner too, and that is
+        // the platform it exists for.
+        let keg = prefix
+            .join("Cellar")
+            .join(FORMULA)
+            .join("0.20.9")
+            .join("bin");
+        std::fs::create_dir_all(&keg).unwrap();
+        std::fs::write(keg.join("gitpic"), "").unwrap();
+        let exe = keg.join("gitpic").canonicalize().unwrap();
+        assert_eq!(
+            classify(&exe, std::slice::from_ref(&prefix), None),
+            InstallSource::Formula,
+            "exe {} vs prefix {}",
+            exe.display(),
+            prefix.display()
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// A bundle in a user's own Applications directory, or at a custom `--appdir`, is still a
     /// bundle. The cask supports both and the app's own installer accepts both.
     #[test]
