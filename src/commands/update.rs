@@ -2,10 +2,16 @@
 //!
 //! The comparison and the request live in [`crate::release`]; this is the rendering.
 //!
-//! **Config-free**, like `auth` and `list`: nothing here reads `config.toml` or the
-//! credential, because "is there a new version" is a question worth answering on a machine
-//! whose config is missing or broken — including one where the answer is that the fix
-//! shipped in a release the user does not have yet.
+//! **Config-free, and that is not the same as credential-free.** Nothing here reads
+//! `config.toml`, because "is there a new version" is a question worth answering on a machine
+//! whose config is missing or broken — including one where the answer is that the fix shipped
+//! in a release the user does not have yet. It does reach for `auth.toml`:
+//! `release::best_effort_token` attaches a credential when one exists, because
+//! `api.github.com` allows 60 anonymous requests an hour *per address* and behind a shared
+//! egress that budget belongs to everyone behind it. Absent or rejected, the request goes
+//! anonymously and still works — see `release`'s header for the measurement. The claim used
+//! to read "nothing here reads `config.toml` or the credential", which the second half made
+//! false.
 //!
 //! It checks, and it does not install. That is a statement about *this binary*, and the
 //! reason is the one about the CLI: a `gitpic` on `PATH` can have come from the cask (a
