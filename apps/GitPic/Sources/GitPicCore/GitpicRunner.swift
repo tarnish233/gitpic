@@ -21,6 +21,13 @@ public enum RunFailure: Error, Sendable, Equatable {
     /// Carries the raw text so the UI can show it verbatim instead of inventing an
     /// explanation.
     case undecodable(status: Int32, raw: String)
+    /// The child outlived the bound its caller set and was killed.
+    ///
+    /// Its own case because it is the one failure with *no output to quote*, and it used to
+    /// arrive as `.undecodable(status: 137, raw: "")` — a SIGKILL exit code and an empty
+    /// string, rendered as 「看不懂 gitpic 的回答（退出码 137，没有输出）。可能装的是旧版本。」,
+    /// which names the wrong cause entirely. Only a caller that passes `timeout:` can see it.
+    case timedOut(after: TimeInterval)
 }
 
 extension RunFailure {
@@ -52,6 +59,8 @@ extension RunFailure {
                 return "看不懂 gitpic 的回答（退出码 \(status)，没有输出）。可能装的是旧版本。"
             }
             return "看不懂 gitpic 的回答（退出码 \(status)）：\(said)"
+        case .timedOut(let after):
+            return "gitpic 超过 \(Int(after)) 秒没有回应，已经结束它。"
         }
     }
 }
@@ -99,6 +108,12 @@ public actor GitpicRunner {
 
     /// Shorter than the CLI's own 20 s request ceiling on purpose, so this side is the
     /// binding one. Coming off `gate` removed the accident that used to bound this.
+    ///
+    /// It bounds when the child is *asked* to stop, not when it is gone: `ChildProcess.run`
+    /// terminates, waits up to 2 s, `SIGKILL`s and waits up to 1 s more, all after the
+    /// deadline. So the worst case is nearer 13 s than 10 — stated because four doc comments
+    /// used to say "10 s" flatly, and a reader sizing the sheet's wait against it would be
+    /// three seconds short.
     private nonisolated static let tapTimeout: TimeInterval = 10
 
     public init(tools: ToolPaths) { self.tools = tools }
@@ -142,6 +157,13 @@ public actor GitpicRunner {
         timeout: TimeInterval? = nil
     ) async throws -> T {
         let out = try await run(args, on: queue, timeout: timeout)
+        // A killed child is not a decoding problem, and letting it fall through made it look
+        // like one: `ChildProcess.run` does not throw on timeout, it reports `timedOut` and an
+        // exit status of `128 + SIGKILL`, so the empty stdout failed to decode and arrived as
+        // `.undecodable(status: 137, raw: "")` — a failure with no text in it at all.
+        if out.timedOut, let timeout {
+            throw RunFailure.timedOut(after: timeout)
+        }
         guard let decoded = try? JSONDecoder().decode(T.self, from: out.stdout) else {
             throw Self.failure(out)
         }
@@ -187,10 +209,37 @@ public actor GitpicRunner {
     /// the shared gate, and no bound. A caller overrides them together or not at
     /// all: coming off the gate is what makes a bound necessary, since the gate is
     /// the only thing that was keeping two spawns apart.
+    ///
+    /// **Cancellation is honoured only for a bounded caller**, and that is deliberate rather
+    /// than half-finished. A `withCheckedThrowingContinuation` on its own is not cancellable —
+    /// cancelling the awaiting task neither ends the `await` nor touches the child — so the
+    /// bounded path wraps it and terminates the process, which is what makes the claim on
+    /// ``tapCask`` that a wedged child cannot outlive the sheet true instead of aspirational.
+    /// The unbounded path is left alone: those are uploads and config writes on `gate`, where
+    /// killing a child mid-`PUT` would trade a slow commit for a half-finished one, and none of
+    /// them runs from a `.task` that can be cancelled by a window closing.
     nonisolated func run(
         _ args: [String],
         on queue: DispatchQueue? = nil,
         timeout: TimeInterval? = nil
+    ) async throws -> ProcessOutcome {
+        guard timeout != nil else { return try await spawn(args, on: queue, timeout: nil) }
+        // Same holder `loginEvents` uses, for the same race: cancellation can arrive before
+        // the spawn has handed the process back, and `hold` terminates immediately in that case
+        // rather than leaving a child nobody will ever stop.
+        let child = LoginChild()
+        return try await withTaskCancellationHandler {
+            try await spawn(args, on: queue, timeout: timeout, onSpawn: { child.hold($0) })
+        } onCancel: {
+            child.terminate()
+        }
+    }
+
+    private nonisolated func spawn(
+        _ args: [String],
+        on queue: DispatchQueue?,
+        timeout: TimeInterval?,
+        onSpawn: (@Sendable (Process) -> Void)? = nil
     ) async throws -> ProcessOutcome {
         let tools = self.tools
         let queue = queue ?? gate
@@ -201,7 +250,7 @@ public actor GitpicRunner {
                 do {
                     let out = try ChildProcess.run(
                         executable: tools.gitpic, args: args, environment: env,
-                        timeout: timeout)
+                        timeout: timeout, onSpawn: onSpawn)
                     cont.resume(returning: out)
                 } catch {
                     cont.resume(throwing: error)
@@ -446,10 +495,12 @@ extension GitpicRunner {
     /// which is a weaker claim than the one that justifies `loginQueue`.
     ///
     /// Coming off the gate is why the bound is here rather than left to the CLI. Ten seconds
-    /// is shorter than the CLI's own ceiling on purpose, so this side is the real one and a
-    /// wedged child cannot outlive the sheet that asked. A timeout is not a failure to
-    /// report: it means the tap could not be read, which is a state the caller has an answer
-    /// for.
+    /// is shorter than the CLI's own ceiling on purpose, so this side is the real one — see
+    /// ``tapTimeout`` for why the wall-clock worst case is nearer thirteen. A wedged child
+    /// cannot outlive the sheet that asked, because ``run`` terminates it when the awaiting
+    /// task is cancelled. A timeout is not a failure to report: it means the tap could not be
+    /// read, which is a state the caller has an answer for — and it arrives as
+    /// `RunFailure.timedOut` rather than as an empty decode failure, so the log says so.
     public func tapCask() async throws -> TapCask {
         try await runJSON(["update", "cask", "--json"], as: TapCask.self,
                           on: Self.tapQueue, timeout: Self.tapTimeout)

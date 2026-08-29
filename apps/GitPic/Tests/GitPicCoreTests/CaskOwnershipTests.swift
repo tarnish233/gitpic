@@ -271,4 +271,149 @@ struct CaskOwnershipTests {
         #expect(verdict == .homebrews(cask: "gitpic", offers: .version("0.19.0")))
         #expect(calls.count == 1, "with no bundle version the clone proves nothing")
     }
+
+    /// **Taps hang off `HOMEBREW_REPOSITORY`, which is not the prefix on an Intel install.**
+    ///
+    /// Read out of Homebrew's own `bin/brew`: the repository starts equal to the prefix, is
+    /// re-derived from the `bin/brew` symlink target when there is one, and an x86_64 install
+    /// then forces the prefix back to `/usr/local`. So on Apple Silicon everything is under
+    /// `/opt/homebrew`, while on Intel the Caskroom is `/usr/local/Caskroom` and the tap clone is
+    /// `/usr/local/Homebrew/Library/Taps`.
+    ///
+    /// Reading only `<prefix>/Library/Taps` therefore found nothing on any Intel Mac, and the
+    /// failure was invisible: `detect` still worked, so ownership was right and only the free
+    /// short-circuit was dead — every sheet paid for a request the clone on disk could have
+    /// answered, and an Intel user whose network was down was told 「暂时读不到」 while the
+    /// answer sat in a file. The fixture could not have caught it either, because it wrote the
+    /// Apple Silicon layout by construction.
+    @Test("the tap clone is found under either Homebrew repository layout")
+    func theTapCloneIsFoundOnIntelToo() async throws {
+        for repositorySubpath in [nil, "Homebrew"] {
+            let f = try HomebrewShape.bundle()
+            defer { try? FileManager.default.removeItem(at: f.root) }
+            let layout = try HomebrewShape.install(
+                bundle: f.bundle, under: f.root, version: "0.18.0")
+            try HomebrewShape.tapClone(under: layout.prefix, declaring: "0.19.0",
+                                       repositorySubpath: repositorySubpath)
+
+            let where_ = repositorySubpath ?? "<prefix>"
+            #expect(CaskOwnership.localTapVersion(prefix: layout.prefix) == "0.19.0",
+                    "a clone under \(where_)/Library/Taps has to be read")
+
+            // And the whole point of reading it: the request is not spent.
+            let calls = Calls()
+            let verdict = await CaskOwnership.verdict(
+                bundle: f.bundle, prefixes: [layout.prefix], bundleVersion: "0.18.0",
+                askTap: { calls.bump(); return Self.tap("0.19.0") })
+            #expect(verdict == .homebrews(cask: "gitpic", offers: .version("0.19.0")))
+            #expect(calls.count == 0, "the clone already proved 0.19.0 is newer")
+        }
+    }
+
+    /// A CRLF clone parses, which it did not.
+    ///
+    /// `"\r\n"` is a single Swift `Character` and is not equal to `"\n"`, so
+    /// `split(separator: "\n")` returned the entire file as one piece — measured, one piece
+    /// against `str::lines()`'s three on the same bytes. The line never began with `version `,
+    /// the parser returned nil, and the doc's claim to follow "the same rules as `release.rs`'s
+    /// `cask_version`" was false for any clone checked out with `core.autocrlf` set or a
+    /// `.gitattributes` asking for CRLF.
+    @Test("a cask with Windows line endings parses the same as one without")
+    func aCrlfCaskParses() throws {
+        for ending in ["\n", "\r\n", "\r"] {
+            let f = try HomebrewShape.bundle()
+            defer { try? FileManager.default.removeItem(at: f.root) }
+            let layout = try HomebrewShape.install(
+                bundle: f.bundle, under: f.root, version: "0.18.0")
+            try HomebrewShape.tapClone(under: layout.prefix, declaring: "0.19.0",
+                                       lineEnding: ending)
+            #expect(CaskOwnership.localTapVersion(prefix: layout.prefix) == "0.19.0",
+                    "line ending \(ending.debugDescription) must not change the answer")
+        }
+    }
+
+    /// The captions **`verdict` itself writes**, as opposed to the ones a test hands it.
+    ///
+    /// Both are shown in a caption at 480 pt in a Chinese-only sheet, and neither may read like
+    /// a command — the command has its own monospaced row. `route`'s two are pinned by
+    /// `SelfUpdateRouteTests.theRoutesOwnCaptionsAreWrittenForTheWindow`; these are the other
+    /// two, and between them that is every user-facing Homebrew string in the codebase.
+    @Test("the captions the verdict writes are Chinese sentences, not command lines")
+    func everyCaptionIsWrittenForTheWindow() async throws {
+        let f = try HomebrewShape.bundle()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let layout = try HomebrewShape.install(bundle: f.bundle, under: f.root, version: "0.18.0")
+
+        func caption(
+            _ askTap: @escaping @Sendable () async throws -> TapCask
+        ) async -> String? {
+            let verdict = await CaskOwnership.verdict(
+                bundle: f.bundle, prefixes: [layout.prefix], bundleVersion: "0.18.0",
+                askTap: askTap)
+            guard case .homebrews(_, .unknown(let reason)) = verdict else { return nil }
+            return reason
+        }
+
+        // The lookup failed outright, and the cask was read but declares nothing comparable.
+        let failed = await caption { throw RunFailure.spawnFailed("gitpic 还没准备好") }
+        let saidNothing = await caption { Self.tap(nil) }
+        guard let failed, let saidNothing else {
+            Issue.record("both cases have to reach `unknown`")
+            return
+        }
+        #expect(failed != saidNothing,
+                "a read that failed and a cask that says nothing are different facts")
+        for reason in [failed, saidNothing] {
+            #expect(!reason.isEmpty)
+            #expect(!reason.contains("--"),
+                    "\(reason) reads like a command line, and the command has its own row")
+            #expect(!reason.contains("brew upgrade"), "\(reason) names the command inside prose")
+            #expect(reason.contains(where: { $0.unicodeScalars.first.map {
+                (0x4E00...0x9FFF).contains($0.value)
+            } == true }), "\(reason) is rendered in a Chinese-only sheet and has to be Chinese")
+        }
+    }
+
+    /// The Swift/Rust wire shape, decoded from the bytes rather than built by hand.
+    ///
+    /// Every other row in this suite constructs `TapCask` through its memberwise initialiser,
+    /// which exercises none of the decoding — so renaming `ok`, `cask` or `version` on either
+    /// side, or adding `CodingKeys`, left both suites green while every Homebrew user silently
+    /// got the caveat instead of the real answer. `UpdateReport` has four decode tests over
+    /// canned JSON for exactly this reason; this is `TapCask`'s.
+    @Test("the wire shape is a contract")
+    func theWireShapeIsAContract() throws {
+        let full = Data(#"{"ok":true,"cask":"gitpic","version":"0.20.9"}"#.utf8)
+        let decoded = try JSONDecoder().decode(TapCask.self, from: full)
+        #expect(decoded == TapCask(ok: true, cask: "gitpic", version: "0.20.9"))
+
+        // A cask that was read and declares nothing comparable: `version` is absent, not empty.
+        // `release.rs` skips the field entirely when it is `None`, so the absent form is the one
+        // that actually arrives.
+        let nothing = try JSONDecoder().decode(
+            TapCask.self, from: Data(#"{"ok":true,"cask":"gitpic"}"#.utf8))
+        #expect(nothing.version == nil)
+        #expect(nothing.ok)
+
+        // `ok` and `cask` are not optional, so a reply missing either is a contract break and
+        // has to fail loudly rather than decode into a default.
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(TapCask.self, from: Data(#"{"cask":"gitpic"}"#.utf8))
+        }
+    }
+
+    /// The path a user-facing version is read from is built from pinned constants.
+    ///
+    /// `CaskOwnership`'s doc claimed a counterpart to `release.rs`'s
+    /// `the_release_feed_is_a_compile_time_constant` already existed here. It did not — the three
+    /// constants that build the tap path were pinned only incidentally, by a raw string literal
+    /// inside the test fixture, so changing one of them here would have left the fixture agreeing
+    /// with the mistake. Same argument as the Rust side: a version read out of the wrong file
+    /// gets shown next to a command the user is told to run.
+    @Test("the tap path is built from pinned constants")
+    func theTapPathIsBuiltFromPinnedConstants() {
+        #expect(CaskOwnership.cask == "gitpic")
+        #expect(CaskOwnership.tapOwner == "tarnish233")
+        #expect(CaskOwnership.tapRepository == "homebrew-tap")
+    }
 }
