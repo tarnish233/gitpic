@@ -295,12 +295,19 @@ done
 [[ -n "$SHEET" ]] || fail "the update sheet never appeared (is $OLD_VERSION really older than $TARGET_VERSION?)"
 
 step "waiting for the upgrade route to resolve"
-# The action row is 「正在确认升级方式…」 until the route is known. It is now resolved from three
-# local facts and settles in a frame, where it used to cost up to a 20 s `brew list --cask` per
-# Homebrew prefix — the probe is still the row's shape rather than a fixed sleep, because a
-# fixed sleep would be either a guess or a delay. Three buttons means a route was offered
-# (下载并更新, 打开发布页 and 稍后 — there is no 立即更新 any more, the Homebrew branch is gone);
+# The action row is 「正在确认升级方式…」 until the route is known. Ownership is a directory scan
+# and a readlink, where it used to cost up to a 20 s `brew list --cask` per Homebrew prefix — the
+# probe is still the row's shape rather than a fixed sleep, because a fixed sleep would be either
+# a guess or a delay. Three buttons means a route was offered (下载并更新, 打开发布页 and 稍后);
 # two means `.unavailable`, which is a different failure and worth saying so.
+#
+# **This test copy must land on the self-install branch, and that is now a real question.** A
+# cask-managed bundle is handed `brew upgrade --cask gitpic` instead of being installed over, and
+# button 1 is then 复制升级命令 — which this script would click, copy a string, and then wait
+# forever for a process that was never going to be replaced. The copy lives in `~/Applications`
+# and no Caskroom entry points at it, so `CaskOwnership.detect` answers "not cask" and the
+# self-install branch is the right one. Asserted rather than assumed, because the failure mode
+# without the assertion is a 60 s timeout reading "never settled", which says nothing about why.
 ROUTED=""
 BUTTONS=""
 for _ in $(seq 1 60); do
@@ -312,6 +319,12 @@ if [[ -z "$ROUTED" ]]; then
   [[ "$BUTTONS" == "2" ]] && fail "the sheet offers no upgrade route here (only 打开发布页 and
       稍后). The log line beginning 'update: no in-app upgrade' says which reason."
   fail "the sheet's action row never settled (found $BUTTONS button(s))"
+fi
+# `Updater.resolve` logs the ownership verdict unconditionally, before the route.
+if ! grep -q 'update: not cask' "$APP_LOG"; then
+  fail "this copy was taken for a Homebrew-managed bundle, so button 1 is 复制升级命令 and not
+      下载并更新. The log line beginning 'update: cask' says which cask claimed it — a Caskroom
+      entry under /opt/homebrew or /usr/local resolving to $TEST_APP would do it."
 fi
 
 step "下载并更新"

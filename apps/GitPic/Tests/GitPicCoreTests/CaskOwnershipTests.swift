@@ -137,4 +137,138 @@ struct CaskOwnershipTests {
                     "\(refused) is not something to compare a bundle against")
         }
     }
+
+    // MARK: - The whole question, in the order that costs least
+
+    /// Counts calls across an isolation boundary without pulling an actor into the test.
+    private final class Calls: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func bump() { lock.lock(); n += 1; lock.unlock() }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return n }
+    }
+
+    private static func tap(_ version: String?) -> TapCask {
+        TapCask(ok: true, cask: "gitpic", version: version)
+    }
+
+    /// A bundle no cask owns costs nothing at all — in particular it does **not** spend the
+    /// request. Almost every GitPic is this case, and it runs on the sheet-open path.
+    @Test("a bundle no cask owns never reaches the network")
+    func nothingIsSpentOnANonCask() async throws {
+        let f = try HomebrewShape.bundle()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let calls = Calls()
+
+        let verdict = await CaskOwnership.verdict(
+            bundle: f.bundle, prefixes: [f.root.appendingPathComponent("homebrew")],
+            bundleVersion: "0.18.0",
+            askTap: { calls.bump(); return Self.tap("0.19.0") })
+
+        #expect(verdict == .notHomebrews)
+        #expect(calls.count == 0, "a bundle Homebrew does not own must not cost a request")
+    }
+
+    /// **The local clone short-circuits, and only in the direction where it can be trusted.**
+    ///
+    /// The clone is a lower bound: `brew upgrade` auto-updates before it resolves, so if the
+    /// clone already names something newer than the bundle, brew will certainly find at least
+    /// that — the answer is settled and no request is needed. This is the common case on a
+    /// machine that runs `brew update` regularly, which is most of them.
+    @Test("a local clone that already proves an upgrade skips the request")
+    func aLocalCloneAheadSettlesItForFree() async throws {
+        let f = try HomebrewShape.bundle()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let layout = try HomebrewShape.install(bundle: f.bundle, under: f.root, version: "0.18.0")
+        try HomebrewShape.tapClone(under: layout.prefix, declaring: "0.19.0")
+        let calls = Calls()
+
+        let verdict = await CaskOwnership.verdict(
+            bundle: f.bundle, prefixes: [layout.prefix], bundleVersion: "0.18.0",
+            askTap: { calls.bump(); return Self.tap("0.20.0") })
+
+        #expect(verdict == .homebrews(cask: "gitpic", offers: .version("0.19.0")))
+        #expect(calls.count == 0, "the clone already proved an upgrade exists")
+    }
+
+    /// **And in the other direction it is not trusted at all**, which is the half that makes the
+    /// request worth keeping. A clone saying "nothing newer" is indistinguishable from a clone
+    /// nobody has updated in a week, so the authoritative answer is fetched — and it wins.
+    @Test("a local clone with nothing newer is not believed, it is checked")
+    func aStaleCloneIsCheckedRatherThanBelieved() async throws {
+        let f = try HomebrewShape.bundle()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let layout = try HomebrewShape.install(bundle: f.bundle, under: f.root, version: "0.18.0")
+        try HomebrewShape.tapClone(under: layout.prefix, declaring: "0.18.0")
+        let calls = Calls()
+
+        let verdict = await CaskOwnership.verdict(
+            bundle: f.bundle, prefixes: [layout.prefix], bundleVersion: "0.18.0",
+            askTap: { calls.bump(); return Self.tap("0.19.0") })
+
+        #expect(verdict == .homebrews(cask: "gitpic", offers: .version("0.19.0")))
+        #expect(calls.count == 1, "a clone that cannot prove an upgrade has to be checked")
+    }
+
+    /// A missing clone is the same "cannot prove it" as a stale one, not an error.
+    @Test("no local clone means ask, not fail")
+    func aMissingCloneAsks() async throws {
+        let f = try HomebrewShape.bundle()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let layout = try HomebrewShape.install(bundle: f.bundle, under: f.root, version: "0.18.0")
+
+        let verdict = await CaskOwnership.verdict(
+            bundle: f.bundle, prefixes: [layout.prefix], bundleVersion: "0.18.0",
+            askTap: { Self.tap("0.19.0") })
+
+        #expect(verdict == .homebrews(cask: "gitpic", offers: .version("0.19.0")))
+    }
+
+    /// **A failure is never a refusal.** Both ways the answer can be missing — the lookup threw,
+    /// or it succeeded and the cask declares nothing comparable — become `Offer.unknown`, which
+    /// the route turns into the command plus a caveat. A brew user whose network is down still
+    /// gets something to run; their upgrade path is fine and the app has no business implying
+    /// otherwise. This is Claude Code's behaviour in the same spot.
+    @Test("a lookup that fails or says nothing still leaves the user a command")
+    func failureBecomesUnknownAndNotARefusal() async throws {
+        let f = try HomebrewShape.bundle()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let layout = try HomebrewShape.install(bundle: f.bundle, under: f.root, version: "0.18.0")
+
+        struct Boom: Error {}
+        let threw = await CaskOwnership.verdict(
+            bundle: f.bundle, prefixes: [layout.prefix], bundleVersion: "0.18.0",
+            askTap: { throw Boom() })
+        guard case .homebrews(_, .unknown(let thrownReason)) = threw else {
+            Issue.record("a failed lookup must still be a Homebrew answer")
+            return
+        }
+        #expect(!thrownReason.isEmpty)
+
+        let saidNothing = await CaskOwnership.verdict(
+            bundle: f.bundle, prefixes: [layout.prefix], bundleVersion: "0.18.0",
+            askTap: { Self.tap(nil) })
+        guard case .homebrews(_, .unknown) = saidNothing else {
+            Issue.record("a cask with no comparable version must be `unknown`")
+            return
+        }
+    }
+
+    /// An unreadable bundle version cannot short-circuit on the clone — there is nothing to
+    /// compare it against — so the lookup happens and the route decides what to do about it.
+    @Test("an unreadable bundle version does not skip the check")
+    func anUnreadableBundleVersionStillAsks() async throws {
+        let f = try HomebrewShape.bundle()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let layout = try HomebrewShape.install(bundle: f.bundle, under: f.root, version: "0.18.0")
+        try HomebrewShape.tapClone(under: layout.prefix, declaring: "0.19.0")
+        let calls = Calls()
+
+        let verdict = await CaskOwnership.verdict(
+            bundle: f.bundle, prefixes: [layout.prefix], bundleVersion: nil,
+            askTap: { calls.bump(); return Self.tap("0.19.0") })
+
+        #expect(verdict == .homebrews(cask: "gitpic", offers: .version("0.19.0")))
+        #expect(calls.count == 1, "with no bundle version the clone proves nothing")
+    }
 }

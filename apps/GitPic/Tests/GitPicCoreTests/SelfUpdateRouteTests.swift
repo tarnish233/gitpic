@@ -19,47 +19,74 @@ struct SelfUpdateRouteTests {
     }
     private static let sha = String(repeating: "ab", count: 32)
 
-    /// **One route, whoever installed the bundle.** This suite used to open with
-    /// `brewWins` — a cask-managed bundle went to `brew upgrade --cask gitpic` and only
-    /// everything else reached the installer — plus eleven rows protecting that fork: how the
-    /// verdicts of two Homebrew prefixes were folded, that an unanswered probe never became
-    /// "not brew's", and that a refusal the path already decided did not spawn brew anyway.
-    /// The fork is gone (the cask declares `auto_updates true`; `SelfUpdate.route`'s header has
-    /// the argument), and those rows went with the code they covered. What is left is the table
-    /// that was always about this machine rather than about brew.
+    /// What every row that is not about Homebrew wants. Spelled out at each call rather than
+    /// defaulted in `route` itself: a default would let a new call site skip the question
+    /// silently, and this is a question whose wrong answer installs over somebody's cask.
+    private static let notBrews = CaskOwnership.Verdict.notHomebrews
+    /// A cask that owns this bundle and offers `version`.
+    private static func brews(_ version: String) -> CaskOwnership.Verdict {
+        .homebrews(cask: "gitpic", offers: .version(version))
+    }
+
+    /// **One install path, whoever installed the bundle — but only one of the two branches
+    /// installs.** This suite once opened with `brewWins`, went through a period with no brew
+    /// question at all, and now asks it again in a narrower form: a cask-managed bundle is handed
+    /// a command instead of being installed over, and nothing spawns. The rows that went with the
+    /// original fork protected things that no longer exist to protect — how two prefixes' verdicts
+    /// were folded, that an unanswered probe never became "not brew's" — because `CaskOwnership`
+    /// answers conclusively from the filesystem and its own suite covers it.
     @Test("an older bundle in an Applications directory gets the installer")
     func installsAnOlderBundle() {
         let route = SelfUpdate.route(
+            cask: Self.notBrews,
             location: .applicationsDir, bundleVersion: "0.18.0", latest: "0.19.0",
             asset: Self.choice)
         #expect(route == .selfInstall(asset: Self.dmg, sha256: Self.sha, version: "0.19.0"))
     }
 
-    /// The structural claim the deleted rows used to make one case at a time: with the location,
-    /// the version and the asset all in order there is **no** remaining question that could send
-    /// this anywhere else. Nothing is asked about who installed the bundle, so nothing about the
-    /// machine's Homebrew can change the answer.
-    @Test("nothing but the location, the version and the asset decides the route")
-    func routeIsDecidedByThreeFactsOnly() {
+    /// The structural claim, one fact wider than it used to be: with ownership, the location, the
+    /// version and the asset all in order there is **no** remaining question that could send this
+    /// anywhere else — and ownership is the only input that was added, so nothing else about the
+    /// machine can change the answer either.
+    @Test("nothing but ownership, the location, the version and the asset decides the route")
+    func routeIsDecidedByFourFactsOnly() {
         let usable = SelfUpdate.route(
+            cask: Self.notBrews,
             location: .applicationsDir, bundleVersion: "0.18.0", latest: "0.19.0",
             asset: Self.choice)
         guard case .selfInstall = usable else {
-            Issue.record("three facts in order must produce an install and nothing else")
+            Issue.record("four facts in order must produce an install and nothing else")
             return
         }
-        // Break exactly one at a time; each must refuse, and none may produce an install.
+        // Break exactly one at a time; none may produce an install.
         let broken: [SelfUpdate.Route] = [
-            SelfUpdate.route(location: .elsewhere(path: "/Users/x/Downloads/GitPic.app"),
+            SelfUpdate.route(cask: Self.brews("0.19.0"), location: .applicationsDir,
                              bundleVersion: "0.18.0", latest: "0.19.0", asset: Self.choice),
-            SelfUpdate.route(location: .applicationsDir, bundleVersion: "not-a-version",
+            SelfUpdate.route(cask: Self.notBrews,
+                             location: .elsewhere(path: "/Users/x/Downloads/GitPic.app"),
+                             bundleVersion: "0.18.0", latest: "0.19.0", asset: Self.choice),
+            SelfUpdate.route(cask: Self.notBrews, location: .applicationsDir,
+                             bundleVersion: "not-a-version",
                              latest: "0.19.0", asset: Self.choice),
-            SelfUpdate.route(location: .applicationsDir, bundleVersion: "0.18.0",
+            SelfUpdate.route(cask: Self.notBrews, location: .applicationsDir,
+                             bundleVersion: "0.18.0",
                              latest: "0.19.0", asset: .none(reason: "GitHub 没有报校验和")),
         ]
         for route in broken {
+            if case .selfInstall = route {
+                Issue.record("a broken precondition must not install")
+                return
+            }
+        }
+        // And the ownership row specifically is a hand-over, not a refusal: a brew user must
+        // never be left with neither an install nor a command.
+        guard case .homebrewManaged = broken[0] else {
+            Issue.record("a cask-owned bundle must be handed the command")
+            return
+        }
+        for route in broken.dropFirst() {
             guard case .unavailable = route else {
-                Issue.record("a broken precondition must refuse, not install")
+                Issue.record("a broken precondition that is not about Homebrew must refuse")
                 return
             }
         }
@@ -69,14 +96,15 @@ struct SelfUpdateRouteTests {
     /// development build in the repository's `dist-app/`, which is the case that would
     /// otherwise replace a developer's build with a release one.
     ///
-    /// This also absorbs what `caskInACustomAppdirIsSentToTheReleasePage` used to pin. That row
-    /// existed to prove the location rule was not *looser* for a cask installed with a custom
-    /// `--appdir` than for anything else, back when the brew question could have overridden it.
-    /// With one route there is no second rule for it to be looser than, and the row said nothing
-    /// this one does not.
+    /// The row this used to absorb, `caskInACustomAppdirIsSentToTheReleasePage`, is now **inverted**
+    /// and lives in `casksOutrankTheLocationRule` below. It once proved the location rule was not
+    /// *looser* for a cask at a custom `--appdir`; the rule is now that ownership is asked first,
+    /// so such a bundle gets the command rather than this refusal. What is left here is the copy
+    /// that is nobody's cask.
     @Test("a bundle outside an Applications directory is refused, permanently")
     func elsewhereIsRefused() {
         let route = SelfUpdate.route(
+            cask: Self.notBrews,
             location: .elsewhere(path: "/Users/x/src/gitpic/dist-app/GitPic.app"),
             bundleVersion: "0.18.0", latest: "0.19.0", asset: Self.choice)
         guard case .unavailable(let reason, let retryable) = route else {
@@ -86,6 +114,120 @@ struct SelfUpdateRouteTests {
         // Not retryable: asking again cannot move the running bundle.
         #expect(!retryable)
         #expect(reason.contains("dist-app"))
+    }
+
+    // MARK: - When Homebrew owns the bundle
+
+    /// **Ownership is asked before the location, and this is the row that says why.**
+    ///
+    /// `brew install --cask gitpic --appdir ~/Apps` is an ordinary thing to do, and it produces a
+    /// bundle `location(of:)` calls `.elsewhere`. Asking location first sends that user to
+    /// 「这份 GitPic 在 …」 — a dead end — when `brew upgrade --cask gitpic` is exactly right for
+    /// them and safe, because the cask's own `uninstall quit:` handles the running app.
+    ///
+    /// This is the inversion of the deleted `caskInACustomAppdirIsSentToTheReleasePage`, which
+    /// pinned the opposite: that the location rule was not *looser* for a cask. The rule is now
+    /// that ownership outranks it, and the inversion is the load-bearing part.
+    @Test("a cask outranks the location rule, at any appdir")
+    func casksOutrankTheLocationRule() {
+        let route = SelfUpdate.route(
+            cask: Self.brews("0.19.0"),
+            location: .elsewhere(path: "/Users/x/Apps/GitPic.app"),
+            bundleVersion: "0.18.0", latest: "0.19.0", asset: Self.choice)
+        #expect(route == .homebrewManaged(command: "brew upgrade --cask gitpic",
+                                         installed: "0.18.0", available: "0.19.0"))
+    }
+
+    /// **The safety requirement, stated once over the whole space.** Nothing this app does may
+    /// install over a bundle Homebrew owns — that is the entire policy, and until now nothing
+    /// pinned it. Every other fact is varied underneath a cask verdict, including the
+    /// combinations that would otherwise be perfectly installable.
+    @Test("a cask-owned bundle is never installed over, whatever else is true")
+    func aCaskIsNeverInstalledOver() {
+        let locations: [SelfUpdate.BundleLocation] =
+            [.applicationsDir, .elsewhere(path: "/Users/x/Apps/GitPic.app")]
+        let versions: [String?] = ["0.18.0", "0.19.0", "not-a-version", nil]
+        let assets: [AssetChoice] = [Self.choice, .none(reason: "GitHub 没有报校验和")]
+        let offers: [CaskOwnership.Offer] =
+            [.version("0.19.0"), .version("0.18.0"), .unknown(reason: "暂时读不到")]
+
+        for location in locations {
+            for mine in versions {
+                for asset in assets {
+                    for offer in offers {
+                        let route = SelfUpdate.route(
+                            cask: .homebrews(cask: "gitpic", offers: offer),
+                            location: location, bundleVersion: mine, latest: "0.19.0",
+                            asset: asset)
+                        if case .selfInstall = route {
+                            Issue.record("a cask-owned bundle must never be installed over")
+                            return
+                        }
+                        // Nor may it dead-end: a brew user with neither an install nor a command
+                        // has nothing to do, which is the failure this whole route exists to
+                        // avoid. `homebrewUpToDate` is the one case with no command, and it is
+                        // an answer rather than a dead end.
+                        if case .unavailable = route {
+                            Issue.record("a cask-owned bundle must never reach a refusal")
+                            return
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The three outcomes, which are Claude Code's three read out of its own binary: the cask has
+    /// something newer, the cask has nothing newer, or what the cask has could not be read.
+    ///
+    /// **The comparison is against the cask, never against the release.** The middle row is the
+    /// one that proves it: a release at 0.19.0 exists and the bundle is 0.18.0, so the ordinary
+    /// version gate would install — but the tap still says 0.18.0, so `brew upgrade` would print
+    /// "the latest version is already installed" and exit 0. That window is real; the tap follows
+    /// a release by dispatch with a six-hourly cron behind it, and AGENTS.md records the dispatch
+    /// token having expired for three releases.
+    @Test("the cask's own version decides, not the release's")
+    func theCasksVersionDecides() {
+        let ahead = SelfUpdate.route(
+            cask: Self.brews("0.19.0"), location: .applicationsDir,
+            bundleVersion: "0.18.0", latest: "0.19.0", asset: Self.choice)
+        #expect(ahead == .homebrewManaged(command: "brew upgrade --cask gitpic",
+                                         installed: "0.18.0", available: "0.19.0"))
+
+        // The tap lags the release: no command, because the command would do nothing.
+        let lagging = SelfUpdate.route(
+            cask: Self.brews("0.18.0"), location: .applicationsDir,
+            bundleVersion: "0.18.0", latest: "0.19.0", asset: Self.choice)
+        #expect(lagging == .homebrewUpToDate(installed: "0.18.0"))
+
+        // A bundle *ahead* of the tap — which a self-updated copy from before this change is —
+        // is also nothing for brew to do, and must not be offered a downgrade.
+        let behindTap = SelfUpdate.route(
+            cask: Self.brews("0.18.0"), location: .applicationsDir,
+            bundleVersion: "0.19.0", latest: "0.19.0", asset: Self.choice)
+        #expect(behindTap == .homebrewUpToDate(installed: "0.19.0"))
+
+        let unreadable = SelfUpdate.route(
+            cask: .homebrews(cask: "gitpic", offers: .unknown(reason: "暂时读不到 Homebrew 提供的版本")),
+            location: .applicationsDir, bundleVersion: "0.18.0", latest: "0.19.0",
+            asset: Self.choice)
+        #expect(unreadable == .homebrewUnverified(command: "brew upgrade --cask gitpic",
+                                                 reason: "暂时读不到 Homebrew 提供的版本"))
+    }
+
+    /// The command names the cask that was actually found, not a hardcoded token — so a rename in
+    /// the tap, or a second cask, cannot make the app print a command for the wrong one.
+    @Test("the command is built from the cask that owns the bundle")
+    func theCommandNamesTheCaskThatWasFound() {
+        let route = SelfUpdate.route(
+            cask: .homebrews(cask: "gitpic-beta", offers: .version("0.19.0")),
+            location: .applicationsDir, bundleVersion: "0.18.0", latest: "0.19.0",
+            asset: Self.choice)
+        guard case .homebrewManaged(let command, _, _) = route else {
+            Issue.record("expected the Homebrew hand-over")
+            return
+        }
+        #expect(command == "brew upgrade --cask gitpic-beta")
     }
 
     /// **No developer English reaches the window, and nothing reads like a command line.**
@@ -99,17 +241,25 @@ struct SelfUpdateRouteTests {
     /// The old row also asserted `!reason.contains("/")`, and that does **not** generalise: the
     /// location refusal names the path it is refusing, which is the entire information in it.
     /// An option flag is the part that was never legitimate.
+    ///
+    /// **Reintroducing the Homebrew branch did not weaken this.** The one deliberate command
+    /// string in the whole route is `homebrewManaged`/`homebrewUnverified`'s own `command` value,
+    /// which the sheet renders as a monospaced row rather than as prose — so the ban below still
+    /// applies to every `reason` unaltered, and `theHandOverCarriesTheCommandOutsideTheProse`
+    /// pins that the prose half stays clean too.
     @Test("every refusal is a Chinese sentence, not a command line")
     func refusalsAreWrittenForTheWindow() {
         let refusals: [SelfUpdate.Route] = [
-            SelfUpdate.route(location: .elsewhere(path: "/Users/x/Downloads/GitPic.app"),
+            SelfUpdate.route(cask: Self.notBrews,
+                             location: .elsewhere(path: "/Users/x/Downloads/GitPic.app"),
                              bundleVersion: "0.18.0", latest: "0.19.0", asset: Self.choice),
-            SelfUpdate.route(location: .applicationsDir, bundleVersion: nil, latest: "0.19.0",
+            SelfUpdate.route(cask: Self.notBrews, location: .applicationsDir,
+                             bundleVersion: nil, latest: "0.19.0", asset: Self.choice),
+            SelfUpdate.route(cask: Self.notBrews, location: .applicationsDir,
+                             bundleVersion: "0.18.0", latest: "not-a-version",
                              asset: Self.choice),
-            SelfUpdate.route(location: .applicationsDir, bundleVersion: "0.18.0",
-                             latest: "not-a-version", asset: Self.choice),
-            SelfUpdate.route(location: .applicationsDir, bundleVersion: "0.19.0",
-                             latest: "0.19.0", asset: Self.choice),
+            SelfUpdate.route(cask: Self.notBrews, location: .applicationsDir,
+                             bundleVersion: "0.19.0", latest: "0.19.0", asset: Self.choice),
         ]
         for route in refusals {
             guard case .unavailable(let shown, _) = route else {
@@ -124,12 +274,45 @@ struct SelfUpdateRouteTests {
         }
     }
 
+    /// **The one command string is carried, not narrated.** `refusalsAreWrittenForTheWindow` bans
+    /// a command line from any `reason`, and the Homebrew branch has to respect that rather than
+    /// be exempted from it: the flag lives in `command`, which the sheet draws as a monospaced
+    /// selectable row, and `homebrewUnverified`'s `reason` — the only prose the branch mints —
+    /// stays a Chinese sentence with no flag in it.
+    ///
+    /// `homebrewUpToDate` carries no command at all, which is the whole point of that case.
+    @Test("the hand-over carries the command outside the prose")
+    func theHandOverCarriesTheCommandOutsideTheProse() {
+        let unverified = SelfUpdate.route(
+            cask: .homebrews(cask: "gitpic", offers: .unknown(reason: "暂时读不到 Homebrew 提供的版本")),
+            location: .applicationsDir, bundleVersion: "0.18.0", latest: "0.19.0",
+            asset: Self.choice)
+        guard case .homebrewUnverified(let command, let reason) = unverified else {
+            Issue.record("expected the unverified hand-over")
+            return
+        }
+        #expect(command.contains("--cask"), "the command is what the user has to run")
+        #expect(!reason.contains("--"),
+                "\(reason) is prose in a caption at 480 pt and may not read like a command")
+        #expect(reason.contains(where: { $0.unicodeScalars.first.map {
+            (0x4E00...0x9FFF).contains($0.value)
+        } == true }), "\(reason) is rendered in a Chinese-only sheet and has to be Chinese")
+
+        // Nothing else in the route mints a command, and `homebrewUpToDate` deliberately has
+        // none: during the tap's lag `brew upgrade` would print "already installed" and exit 0.
+        let upToDate = SelfUpdate.route(
+            cask: Self.brews("0.18.0"), location: .applicationsDir,
+            bundleVersion: "0.18.0", latest: "0.19.0", asset: Self.choice)
+        #expect(upToDate == .homebrewUpToDate(installed: "0.18.0"))
+    }
+
     /// The gate is the *bundle's* version, not the report's `current` — that one comes from
     /// the CLI, and this replaces the bundle. Equal or newer is not an update.
     @Test("the bundle's own version decides, and it must be older")
     func versionGate() {
         for mine in ["0.19.0", "0.20.0", "1.0.0"] {
             let route = SelfUpdate.route(
+                cask: Self.notBrews,
                 location: .applicationsDir, bundleVersion: mine, latest: "0.19.0",
                 asset: Self.choice)
             guard case .unavailable(let reason, _) = route else {
@@ -140,6 +323,7 @@ struct SelfUpdateRouteTests {
         }
         // And older is.
         guard case .selfInstall = SelfUpdate.route(
+            cask: Self.notBrews,
             location: .applicationsDir, bundleVersion: "0.9.0", latest: "0.10.0",
             asset: Self.choice) else {
             // 0.9.0 < 0.10.0 is the comparison a string sort gets backwards, which is why
@@ -153,6 +337,7 @@ struct SelfUpdateRouteTests {
     func unreadableVersion() {
         for mine in [nil, "", "0.18", "0.18.0.1", "0.18.0-rc1", "app-v0.1.2", "abc"] {
             let route = SelfUpdate.route(
+                cask: Self.notBrews,
                 location: .applicationsDir, bundleVersion: mine, latest: "0.19.0",
                 asset: Self.choice)
             guard case .unavailable = route else {
@@ -167,6 +352,7 @@ struct SelfUpdateRouteTests {
     @Test("an unverifiable asset stops the install and keeps its reason")
     func assetRefusalPropagates() {
         let route = SelfUpdate.route(
+            cask: Self.notBrews,
             location: .applicationsDir, bundleVersion: "0.18.0", latest: "0.19.0",
             asset: .none(reason: "GitHub 没有报校验和"))
         #expect(route == .unavailable(reason: "GitHub 没有报校验和", retryable: false))
