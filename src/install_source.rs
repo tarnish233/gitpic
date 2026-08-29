@@ -141,14 +141,16 @@ pub fn detect() -> InstallSource {
 /// directory with no Cellar above it, while a Cellar path never contains a bundle, so only the
 /// bundle case needs the Caskroom lookup to refine it.
 ///
-/// **Both remaining tests are anchored to a root, and were not.** They asked whether `Cellar` or
-/// `.cargo` appeared *anywhere* in the path, which is true of `/Users/x/Cellar/gitpic`, of an
-/// unpacked tarball or restored backup under a directory somebody happened to name `Cellar`, and
-/// of `~/backup/.cargo/bin/gitpic`. Each then printed a command that fails — `brew upgrade
-/// gitpic_cli` answers "No available formula with the name", and the cargo line would rebuild a
-/// different binary than the one running. That is the mistake the module header says the old
-/// two-command note existed to avoid, and an unanchored match printed it with confidence rather
-/// than offering it as one of two. A path under no root this machine actually installs into is
+/// **Both remaining tests are anchored to the exact directory an installer writes, and were
+/// not.** They first asked whether `Cellar` or `.cargo` appeared *anywhere* in the canonicalised
+/// path, which is true of `/Users/x/Cellar/gitpic` and of `~/backup/.cargo/bin/gitpic`. Anchoring
+/// to the roots fixed those but was still one level too loose: `<prefix>/Cellar` matches any
+/// formula's keg, and the whole of `CARGO_HOME` includes `registry/src` and `git/checkouts` —
+/// one buildable source tree per dependency ever fetched. A `target/release/gitpic` built in one
+/// of those was reported as a `cargo install`, and `cargo install --force` would have rewritten
+/// `CARGO_HOME/bin/gitpic`, a different file from the one running. Every one of those prints a
+/// command that does not upgrade the binary that printed it, which is the whole thing this module
+/// exists to avoid. A path under no directory an installer actually writes is
 /// [`InstallSource::Unknown`], which points at the page.
 fn classify(exe: &Path, prefixes: &[PathBuf], cargo_root: Option<&Path>) -> InstallSource {
     if let Some(bundle) = app_bundle(exe) {
@@ -158,13 +160,23 @@ fn classify(exe: &Path, prefixes: &[PathBuf], cargo_root: Option<&Path>) -> Inst
             InstallSource::App
         };
     }
+    // `Cellar/gitpic_cli`, not `Cellar`: the question is whether *our* formula installed this
+    // file, and `brew upgrade gitpic_cli` is only the answer if it did. A `gitpic` sitting under
+    // some other formula's Cellar is not ours to upgrade.
     if prefixes
         .iter()
-        .any(|prefix| exe.starts_with(prefix.join("Cellar")))
+        .any(|prefix| exe.starts_with(prefix.join("Cellar").join(FORMULA)))
     {
         return InstallSource::Formula;
     }
-    if cargo_root.is_some_and(|root| exe.starts_with(root)) {
+    // The `bin` directory itself, not the whole of `CARGO_HOME`. `cargo install` writes exactly
+    // one place, and `CARGO_HOME` also holds sources that can be *built* — `registry/src` alone
+    // has one unpacked tree per dependency ever fetched, and `git/checkouts` holds clones. A
+    // `target/release/gitpic` inside one of those is not something `cargo install --force`
+    // replaces: that would rewrite `CARGO_HOME/bin/gitpic`, a different file from the one
+    // running. Comparing the parent directory also means the executable's name is not spelled
+    // here, so Windows' `gitpic.exe` needs no separate case.
+    if cargo_root.is_some_and(|root| exe.parent() == Some(root.join("bin").as_path())) {
         return InstallSource::Cargo;
     }
     InstallSource::Unknown
@@ -254,24 +266,30 @@ mod tests {
         }
     }
 
-    /// `Cellar` and `.cargo` are only meaningful *under a root this machine installs into*, and
-    /// an unanchored component match said otherwise. Every row here is a path that names one of
-    /// those words while belonging to neither — a directory somebody called `Cellar`, a restored
-    /// backup holding a `.cargo`, a Homebrew at a prefix this machine does not have — and each
-    /// would otherwise be handed a command that fails rather than the release page.
+    /// `Cellar` and `.cargo` are only meaningful at the exact directory an installer writes to,
+    /// and looser matches said otherwise. Every row here names one of those words while
+    /// belonging to a place no installer would replace, and each would otherwise be handed a
+    /// command that upgrades some *other* file — or none.
     #[test]
     fn a_familiar_word_in_the_path_is_not_evidence_of_an_installer() {
         let brews = vec![PathBuf::from("/opt/homebrew")];
         let cargo = PathBuf::from("/Users/x/.cargo");
         for path in [
-            // `brew upgrade gitpic_cli` here answers "No available formula with the name".
+            // Not under any prefix's Cellar.
             "/Users/x/Cellar/gitpic",
             "/Users/x/Downloads/Cellar/gitpic_cli/0.20.9/bin/gitpic",
             // A different Homebrew's Cellar, which this machine cannot upgrade from.
             "/usr/local/Cellar/gitpic_cli/0.20.9/bin/gitpic",
+            // Under *a* Cellar, but not our formula's — `brew upgrade gitpic_cli` is not the
+            // command that put this here.
+            "/opt/homebrew/Cellar/some-other-tool/1.0.0/bin/gitpic",
             // Copied out of a backup: `cargo install --force` would replace a *different* file.
             "/Users/x/backup/.cargo/bin/gitpic",
             "/Users/y/.cargo/bin/gitpic",
+            // Built inside CARGO_HOME, which holds one source tree per dependency ever fetched.
+            // `cargo install --force` writes `.cargo/bin/gitpic`, not this.
+            "/Users/x/.cargo/registry/src/index.crates.io-1949cf8/gitpic-0.20.9/target/release/gitpic",
+            "/Users/x/.cargo/git/checkouts/gitpic-abc123/9f8e7d6/target/release/gitpic",
         ] {
             assert_eq!(
                 classify(Path::new(path), &brews, Some(&cargo)),

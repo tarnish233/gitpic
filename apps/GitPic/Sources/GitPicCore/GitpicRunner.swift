@@ -210,36 +210,27 @@ public actor GitpicRunner {
     /// all: coming off the gate is what makes a bound necessary, since the gate is
     /// the only thing that was keeping two spawns apart.
     ///
-    /// **Cancellation is honoured only for a bounded caller**, and that is deliberate rather
-    /// than half-finished. A `withCheckedThrowingContinuation` on its own is not cancellable —
-    /// cancelling the awaiting task neither ends the `await` nor touches the child — so the
-    /// bounded path wraps it and terminates the process, which is what makes the claim on
-    /// ``tapCask`` that a wedged child cannot outlive the sheet true instead of aspirational.
-    /// The unbounded path is left alone: those are uploads and config writes on `gate`, where
-    /// killing a child mid-`PUT` would trade a slow commit for a half-finished one, and none of
-    /// them runs from a `.task` that can be cancelled by a window closing.
+    /// **This deliberately does not honour task cancellation, and re-adding it is a bug.**
+    /// A `withCheckedThrowingContinuation` is not cancellable on its own, so cancelling the
+    /// awaiting task neither ends the `await` nor touches the child — and one caller *depends*
+    /// on that. `AppModel.resolveUpgradePath` runs inside `UpdateSheet`'s `.task(id:)`, which
+    /// SwiftUI cancels the moment a new report moves the generation; its loop then notices the
+    /// generation moved and asks again, and that second ask is made from a task that is already
+    /// cancelled. Its own comment says so: "the probe already running is the one that has to
+    /// notice."
+    ///
+    /// A `withTaskCancellationHandler` here was tried and reverted, having been measured: with
+    /// it, the first probe is killed mid-flight *and the re-query is killed before it starts*,
+    /// because `onCancel` fires immediately on an already-cancelled task. `CaskOwnership.verdict`
+    /// turns any failure into `Offer.unknown`, so the new report resolved to 「暂时读不到
+    /// Homebrew 提供的版本」 instead of a real comparison — wrong information where the
+    /// alternative is an honest 「正在确认升级方式…」 for the length of the bound. What the
+    /// handler was meant to buy is not worth that: the only bounded caller is a read-only
+    /// lookup, capped by ``tapTimeout``, on its own queue, blocking nothing.
     nonisolated func run(
         _ args: [String],
         on queue: DispatchQueue? = nil,
         timeout: TimeInterval? = nil
-    ) async throws -> ProcessOutcome {
-        guard timeout != nil else { return try await spawn(args, on: queue, timeout: nil) }
-        // Same holder `loginEvents` uses, for the same race: cancellation can arrive before
-        // the spawn has handed the process back, and `hold` terminates immediately in that case
-        // rather than leaving a child nobody will ever stop.
-        let child = LoginChild()
-        return try await withTaskCancellationHandler {
-            try await spawn(args, on: queue, timeout: timeout, onSpawn: { child.hold($0) })
-        } onCancel: {
-            child.terminate()
-        }
-    }
-
-    private nonisolated func spawn(
-        _ args: [String],
-        on queue: DispatchQueue?,
-        timeout: TimeInterval?,
-        onSpawn: (@Sendable (Process) -> Void)? = nil
     ) async throws -> ProcessOutcome {
         let tools = self.tools
         let queue = queue ?? gate
@@ -250,7 +241,7 @@ public actor GitpicRunner {
                 do {
                     let out = try ChildProcess.run(
                         executable: tools.gitpic, args: args, environment: env,
-                        timeout: timeout, onSpawn: onSpawn)
+                        timeout: timeout)
                     cont.resume(returning: out)
                 } catch {
                     cont.resume(throwing: error)
@@ -496,11 +487,12 @@ extension GitpicRunner {
     ///
     /// Coming off the gate is why the bound is here rather than left to the CLI. Ten seconds
     /// is shorter than the CLI's own ceiling on purpose, so this side is the real one — see
-    /// ``tapTimeout`` for why the wall-clock worst case is nearer thirteen. A wedged child
-    /// cannot outlive the sheet that asked, because ``run`` terminates it when the awaiting
-    /// task is cancelled. A timeout is not a failure to report: it means the tap could not be
-    /// read, which is a state the caller has an answer for — and it arrives as
-    /// `RunFailure.timedOut` rather than as an empty decode failure, so the log says so.
+    /// ``tapTimeout`` for why the wall-clock worst case is nearer thirteen. That bound, and not
+    /// task cancellation, is what stops a wedged child outliving the sheet: ``run`` deliberately
+    /// does not honour cancellation, for a reason spelled out there. A timeout is not a failure
+    /// to report: it means the tap could not be read, which is a state the caller has an answer
+    /// for — and it arrives as `RunFailure.timedOut` rather than as an empty decode failure, so
+    /// the log says so.
     public func tapCask() async throws -> TapCask {
         try await runJSON(["update", "cask", "--json"], as: TapCask.self,
                           on: Self.tapQueue, timeout: Self.tapTimeout)
