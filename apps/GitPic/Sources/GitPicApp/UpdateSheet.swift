@@ -220,15 +220,6 @@ struct UpdateSheet: View {
         }
     }
 
-    /// The download's own bar, plus the one action that makes sense while it runs.
-    ///
-    /// **取消 is live for the whole of this row**, and that is a fix rather than an oversight.
-    /// It used to be `.disabled(model.installing)`, which switched it off at the last byte —
-    /// before the hashing, the mount, the version check and the copy, every one of which stops
-    /// when asked. And with 稍后 gone from this branch there was no `.cancelAction` anywhere on
-    /// the sheet, so a running download could not be dismissed even by Escape. It carries the
-    /// shortcut now: Escape stops the install, the row goes back to buttons, and a second Escape
-    /// closes the sheet. Two presses to leave, rather than a dialog that ignores the key.
     /// What the three Homebrew outcomes say under the buttons.
     ///
     /// The command is shown as a selectable monospaced row, not folded into prose. Two reasons:
@@ -240,6 +231,11 @@ struct UpdateSheet: View {
     /// `homebrewUpToDate` prints no command on purpose. Its whole point is that
     /// `brew upgrade --cask gitpic` would answer "the latest version is already installed" and
     /// exit 0 during the tap's lag, so offering it would be offering a command that does nothing.
+    /// It has **two** sentences because the case covers two different situations: the bundle and
+    /// the cask agreeing, which is the tap simply lagging, and the bundle being *ahead* of the
+    /// cask, which is what a user who self-installed before this version shipped looks like. One
+    /// sentence for both said 「已是 Homebrew 提供的最新版本（bundle 的版本号）」, which claims
+    /// Homebrew provides a version it does not and tells that user to wait for what they have.
     @ViewBuilder private var homebrewExplanation: some View {
         switch model.upgradePath {
         case .homebrewManaged(let command, let installed, let available):
@@ -255,16 +251,27 @@ struct UpdateSheet: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Text(command).font(.caption.monospaced()).textSelection(.enabled)
             }
-        case .homebrewUpToDate(let installed):
-            Text("已是 Homebrew 提供的最新版本（\(installed)）。"
-                 + "新版本要等 Homebrew 跟上之后才能装。")
+        case .homebrewUpToDate(let installed, let offered):
+            Text(installed == offered
+                 ? "已是 Homebrew 提供的最新版本（\(installed)）。新版本要等 Homebrew 跟上之后才能装。"
+                 : "当前 \(installed) 比 Homebrew 提供的 \(offered) 新，所以没有可以装的更新。")
                 .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
         case .selfInstall, .unavailable, .none:
             EmptyView()
         }
     }
 
-    @ViewBuilder private func installProgress(_ progress: SelfUpdate.Progress) -> some View {        VStack(alignment: .leading, spacing: 6) {
+    /// The download's own bar, plus the one action that makes sense while it runs.
+    ///
+    /// **取消 is live for the whole of this row**, and that is a fix rather than an oversight.
+    /// It used to be `.disabled(model.installing)`, which switched it off at the last byte —
+    /// before the hashing, the mount, the version check and the copy, every one of which stops
+    /// when asked. And with 稍后 gone from this branch there was no `.cancelAction` anywhere on
+    /// the sheet, so a running download could not be dismissed even by Escape. It carries the
+    /// shortcut now: Escape stops the install, the row goes back to buttons, and a second Escape
+    /// closes the sheet. Two presses to leave, rather than a dialog that ignores the key.
+    @ViewBuilder private func installProgress(_ progress: SelfUpdate.Progress) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 if model.installing {
                     // Past the last byte: hashing, mounting, checking the version, verifying

@@ -132,8 +132,8 @@ enum Updater {
                             + (retryable ? " (will ask again)" : ""))
         case .homebrewManaged(let command, let installed, let available):
             Diagnostics.log("update: handing over `\(command)` — \(installed) → \(available)")
-        case .homebrewUpToDate(let installed):
-            Diagnostics.log("update: Homebrew has nothing newer than \(installed) to install")
+        case .homebrewUpToDate(let installed, let offered):
+            Diagnostics.log("update: Homebrew offers \(offered), not newer than \(installed)")
         case .homebrewUnverified(let command, let reason):
             Diagnostics.log("update: offering `\(command)` unverified — \(reason)")
         }

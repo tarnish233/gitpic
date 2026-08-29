@@ -975,9 +975,37 @@ final class AppModel {
     /// launch is not being quiet. Nothing else is suppressed — 设置 ▸ 通用 and the sheet still
     /// say so for as long as the update stands, which is where someone who wants to act on it
     /// later goes looking.
+    ///
+    /// **``forgetAnnouncement()`` exists because one situation can spend this record on a
+    /// moment the user could not act on.** The banner is posted when the check finds a release;
+    /// which upgrade is actually on offer is only worked out later, when the sheet opens. A
+    /// Homebrew user inside the tap's lag therefore gets their one banner for a version the
+    /// sheet then declines to install, and once `announcedVersion` equals that release no
+    /// further banner for it can ever fire — including after the tap lands and
+    /// `brew upgrade` would work. Before this policy the single notification was always
+    /// actionable, because the app installed for everyone.
     private(set) var announcedVersion: String? = AppModel.defaults
         .string(forKey: AppModel.announcedKey) {
         didSet { Self.defaults.set(announcedVersion, forKey: Self.announcedKey) }
+    }
+
+    /// Drop the record of the banner for `version`, so a later check may announce it again.
+    ///
+    /// Called only for `homebrewUpToDate` — the one outcome that offers nothing at all.
+    /// `homebrewUnverified` hands over the command, so its banner was actionable and stays
+    /// spent.
+    ///
+    /// The cost is at most one banner per daily check for as long as the tap lags, and that is
+    /// the right trade rather than a nag: the tap normally follows a release by dispatch within
+    /// minutes and by cron within six hours, so a daily check almost never lands twice inside
+    /// the window. When it does lag for days, AGENTS.md records how that happens — an expired
+    /// dispatch token, which went unnoticed across three releases — and a daily reminder that
+    /// Homebrew has not caught up is precisely the signal that was missing.
+    func forgetAnnouncement(of version: String) {
+        guard announcedVersion == version else { return }
+        announcedVersion = nil
+        Diagnostics.log("update: \(version) was announced but Homebrew cannot install it yet"
+                        + " — allowing it to be announced again")
     }
 
     fileprivate static let defaults = UserDefaults.standard
@@ -1126,9 +1154,17 @@ final class AppModel {
             // report's generation is not a sufficient key for them: the *tap* can move without
             // the report moving at all, since a release is published the moment it exists while
             // the tap follows by dispatch with a six-hourly cron behind it. Cache
-            // `homebrewUpToDate` and it keeps saying 「已是 Homebrew 提供的最新版本」 with no
-            // command for the life of the process, even after `brew upgrade` would have worked
-            // — the same shape as the bug described above, arriving from the other direction.
+            // `homebrewUpToDate` and reopening the sheet would keep repeating 「已是 Homebrew
+            // 提供的最新版本」 with no command even after `brew upgrade` had started working —
+            // the same shape as the bug described above, arriving from the other direction.
+            //
+            // **What that buys is a fresh answer per sheet opening, and no more than that.**
+            // `resolveUpgradePath` has one caller, `UpdateSheet`'s `.task(id:)`, so a sheet left
+            // open does not re-ask: the id only moves when a new check lands. Someone who leaves
+            // it open across the tap catching up still reads the old sentence until they close
+            // and reopen it. That is a real limit and is accepted here — the alternative is
+            // polling the tap behind an idle window — but it is narrower than "for the life of
+            // the process", which is what caching would cost.
             //
             // The recomputation is bounded: `GitpicRunner.tapCask` is off the spawn gate with a
             // 10 s ceiling, and `resolvingUpgradePath` below stops two from stacking.
@@ -1161,6 +1197,9 @@ final class AppModel {
             }
             upgradePath = route
             upgradePathGeneration = generation
+            // The banner for this release was spent on a version Homebrew cannot install yet,
+            // so let a later check announce it again — see `forgetAnnouncement(of:)`.
+            if case .homebrewUpToDate = route { forgetAnnouncement(of: report.latest) }
             return
         }
     }
