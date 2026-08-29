@@ -1121,6 +1121,17 @@ final class AppModel {
         if upgradePathGeneration == updateGeneration {
             if case .unavailable(_, retryable: false) = upgradePath { return }
             if case .selfInstall = upgradePath { return }
+            // **No Homebrew case is listed here, and adding one would be a bug.** This is an
+            // allowlist, so they fall through and are recomputed — which is what they need. The
+            // report's generation is not a sufficient key for them: the *tap* can move without
+            // the report moving at all, since a release is published the moment it exists while
+            // the tap follows by dispatch with a six-hourly cron behind it. Cache
+            // `homebrewUpToDate` and it keeps saying 「已是 Homebrew 提供的最新版本」 with no
+            // command for the life of the process, even after `brew upgrade` would have worked
+            // — the same shape as the bug described above, arriving from the other direction.
+            //
+            // The recomputation is bounded: `GitpicRunner.tapCask` is off the spawn gate with a
+            // 10 s ceiling, and `resolvingUpgradePath` below stops two from stacking.
         }
         // The old guard also did not hold across the `await`, so two sheet appearances could
         // both spawn the probe.
@@ -1143,7 +1154,7 @@ final class AppModel {
         while true {
             guard let report = update else { return }
             let generation = updateGeneration
-            let route = await Updater.resolve(report: report)
+            let route = await Updater.resolve(report: report, runner: runner)
             guard generation == updateGeneration else {
                 Diagnostics.log("update: a newer report landed mid-probe — resolving again")
                 continue
@@ -1156,18 +1167,47 @@ final class AppModel {
 
     /// Do the upgrade that was resolved, and quit.
     ///
-    /// One arm, where there were two. The other handed the install to `brew upgrade --cask gitpic`
-    /// and could fail *before* the app quit — hence the `catch` that used to be here, setting
-    /// 「启动升级失败」 while this process was still alive to show it. `performSelfInstall` reports
-    /// its own failures through `updateFailure` from inside its `Task`, so there is nothing to
-    /// catch at this level any more.
+    /// Still one arm that installs. The Homebrew cases are here to say so explicitly rather than
+    /// through a `default:` — nothing is installed over a cask-managed bundle, and the command
+    /// the user copies is `copyUpgradeCommand`'s business, not an upgrade this process performs.
+    /// That is the difference from the arm `bb07783` deleted, which handed the install to
+    /// `brew upgrade --cask gitpic` and could fail *before* the app quit — hence the `catch` that
+    /// used to be here, setting 「启动升级失败」 while this process was still alive to show it.
+    /// `performSelfInstall` reports its own failures through `updateFailure` from inside its
+    /// `Task`, so there is nothing to catch at this level any more.
     func performUpgrade() {
         switch upgradePath {
         case .selfInstall(let asset, let sha, let version):
             performSelfInstall(asset: asset, sha256: sha, version: version)
-        case .unavailable, .none:
+        case .unavailable, .homebrewManaged, .homebrewUpToDate, .homebrewUnverified, .none:
             return
         }
+    }
+
+    /// Put the Homebrew upgrade command on the pasteboard.
+    ///
+    /// Reads the command off the route rather than taking it as a parameter, so what the user
+    /// copies is what the decision produced — the sheet cannot compose a command of its own, and
+    /// the cask token in it came from the Caskroom entry that actually owns this bundle.
+    ///
+    /// Returns whether the write happened, because `Clipboard.write` can fail and reporting
+    /// 「已复制」 anyway is worse than not copying: the user pastes something stale and never
+    /// learns why. The failure is also surfaced through `notify`, since a sheet that closes
+    /// takes any inline message with it.
+    @discardableResult
+    func copyUpgradeCommand() -> Bool {
+        let command: String
+        switch upgradePath {
+        case .homebrewManaged(let c, _, _), .homebrewUnverified(let c, _):
+            command = c
+        case .selfInstall, .unavailable, .homebrewUpToDate, .none:
+            return false
+        }
+        guard Clipboard.write(command) else {
+            notify(title: "写剪贴板失败", body: "升级命令没有复制，请手动输入 \(command)")
+            return false
+        }
+        return true
     }
 
     /// Download, verify, stage and hand off — reporting each stage into the sheet.

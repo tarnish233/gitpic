@@ -133,8 +133,7 @@ public enum CaskOwnership: Equatable, Sendable {
     }
 }
 
-/// What `gitpic update cask --json` reports.
-///
+/// What `gitpic update cask --json` reports.///
 /// A `Decodable` mirror of `release.rs`'s `TapCask`, and its field spellings are a contract
 /// between the two in the same way `UpdateReport`'s are. All three are single words, so unlike
 /// `UpdateReport` there is nothing here for `CodingKeys` to translate.
@@ -147,4 +146,80 @@ public struct TapCask: Decodable, Equatable, Sendable {
     public let ok: Bool
     public let cask: String
     public let version: String?
+}
+
+extension CaskOwnership {
+
+    /// What `SelfUpdate.route` is told about Homebrew — the whole answer, already computed.
+    ///
+    /// A value rather than a closure the route calls, which is the shape the deleted
+    /// `brew: @autoclosure () -> BrewOwnership` parameter had. That one existed so a bundle
+    /// outside the two Applications directories could refuse *without paying* for a 28-second
+    /// probe. Nothing here is expensive enough to defer, and making the route pure again is
+    /// worth more: every row of the decision table can be exercised by naming its inputs.
+    public enum Verdict: Equatable, Sendable {
+        /// No cask claims this bundle. The app installs its own updates, as it does for
+        /// everyone who did not use Homebrew.
+        case notHomebrews
+        /// A cask owns it, and this is what the cask has to offer.
+        case homebrews(cask: String, offers: Offer)
+    }
+
+    /// What the tap declares, or why that could not be established.
+    public enum Offer: Equatable, Sendable {
+        case version(String)
+        /// User-facing and therefore **Chinese**, and deliberately not the underlying error:
+        /// a network message or a command line rendered in a caption at 480 pt is the bug
+        /// `refusalsAreWrittenForTheWindow` exists to catch. The real error is logged.
+        case unknown(reason: String)
+    }
+
+    /// The whole Homebrew question, asked in the order that costs least.
+    ///
+    /// Three steps, and the second is the one worth explaining. Detection is free. Then the
+    /// tap's *local* clone is consulted, and if it already names something newer than the
+    /// installed bundle the answer is settled with no request at all — because that direction
+    /// is the reliable one: `brew upgrade` auto-updates before it resolves, so it will find at
+    /// least whatever the stale clone already knows about. Only when the clone cannot prove
+    /// that is `askTap` spent, since a clone saying "nothing newer" is indistinguishable from
+    /// a clone that has not been updated in a week.
+    ///
+    /// `askTap` is injected rather than reached for so that all three outcomes are testable
+    /// without a subprocess or a socket. In the app it is `GitpicRunner.tapCask`.
+    ///
+    /// `@Sendable` because this is `nonisolated` and the closure is awaited across an isolation
+    /// boundary — the app's caller is `@MainActor` and the runner it captures is an actor, so
+    /// there is nothing non-`Sendable` for it to close over.
+    ///
+    /// Every failure becomes `Offer.unknown`, never a refusal. A brew user whose network is
+    /// down still gets the command — that is Claude Code's behaviour too, and the alternative
+    /// is a dead end for someone whose upgrade path is fine.
+    public static func verdict(
+        bundle: URL,
+        prefixes: [URL] = defaultPrefixes,
+        bundleVersion: String?,
+        askTap: @Sendable () async throws -> TapCask
+    ) async -> Verdict {
+        guard let install = detect(bundle: bundle, prefixes: prefixes) else {
+            return .notHomebrews
+        }
+        let mine = bundleVersion.flatMap(SelfUpdate.Version.init)
+        if let local = localTapVersion(prefix: install.prefix),
+           let offered = SelfUpdate.Version(local), let mine, mine < offered {
+            return .homebrews(cask: install.cask, offers: .version(local))
+        }
+        do {
+            let tap = try await askTap()
+            guard let version = tap.version else {
+                return .homebrews(
+                    cask: install.cask,
+                    offers: .unknown(reason: "Homebrew 的 cask 里没有可比较的版本号"))
+            }
+            return .homebrews(cask: install.cask, offers: .version(version))
+        } catch {
+            return .homebrews(
+                cask: install.cask,
+                offers: .unknown(reason: "暂时读不到 Homebrew 提供的版本"))
+        }
+    }
 }

@@ -65,29 +65,54 @@ enum Updater {
     /// Which upgrade to offer for this install, if any.
     ///
     /// The decision itself is `SelfUpdate.route`, a pure function in `GitPicCore` so that every
-    /// row of it is testable; what is left here is reading the two facts it needs off the running
-    /// bundle.
+    /// row of it is testable, and the Homebrew question is `CaskOwnership.verdict`, in
+    /// `GitPicCore` for the same reason — `swift test` cannot import `GitPicApp`, so anything
+    /// decided here is decided untested. What is left in this file is reading two facts off the
+    /// running bundle and handing the runner over as the thing that can reach the network.
     ///
-    /// **This used to be the expensive part of opening the sheet.** It asked whether Homebrew
-    /// owned this bundle, which meant up to an 8 s login-shell probe plus a 20 s
-    /// `brew list --cask` per Homebrew prefix, serialised on one queue — up to 28 seconds of
-    /// 「正在确认升级方式…」 before a button could be drawn. Each of those questions ruled out a
-    /// way the old brew branch could do the wrong thing: finding `brew` said nothing about
-    /// whether *this* app came from it, and the cask being installed still did not make *this*
-    /// bundle the one brew manages, so a copy in `~/Applications` beside a cask in
+    /// **This used to be the expensive part of opening the sheet**, and the new version is why
+    /// the question could come back. It asked `brew` itself: up to an 8 s login-shell probe plus
+    /// a 20 s `brew list --cask` per prefix, serialised — up to 28 seconds of
+    /// 「正在确认升级方式…」 before a button could be drawn. Those questions were bought at that
+    /// price because `brew list --cask` answers about the *machine*: the cask being installed did
+    /// not make *this* bundle the one brew manages, so a copy in `~/Applications` beside a cask in
     /// `/Applications` would have upgraded the other one and been reopened at its own path,
-    /// unchanged, still reporting the same update, forever. There is no brew branch to protect
-    /// now, so none of it is asked.
+    /// unchanged, still reporting the same update, forever. `CaskOwnership.detect` asks about the
+    /// bundle instead, with a directory scan and a `readlink`, and gets a better answer for
+    /// nothing. The one cost that remains is the tap lookup, and only for a bundle a cask really
+    /// owns — off the spawn gate and bounded at 10 s; see `GitpicRunner.tapCask`.
     ///
-    /// Still `async`, though nothing in it suspends: `UpdateSheet`'s `.task(id:)` awaits it, and
-    /// `AppModel.resolveUpgradePath`'s guard against a report landing mid-resolve is worth
-    /// keeping whether or not the resolve is instant.
-    static func resolve(report: UpdateReport) async -> SelfUpdate.Route {
+    /// `async` for a real reason now, where before it was kept only because `UpdateSheet`'s
+    /// `.task(id:)` awaited it.
+    static func resolve(report: UpdateReport, runner: GitpicRunner?) async -> SelfUpdate.Route {
         let bundle = Bundle.main.bundleURL
         // The bundle's own version, not `report.current` — that one is the CLI's, and this
         // replaces the bundle.
         let mine = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        let cask = await CaskOwnership.verdict(
+            bundle: bundle, bundleVersion: mine,
+            askTap: {
+                // No runner means the CLI was never located, which is a state the app can be in
+                // (see `AppModel.attach`). Ownership is still known — it is a filesystem
+                // question — so the answer is "a cask owns this, and what it offers is unknown",
+                // which shows the command with a caveat rather than pretending nothing is wrong.
+                guard let runner else { throw RunFailure.spawnFailed("gitpic 还没准备好") }
+                return try await runner.tapCask()
+            })
+        // Logged unconditionally, and worth its own line rather than being folded into the
+        // outcomes below: `check-self-update.sh` asserts on it. Its test copy lives in
+        // `~/Applications` and must stay on the self-install branch, and a change that flipped
+        // it would otherwise surface only as the script timing out with "never settled".
+        switch cask {
+        case .notHomebrews:
+            Diagnostics.log("update: not cask — no Caskroom entry points at this bundle")
+        case .homebrews(let token, .version(let offered)):
+            Diagnostics.log("update: cask \(token) — Homebrew offers \(offered)")
+        case .homebrews(let token, .unknown(let reason)):
+            Diagnostics.log("update: cask \(token) — what Homebrew offers is unknown (\(reason))")
+        }
         let route = SelfUpdate.route(
+            cask: cask,
             location: SelfUpdate.location(of: bundle),
             bundleVersion: mine,
             latest: report.latest,
@@ -99,6 +124,12 @@ enum Updater {
         case .unavailable(let reason, let retryable):
             Diagnostics.log("update: no in-app upgrade — \(reason)"
                             + (retryable ? " (will ask again)" : ""))
+        case .homebrewManaged(let command, let installed, let available):
+            Diagnostics.log("update: handing over `\(command)` — \(installed) → \(available)")
+        case .homebrewUpToDate(let installed):
+            Diagnostics.log("update: Homebrew has nothing newer than \(installed) to install")
+        case .homebrewUnverified(let command, let reason):
+            Diagnostics.log("update: offering `\(command)` unverified — \(reason)")
         }
         return route
     }

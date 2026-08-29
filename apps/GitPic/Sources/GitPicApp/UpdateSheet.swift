@@ -17,6 +17,14 @@ struct UpdateSheet: View {
 
     @State private var confirmingInstall = false
 
+    /// Whether the Homebrew command has been copied, so the button can say so.
+    ///
+    /// Inline rather than a notification: the confirmation belongs next to the thing that was
+    /// copied, and this sheet stays open afterwards — there is nothing to install, so the user's
+    /// next move is a terminal. Reset with the report, since a new report means a new route and
+    /// possibly a different command.
+    @State private var copied = false
+
     /// The release notes, parsed once per report rather than once per redraw.
     ///
     /// `report.summary` rewrites the body, `UpdateReport.displayMarkdown` rewrites its headings
@@ -36,10 +44,15 @@ struct UpdateSheet: View {
             actions
         }
         .frame(width: 480, height: 420)
-        // Asked when the sheet appears rather than at launch: it spawns `brew list`, which
-        // is up to 20 s of somebody else's process, and nothing before this moment needs
-        // the answer. It also needs the completed report, because which route is available
+        // Asked when the sheet appears rather than at launch: for a Homebrew-managed bundle it
+        // goes to the network to find out what the cask offers, and nothing before this moment
+        // needs the answer. It also needs the completed report, because which route is available
         // depends on what the release published.
+        //
+        // The old note here said this "spawns `brew list`, which is up to 20 s of somebody
+        // else's process". Nothing spawns brew any more — ownership is a directory scan — and
+        // what remains is one bounded `gitpic update cask`, off the spawn gate. See
+        // `CaskOwnership` and `GitpicRunner.tapCask`.
         //
         // Keyed on the report generation, not on appearance alone: a check that lands while
         // this sheet is open replaces the report the route was derived from, and a route
@@ -47,6 +60,7 @@ struct UpdateSheet: View {
         // `AppModel.updateGeneration`.
         .task(id: model.updateGeneration) {
             renderedNotes = Self.markdown(UpdateReport.displayMarkdown(report.summary))
+            copied = false
             await model.resolveUpgradePath()
         }
     }
@@ -122,10 +136,25 @@ struct UpdateSheet: View {
                             .buttonStyle(.borderedProminent)
                         Text(Self.size(asset.size))
                             .font(.caption).foregroundStyle(.secondary)
-                    case .unavailable, .none:
-                        // No button at all rather than a disabled one: the install cannot work
-                        // here, and a greyed-out control with a tooltip is a worse answer than
-                        // the reason printed below it.
+                    case .homebrewManaged, .homebrewUnverified:
+                        // Homebrew owns this bundle, so the prominent action is the command
+                        // rather than an install. It sits exactly where the deleted 立即更新
+                        // button was, and does something narrower: that one quit the app and
+                        // spawned brew, this one copies a line of text.
+                        Button(copied ? "已复制" : "复制升级命令") {
+                            copied = model.copyUpgradeCommand()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        // Not disabled once copied: the pasteboard is shared with everything
+                        // else on the machine, so a second copy after something overwrote it is
+                        // a reasonable thing to want. The label is the confirmation; the button
+                        // stays a button.
+                    case .unavailable, .homebrewUpToDate, .none:
+                        // No button at all rather than a disabled one: there is nothing to
+                        // offer here, and a greyed-out control with a tooltip is a worse answer
+                        // than the sentence printed below it. `homebrewUpToDate` is in this arm
+                        // deliberately — brew has nothing to install, so a command would be a
+                        // command that does nothing.
                         EmptyView()
                     }
                     Button("打开发布页") {
@@ -147,12 +176,21 @@ struct UpdateSheet: View {
                 // bundle brew manages at a path this app is not running from, and is wrong in
                 // more ways now that "the directory cannot be written" and "the release has no
                 // verifiable image" are also possible.
+                //
+                // **The `brew upgrade` sentence is gone from here**, and it was a live bug: it
+                // was appended to *every* refusal, so a copy running from `~/Downloads` on a
+                // machine with no cask was told to run a command that answers
+                // `Error: Cask 'gitpic' is not installed`. A cask-managed bundle no longer
+                // reaches this branch at all — it has its own, below — so the only readers left
+                // here are the ones for whom that command was always wrong.
                 VStack(alignment: .leading, spacing: 4) {
                     Text(reason).font(.caption).foregroundStyle(.secondary)
-                    Text("可以到发布页手动下载，或在终端运行 `brew upgrade --cask gitpic`。")
+                    Text("可以到发布页手动下载。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .textSelection(.enabled)
+            } else {
+                homebrewExplanation
             }
         }
         .padding(16)
@@ -184,8 +222,42 @@ struct UpdateSheet: View {
     /// the sheet, so a running download could not be dismissed even by Escape. It carries the
     /// shortcut now: Escape stops the install, the row goes back to buttons, and a second Escape
     /// closes the sheet. Two presses to leave, rather than a dialog that ignores the key.
-    @ViewBuilder private func installProgress(_ progress: SelfUpdate.Progress) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+    /// What the three Homebrew outcomes say under the buttons.
+    ///
+    /// The command is shown as a selectable monospaced row, not folded into prose. Two reasons:
+    /// the house idiom for something the user has to retype is `.caption.monospaced()` plus
+    /// `.textSelection(.enabled)` (see `HostPane`'s one-time code), and a command wrapped into a
+    /// Chinese sentence is a command someone mistypes. The button copies it so most people never
+    /// retype it at all.
+    ///
+    /// `homebrewUpToDate` prints no command on purpose. Its whole point is that
+    /// `brew upgrade --cask gitpic` would answer "the latest version is already installed" and
+    /// exit 0 during the tap's lag, so offering it would be offering a command that does nothing.
+    @ViewBuilder private var homebrewExplanation: some View {
+        switch model.upgradePath {
+        case .homebrewManaged(let command, let installed, let available):
+            VStack(alignment: .leading, spacing: 4) {
+                Text("这份 GitPic 由 Homebrew 管理，请在终端里升级："
+                     + "\(installed) → \(available)")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(command).font(.caption.monospaced()).textSelection(.enabled)
+            }
+        case .homebrewUnverified(let command, let reason):
+            VStack(alignment: .leading, spacing: 4) {
+                Text("这份 GitPic 由 Homebrew 管理。\(reason)，所以先按下面这条命令升级：")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(command).font(.caption.monospaced()).textSelection(.enabled)
+            }
+        case .homebrewUpToDate(let installed):
+            Text("已是 Homebrew 提供的最新版本（\(installed)）。"
+                 + "新版本要等 Homebrew 跟上之后才能装。")
+                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+        case .selfInstall, .unavailable, .none:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder private func installProgress(_ progress: SelfUpdate.Progress) -> some View {        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 if model.installing {
                     // Past the last byte: hashing, mounting, checking the version, verifying
