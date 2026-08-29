@@ -59,10 +59,16 @@ fn default_prefixes() -> Vec<PathBuf> {
 }
 
 /// Where `cargo install` puts a binary for the user running this one: `CARGO_HOME` if set,
-/// otherwise `~/.cargo`.
+/// otherwise the platform's home directory plus `.cargo`.
 ///
 /// Read at runtime and not baked in, because the question is where *this* file sits, and the
 /// answer that matters is the one `cargo install --force` would write to now.
+///
+/// `USERPROFILE` as well as `HOME`, because this CLI ships for Windows and `HOME` is usually
+/// unset there. Getting it wrong is not a crash — `cargo_root` returns `None`, nothing matches,
+/// and the answer degrades to [`InstallSource::Unknown`] and the release page — but `Cargo` is
+/// the one source of the five that means anything on Windows at all, the other four being
+/// Homebrew and macOS bundles, so it is the one worth resolving there.
 fn cargo_root() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("CARGO_HOME") {
         let home = PathBuf::from(home);
@@ -70,7 +76,9 @@ fn cargo_root() -> Option<PathBuf> {
             return Some(home);
         }
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo"))
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|h| PathBuf::from(h).join(".cargo"))
 }
 
 /// How this copy of `gitpic` was installed.
@@ -294,6 +302,14 @@ mod tests {
     /// `Caskroom/gitpic/<version>/GitPic.app` symlink resolving to it. Without the link the
     /// same bundle is `App`, and printing a cask command for it would fail with
     /// "Cask 'gitpic' is not installed".
+    ///
+    /// **Unix only, because it creates symlinks.** `std::os::unix::fs::symlink` does not exist
+    /// on Windows, so this did not compile there at all — and the CLI is built and tested for
+    /// Windows, which is where CI caught it. Gating rather than porting to
+    /// `std::os::windows::fs::symlink_dir`: the subject is a macOS cask installing a macOS app
+    /// bundle, so there is nothing for the Windows build to learn from it. Everything above is
+    /// pure path arithmetic and stays covered on every platform.
+    #[cfg(unix)]
     #[test]
     fn a_caskroom_link_is_what_makes_a_bundle_the_casks() {
         let root = std::env::temp_dir().join(format!("gitpic-src-{}", std::process::id()));
