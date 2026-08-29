@@ -101,10 +101,11 @@ public enum ToolDiscovery {
     ///
     /// **What that used to cost, and what it costs now.** This probe had a second caller: the
     /// Homebrew ownership question, where a false "absent" folded into "not brew's" and
-    /// authorised replacing whatever was in `/Applications`. That caller is gone — the cask
-    /// declares `auto_updates true` and the app installs over every copy, so nothing asks about
-    /// brew any more (see `SelfUpdate.route`). The evidence below is kept as measured, because
-    /// the bracketing it justifies is still what makes the *remaining* caller correct: a false
+    /// authorised replacing whatever was in `/Applications`. That caller is gone, and it did not
+    /// come back when the ownership question did — `CaskOwnership.detect` reads the Caskroom's own
+    /// symlinks instead of asking `brew` whether it exists, so no shell is involved and there is
+    /// no "could not tell" to fold. The evidence below is kept as measured, because the
+    /// bracketing it justifies is still what makes the *remaining* caller correct: a false
     /// "absent" now means `locateGitpic` reports no CLI on a machine that has one, which is a
     /// milder failure than an unwanted install but still a wrong answer, and still reachable
     /// exactly for the custom-prefix users this probe exists to serve — the hardcoded paths are

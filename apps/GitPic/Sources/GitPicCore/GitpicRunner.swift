@@ -21,6 +21,13 @@ public enum RunFailure: Error, Sendable, Equatable {
     /// Carries the raw text so the UI can show it verbatim instead of inventing an
     /// explanation.
     case undecodable(status: Int32, raw: String)
+    /// The child outlived the bound its caller set and was killed.
+    ///
+    /// Its own case because it is the one failure with *no output to quote*, and it used to
+    /// arrive as `.undecodable(status: 137, raw: "")` — a SIGKILL exit code and an empty
+    /// string, rendered as 「看不懂 gitpic 的回答（退出码 137，没有输出）。可能装的是旧版本。」,
+    /// which names the wrong cause entirely. Only a caller that passes `timeout:` can see it.
+    case timedOut(after: TimeInterval)
 }
 
 extension RunFailure {
@@ -52,6 +59,8 @@ extension RunFailure {
                 return "看不懂 gitpic 的回答（退出码 \(status)，没有输出）。可能装的是旧版本。"
             }
             return "看不懂 gitpic 的回答（退出码 \(status)）：\(said)"
+        case .timedOut(let after):
+            return "gitpic 超过 \(Int(after)) 秒没有回应，已经结束它。"
         }
     }
 }
@@ -92,6 +101,21 @@ public actor GitpicRunner {
     /// UI, and the second would invalidate nothing but the user's attention.
     private nonisolated static let loginQueue = DispatchQueue(label: "dev.gitpic.app.login")
 
+    /// The tap lookup's own queue, off `gate` for the reason spelled out on `tapCask`.
+    /// Serial as well, so two sheet openings in a row cannot put two of them on the
+    /// machine — there is nothing to gain from the second and the answer would be the same.
+    private nonisolated static let tapQueue = DispatchQueue(label: "dev.gitpic.app.tap")
+
+    /// Shorter than the CLI's own 20 s request ceiling on purpose, so this side is the
+    /// binding one. Coming off `gate` removed the accident that used to bound this.
+    ///
+    /// It bounds when the child is *asked* to stop, not when it is gone: `ChildProcess.run`
+    /// terminates, waits up to 2 s, `SIGKILL`s and waits up to 1 s more, all after the
+    /// deadline. So the worst case is nearer 13 s than 10 — stated because four doc comments
+    /// used to say "10 s" flatly, and a reader sizing the sheet's wait against it would be
+    /// three seconds short.
+    private nonisolated static let tapTimeout: TimeInterval = 10
+
     public init(tools: ToolPaths) { self.tools = tools }
 
     public var toolPaths: ToolPaths { tools }
@@ -128,9 +152,18 @@ public actor GitpicRunner {
 
     private func runJSON<T: Decodable>(
         _ args: [String],
-        as: T.Type
+        as: T.Type,
+        on queue: DispatchQueue? = nil,
+        timeout: TimeInterval? = nil
     ) async throws -> T {
-        let out = try await run(args)
+        let out = try await run(args, on: queue, timeout: timeout)
+        // A killed child is not a decoding problem, and letting it fall through made it look
+        // like one: `ChildProcess.run` does not throw on timeout, it reports `timedOut` and an
+        // exit status of `128 + SIGKILL`, so the empty stdout failed to decode and arrived as
+        // `.undecodable(status: 137, raw: "")` — a failure with no text in it at all.
+        if out.timedOut, let timeout {
+            throw RunFailure.timedOut(after: timeout)
+        }
         guard let decoded = try? JSONDecoder().decode(T.self, from: out.stdout) else {
             throw Self.failure(out)
         }
@@ -171,15 +204,44 @@ public actor GitpicRunner {
     /// invocations and `tools` is immutable. Hopping onto the actor would only
     /// add a suspension, and suspensions are precisely what does *not* serialise
     /// here (see the type comment).
-    nonisolated func run(_ args: [String]) async throws -> ProcessOutcome {
+    ///
+    /// `queue` and `timeout` both default to what every ordinary invocation wants —
+    /// the shared gate, and no bound. A caller overrides them together or not at
+    /// all: coming off the gate is what makes a bound necessary, since the gate is
+    /// the only thing that was keeping two spawns apart.
+    ///
+    /// **This deliberately does not honour task cancellation, and re-adding it is a bug.**
+    /// A `withCheckedThrowingContinuation` is not cancellable on its own, so cancelling the
+    /// awaiting task neither ends the `await` nor touches the child — and one caller *depends*
+    /// on that. `AppModel.resolveUpgradePath` runs inside `UpdateSheet`'s `.task(id:)`, which
+    /// SwiftUI cancels the moment a new report moves the generation; its loop then notices the
+    /// generation moved and asks again, and that second ask is made from a task that is already
+    /// cancelled. Its own comment says so: "the probe already running is the one that has to
+    /// notice."
+    ///
+    /// A `withTaskCancellationHandler` here was tried and reverted, having been measured: with
+    /// it, the first probe is killed mid-flight *and the re-query is killed before it starts*,
+    /// because `onCancel` fires immediately on an already-cancelled task. `CaskOwnership.verdict`
+    /// turns any failure into `Offer.unknown`, so the new report resolved to 「暂时读不到
+    /// Homebrew 提供的版本」 instead of a real comparison — wrong information where the
+    /// alternative is an honest 「正在确认升级方式…」 for the length of the bound. What the
+    /// handler was meant to buy is not worth that: the only bounded caller is a read-only
+    /// lookup, capped by ``tapTimeout``, on its own queue, blocking nothing.
+    nonisolated func run(
+        _ args: [String],
+        on queue: DispatchQueue? = nil,
+        timeout: TimeInterval? = nil
+    ) async throws -> ProcessOutcome {
         let tools = self.tools
+        let queue = queue ?? gate
         return try await withCheckedThrowingContinuation { cont in
-            gate.async {
+            queue.async {
                 var env = ProcessInfo.processInfo.environment
                 env["PATH"] = ToolPaths.childPATH
                 do {
                     let out = try ChildProcess.run(
-                        executable: tools.gitpic, args: args, environment: env)
+                        executable: tools.gitpic, args: args, environment: env,
+                        timeout: timeout)
                     cont.resume(returning: out)
                 } catch {
                     cont.resume(throwing: error)
@@ -398,16 +460,42 @@ extension GitpicRunner {
 
     /// Whether a newer gitpic has been released, and what changed in it.
     ///
-    /// Unlike its neighbours this one needs neither config nor credential — the releases
-    /// endpoint is public — so it is the one report that still works on a machine where
-    /// `config.toml` is unreadable. That matters here more than it sounds: the fix for
-    /// whatever broke it may be in the release this call is about to find.
+    /// Unlike its neighbours this one needs neither config nor credential to *work* — it
+    /// reads the image-host token when there is one, only to raise GitHub's rate limit, and
+    /// every way that can fail collapses to an anonymous request. So it is the one report
+    /// that still works on a machine where `config.toml` is unreadable. That matters here
+    /// more than it sounds: the fix for whatever broke it may be in the release this call is
+    /// about to find.
     ///
     /// A failure to reach GitHub throws, and the caller shows it rather than swallowing
     /// it: "已是最新" for a check that never completed is the one answer that hides a
     /// pending update behind a reassuring message.
     public func updateCheck() async throws -> UpdateReport {
         try await runJSON(["update", "check", "--json"], as: UpdateReport.self)
+    }
+
+    /// What `brew upgrade --cask gitpic` would install, asked only when a cask owns us.
+    ///
+    /// **Deliberately not on `gate`**, for the reason `loginEvents` is not: the gate has no
+    /// timeout, and this one goes to the network. The CLI bounds a single attempt at 20 s
+    /// with a 10 s connect and retries once anonymously if GitHub refuses the credential, so
+    /// worst case is around forty seconds — and on `gate` that is forty seconds in front of
+    /// every upload, on the sheet-open path. Deleting twenty-eight seconds of exactly that
+    /// shape is what `bb07783` was for; putting forty back wearing a different hat would be
+    /// the worse regression. A read-only lookup races with nothing: it writes no file at all,
+    /// which is a weaker claim than the one that justifies `loginQueue`.
+    ///
+    /// Coming off the gate is why the bound is here rather than left to the CLI. Ten seconds
+    /// is shorter than the CLI's own ceiling on purpose, so this side is the real one — see
+    /// ``tapTimeout`` for why the wall-clock worst case is nearer thirteen. That bound, and not
+    /// task cancellation, is what stops a wedged child outliving the sheet: ``run`` deliberately
+    /// does not honour cancellation, for a reason spelled out there. A timeout is not a failure
+    /// to report: it means the tap could not be read, which is a state the caller has an answer
+    /// for — and it arrives as `RunFailure.timedOut` rather than as an empty decode failure, so
+    /// the log says so.
+    public func tapCask() async throws -> TapCask {
+        try await runJSON(["update", "cask", "--json"], as: TapCask.self,
+                          on: Self.tapQueue, timeout: Self.tapTimeout)
     }
 
     /// Every branch on one repository.

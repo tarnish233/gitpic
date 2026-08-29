@@ -10,7 +10,8 @@
 - `github.rs` — GitHub Contents API client (upload, dedup, health checks).
 - `naming.rs`, `link.rs`, `imageproc.rs`, `output.rs`, `error.rs` — path/hash, URL/markdown, compression, human/JSON output, error types.
 - `history.rs` — the upload log the app's 历史 pane reads.
-- `release.rs` — the update check behind `gitpic update check`: version parsing and comparison, the `releases/latest` fetch, and the release's assets (name, size, download URL, GitHub's `digest`) that the app installs an update from. The feed is a compile-time constant on purpose, pinned by a test — its text is rendered inside GitPic's own window, so nothing configurable may choose its origin, and download URLs come from the API rather than a template for the same reason.
+- `release.rs` — the update check behind `gitpic update check`, and the tap lookup behind `gitpic update cask`: version parsing and comparison, the `releases/latest` fetch, the release's assets (name, size, download URL, GitHub's `digest`) that the app installs an update from, and a Contents-API read of the tap's `Casks/gitpic.rb` answering what `brew upgrade --cask gitpic` would install. Both origins are compile-time constants on purpose, pinned by a test — their text is rendered inside GitPic's own window, so nothing configurable may choose them, and download URLs come from the API rather than a template for the same reason.
+- `install_source.rs` — which of the five ways this binary was installed (cask app, hand-installed app, `gitpic_cli` formula, `cargo install`, or unknown), so `gitpic update` prints the one upgrade command that install actually wants instead of two to choose between. Canonicalises `current_exe()` first: the cask links `bin/gitpic` into the app bundle, and on Apple platforms the un-canonicalised path is the symlink, which classifies the commonest install of all as neither an app nor a formula. Distinct from `GitPicCore`'s `CaskOwnership`, which asks whether *the bundle* is cask-managed rather than where *this binary* came from.
 - `testutil.rs` — `#[cfg(test)]` only: the loopback stub server, a canned response, and the request reader shared by `github`'s and `release`'s tests. One `sock.read` is not a whole request; the module says what that cost twice.
 - `commands/` — one module per action (`upload`, `auth_cmd`, `repos`, `branches`, `doctor`, `list`, `config_cmd`, `completion`, `skill`, `update`).
 
@@ -50,27 +51,46 @@ file and cannot be at different versions. The two entries therefore compete for
 `bin/gitpic` — install one, not both — and the formula exists for Linux, Intel, CI, and
 anyone who wants no app.
 
-**Two cask stanzas the app's updater depends on. Do not drop either.**
-
-`auto_updates true` declares that the artifact updates itself, which is what lets the in-app
-installer replace a cask-managed bundle without brew fighting it — the Cask Cookbook defines the
-stanza as exactly this case, an app menu with a *Check for Updates…* that really downloads and
-installs. It is not "brew stops managing gitpic": current Homebrew reads the version out of
-`/Applications/GitPic.app/Contents/Info.plist` and compares *that* against the tap
-(`Cask#auto_updates_bundle_outdated?`; `HOMEBREW_UPGRADE_AUTO_UPDATES_CASKS` defaults on), so
-`brew upgrade` still upgrades a bundle that is genuinely behind and correctly does nothing once
-the app has updated itself. Without the stanza brew compares its own install receipt, which goes
-stale the moment the app self-updates, and reinstalls a version already on disk.
+**One cask stanza the app's updater depends on. Do not drop it.**
 
 `uninstall quit: "dev.gitpic.app"` makes brew quit the app before it swaps the bundle and reopen
 it afterwards (`Cask::Upgrade` passes `quit: true` by default). Without it a
-`brew upgrade --cask gitpic` typed into a terminal replaces a bundle that is still running. It
-does not interfere with the app's own update: brew skips the quit when the app is not running, so
-nothing gets opened twice.
+`brew upgrade --cask gitpic` typed into a terminal replaces a bundle that is still running. This
+is now **load-bearing rather than a courtesy**: the app's update sheet hands that exact command to
+every Homebrew user instead of installing anything itself, and GitPic is `.accessory`, so brew's
+reopen is the only thing that puts the menu-bar icon back.
 
-The app-side half of this is `SelfUpdate.route` and `Updater`, whose headers carry the full
-argument. **The two repositories have to move together** — the app has no Homebrew branch left,
-so a cask without these stanzas means brew and the app both trying to own the bundle.
+**`auto_updates true` is on its way out, and the order matters.** It asserts that the artifact
+updates itself, which stopped being true of a cask-managed copy when `SelfUpdate.route` began
+deferring to brew for those bundles. Remove it *after* the app that defers is released, never
+before: an `auto_updates`-free cask against an older app leaves brew's receipt comparison and the
+app's installer both writing `/Applications/GitPic.app`.
+
+Two things about that stanza are worth recording, because both were stated wrongly here before:
+
+- **It never governed the command the app prints.** `brew upgrade --cask gitpic` names the cask
+  explicitly, and `Cask::Upgrade` takes the `cask.outdated?(greedy: true)` branch for a named
+  cask (`cask/upgrade.rb:70`), which skips the `auto_updates` comparison entirely and falls
+  through to plain receipt inequality (`cask/cask.rb:442`). The stanza only ever affected a bare
+  `brew upgrade` and `brew outdated`.
+- `HOMEBREW_UPGRADE_AUTO_UPDATES_CASKS`, which the old text cited as "defaults on", is marked
+  `odeprecated` with `replacement: "the default behaviour"` (`env_config.rb:745-755`). It was a
+  knob to point at, and it is going away.
+
+Removing it means brew compares its own receipt again, which is correct once the app no longer
+touches a cask-managed bundle. **One transitional hazard, worth a CHANGELOG line rather than
+code:** a 0.20.9 cask user who self-updated has a bundle ahead of that receipt, so a bare
+`brew upgrade` can reinstall an older tap version over it. The common shape (bundle 0.20.10,
+receipt 0.20.9, tap 0.20.10) is one redundant download that repairs the receipt, not a downgrade;
+a real downgrade needs the bundle to be ahead of the *tap*, which takes skipping a version in-app
+inside the tap's lag window. It closes after one `brew upgrade`. The app itself cannot cause it:
+`route` compares the tap against the installed bundle, so it never prints a command that would
+move backwards.
+
+The app-side half of this is `SelfUpdate.route`, `CaskOwnership` and `Updater`, whose headers
+carry the full argument. **The two repositories still have to move together**, just in the other
+direction now: the app defers to brew for a cask-managed bundle, so a cask that drops
+`uninstall quit:` means telling people to run a command that replaces a running app.
 
 The tap's `update-gitpic.yml` rewrites only the `version`, `sha256` and `url` lines by targeted
 `sub!`, so hand-written stanzas survive a release. It does not regenerate the cask.

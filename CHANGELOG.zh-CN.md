@@ -4,6 +4,73 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### Homebrew 装的交给 Homebrew 升，而且会告诉你
+
+- 用 brew 装的，弹窗直接给出 `brew upgrade --cask gitpic`，自己不再替换 bundle
+- cask 那边没有更新时会直说，而不是塞给你一条跑了也没用的命令
+- `gitpic update` 只打印你这份安装真正需要的那一条升级命令
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+### App
+
+- 0.20.9 让 App 自己安装所有更新，包括 cask 装的那一份。这一版对 Homebrew 用户改回去了 —— 但不是把
+  0.20.9 删掉的东西恢复原样。那一版实测到的两个缺陷都来自「App 退出之后才去跑 brew」：菜单栏图标消失、
+  没有进度也不能取消；以及 `brew upgrade` 打印「已是最新」却 exit **0**，脚本记成成功又把同一个 build
+  重新打开。现在既不起进程也不退出，App 打印命令然后留在原地，这两个失败都没有发生的余地了。
+- 用来比较的是 **cask 的版本**，不是 release 的，这才是敢把命令交出去的关键。做法读自 Claude Code
+  2.1.251 的二进制：它先问 cask 提供什么版本，然后要么打印「Update available: X → Y」加命令，要么
+  打印「Claude is up to date!」且不给命令。release 一发布就存在，而 tap 要靠 dispatch 跟进（后面垫了
+  六小时的 cron），所以这两件事真的会不一致 —— 这段窗口里 GitPic 现在说「已是 Homebrew 提供的最新
+  版本」，而不是给一条空转的命令。代价也照实说：tap 没跟上的时候 brew 用户需要等，App 不会为了填这个
+  空档去覆盖 cask 管理的 bundle。
+- 归属判断放在了位置判断**之前**，顺手修掉一个一直存在的问题：`brew install --cask gitpic --appdir
+  ~/Apps` 装出来的 bundle 会被 App 判为「不是 /Applications 或 ~/Applications」而拒绝，而
+  `brew upgrade --cask gitpic` 对它恰恰是对的。
+- 判断问的是**这个 bundle**，不是这台机器。0.20.9 删掉的 `brew list --cask gitpic` 只要机器上装了
+  cask 就为真，所以 `~/Applications` 里的副本可能被告知去升级 `/Applications` 里的另一份。读 Caskroom
+  自己的符号链接问的是这个 bundle，任何 `--appdir` 都成立，代价是一次目录扫描 —— 而不是最多 8 秒的
+  登录 shell 加每个 prefix 20 秒。
+- tap 查询不走 `GitpicRunner` 的 spawn gate，并且限时 10 秒。放在 gate 上的话，它最坏情况（CLI 的
+  20 秒请求加一次匿名重试）会挡在每一次上传前面，而且就发生在打开弹窗这条路径上 —— 这正是 0.20.9
+  要删掉的形状。tap 的本地克隆会先读，只要它已经指向更新的版本就直接定案，所以常见情况一个请求都不花。
+- **修掉一个这次改动之前就存在的 bug**：更新弹窗会在*每一条*拒绝理由后面追加「或在终端运行
+  `brew upgrade --cask gitpic`」，于是一份跑在 `~/Downloads`、机器上又没装 cask 的副本，会被告知去跑
+  一条回答 `Error: Cask 'gitpic' is not installed` 的命令。这句话现在只对真的由 cask 管理的 bundle 出现。
+
+### CLI
+
+- `gitpic update` 过去把 cask 和 formula 两条命令并排打出来让人自己挑，而这对手动装的 `GitPic.app`、
+  `cargo install --git` 的构建、解压的 tarball 三种情况根本没有答案。现在它检测安装来源，只打印一条。
+- 检测的关键是给 `current_exe()` 做 canonicalize，不做的话最常见的那种安装恰好会判错。cask 把
+  `HOMEBREW_PREFIX/bin/gitpic` 链到 app bundle 里的那个副本，而 Apple 平台上 `current_exe()` 就是
+  `_NSGetExecutablePath`，不做规范化 —— 实测：`/opt/homebrew/bin/gitpic` 没有 `.app` 祖先，它的
+  realpath 有。不规范化会落到的两个答案都是错的，其中一个会打印 `brew upgrade gitpic_cli`，正是那条
+  两命令提示当初为了避免的「no available formula」。
+- `gitpic` 并没有发布到 crates.io（对 API 核对过），所以 cargo 那条提示带 `--git`；直接
+  `cargo install gitpic` 是一条跑不通的命令。
+- 新增 `gitpic update cask`，报告 tap 里的 cask 声明的版本。这个来源是编译期常量，和 release feed 由
+  同一个测试钉住：它返回的东西会显示在 GitPic 自己的窗口里，旁边还有一条要用户去执行的命令。
+
+### Homebrew
+
+- **cask 里的 `auto_updates true` 会被移除**，但要等这一版发布之后 —— 顺序反了的话，brew 的安装记录
+  比对和旧版 App 的安装器会同时往 `/Applications/GitPic.app` 写。这个 stanza 声明「制品自己更新」，
+  而 App 对 cask 管理的副本改为让位之后，这句话就不成立了。
+- 这份文件和 AGENTS.md 之前关于这个 stanza 的两处说法是错的，已在 AGENTS.md 更正：它从来管不到
+  `brew upgrade --cask gitpic`，因为点名 cask 走的是 `outdated?(greedy: true)`
+  （`cask/upgrade.rb:70`），会完全跳过 `auto_updates` 的比较；而这里写成「默认开启」的
+  `HOMEBREW_UPGRADE_AUTO_UPDATES_CASKS` 已标记 `odeprecated`。
+- **一个只跨一个版本的过渡风险**：在 0.20.9 上自己更新过的 cask 用户，bundle 会领先 brew 的安装记录，
+  所以 stanza 移除之后，不带参数的 `brew upgrade` 可能用较旧的 tap 版本覆盖它。常见形态只是多下载一次、
+  把记录修回来；真正的降级需要 bundle 领先于 **tap**，也就是要在 tap 滞后的窗口里用 App 跳过一个版本。
+  跑一次 `brew upgrade` 之后就不存在了。App 本身不会造成它 —— 它拿 tap 和已装 bundle 比较，所以永远不会
+  打印一条往回走的命令。
+- `uninstall quit: "dev.gitpic.app"` 保留，而且从「顺带做对的事」变成了必需：它是 App 交出去那条命令
+  安全的前提，而对 `.accessory` 应用来说，brew 的重新打开是唯一能把菜单栏图标放回来的东西。
+
 ## [0.20.9] - 2026-08-28
 
 ### Homebrew 装的也能一键更新，不用再退出等 brew
