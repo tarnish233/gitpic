@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.11] - 2026-09-01
+
+### Safer uploads and configuration updates
+
+- Concurrent config edits no longer overwrite each other, and uploads reject streams and devices before reading
+- Private repositories are rejected before upload, and pickers offer only public, writable image hosts
+- Templates reject misspelled placeholders, while terminal output neutralises control characters in names
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+### CLI
+
+- `config set`, `config edit`, and the interactive repository picker now share a cross-process writer lock. A writer reloads the newest snapshot after acquiring the lock and saves atomically, so two terminals changing different fields no longer let the last stale snapshot erase the first change.
+- File uploads accept regular files only and verify the opened handle again. Unix opens non-blocking to close the check-then-swap FIFO race, and every read remains bounded by the 100 MB input limit even if a file grows.
+- A private repository is a `USAGE` error before the first PUT. `doctor` reports the same answer and interactive pickers offer only public, writable targets, avoiding a successful commit paired with an unusable sharing link.
+- Path templates reject unknown placeholders, unbalanced braces, and control characters. Optional `{hash16}` is available, while the default remains `images/{year}/{month}/{hash8}-{name}.{ext}`.
+- Human-readable output escapes terminal control characters in names, repositories, and paths. The JSON contract keeps the original value and relies on JSON encoding for escaping.
+
+### App
+
+- Repository selection after login and in settings now explains and excludes private and read-only repositories separately, rather than recommending a broader OAuth scope for a host that cannot provide public links.
+- The path-template prompt keeps the `{hash8}` default and lists `{hash16}` for configurations that want a longer content digest.
+
 ## [0.20.10] - 2026-08-29
 
 ### A Homebrew install is upgraded by Homebrew, and GitPic says so

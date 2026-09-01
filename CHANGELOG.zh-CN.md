@@ -4,6 +4,29 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.20.11] - 2026-09-01
+
+### 上传和配置的边界更牢靠
+
+- 并发修改配置不会再互相覆盖，文件增长、管道和设备文件也不会拖垮上传
+- 私有仓库会在上传前被拒绝，仓库选择器只提供公开且可写的图床
+- 路径模板会拒绝拼错的占位符，终端输出也会转义文件名里的控制字符
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+### CLI
+
+- `config set`、`config edit` 和交互式仓库选择现在共用跨进程写锁；写入方会在拿到锁后重新读取最新配置，再原子保存，所以两个终端改不同字段不会再由最后落盘的旧快照吞掉前一个修改。
+- 文件上传只接受普通文件，并在打开后的句柄上再次检查类型；Unix 使用非阻塞打开挡住检查后被替换成 FIFO 的竞态，读取过程也始终受 100 MB 上限约束。
+- 私有仓库在第一次 PUT 之前就是 `USAGE` 错误；`doctor` 给出同样结论，交互式选择器则只列出公开且可写的目标，避免“提交成功、分享链接无法使用”。
+- 路径模板会拒绝未知占位符、不配对的大括号和控制字符；新增可选 `{hash16}`，但默认模板仍是 `images/{year}/{month}/{hash8}-{name}.{ext}`。
+- 人类可读输出会转义文件名、仓库名和路径里的终端控制字符；JSON 合约保持原值，由 JSON 编码负责转义。
+
+### App
+
+- 登录后的仓库选择和设置页现在把私有仓库与只读仓库分别说明并排除，不再建议扩大 OAuth scope 来配置一个无法提供公开链接的图床。
+- 路径模板提示继续使用 `{hash8}` 默认值，同时列出 `{hash16}` 供需要更长内容摘要的配置选用。
+
 ## [0.20.10] - 2026-08-29
 
 ### Homebrew 装的交给 Homebrew 升，而且会告诉你

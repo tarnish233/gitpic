@@ -1,6 +1,6 @@
 {
   "name": "gitpic",
-  "version": "0.20.10",
+  "version": "0.20.11",
   "description": "Upload a local or clipboard image to a GitHub repo (image host) and return a Markdown link.",
   "author": {
     "name": "tarnish233",
