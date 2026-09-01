@@ -163,7 +163,7 @@ max_width     = 0       # 0 = 不缩放
 quality       = 82      # 压缩时的 JPEG 质量（1-100）
 ```
 
-`path_template` 占位符：`{year} {month} {day} {hash} {hash8} {name} {ext}`
+`path_template` 占位符：`{year} {month} {day} {hash} {hash16} {hash8} {name} {ext}`
 
 上传目标也可以用环境变量覆盖（不含凭据）：`GITPIC_REPO`、`GITPIC_OWNER`、`GITPIC_BRANCH`、
 `GITPIC_LINK`。优先级是**命令行参数 > 环境变量 > 配置文件**。
@@ -175,7 +175,6 @@ quality       = 82      # 压缩时的 JPEG 质量（1-100）
 
 ```bash
 gitpic auth login              # 浏览器授权（GitHub device flow）
-gitpic auth login --scope repo # 图床是私有仓库时才需要
 gitpic auth status             # 现在这枚凭据是谁的
 gitpic auth logout             # 删掉
 gitpic repos                   # 这枚凭据能往哪些仓库上传
@@ -193,12 +192,13 @@ gitpic branches                # 当前仓库有哪些分支
 窄 scope，因为 GitHub 没有"只给某一个仓库"这种 OAuth scope；而它也够了：`link_kind = "cdn"` 指向的
 jsDelivr 只服务公开仓库。
 
-图床是**私有**仓库的话得用 `gitpic auth login --scope repo`。`repo` 很宽 —— 你能访问的每个仓库的读写
-权限，所以它不是默认值。私有仓库也只有 `link_kind = "raw"` 的链接能用。
+图床仓库必须是**公开仓库**。GitPic 输出的是不携带 GitHub 凭据的可分享链接：jsDelivr 不服务私有仓库，
+静态 `raw.githubusercontent.com` 地址也不会替访问者认证。即使扩大 OAuth scope 能把文件写进私有仓库，
+上传也会在首个 PUT 前拒绝，避免留下“提交成功、链接 404”的结果。
 
 `gitpic auth login` 登录成功后会**直接**把这枚凭据能上传的仓库列出来让你选，选中的那个连默认分支一起
-落盘 —— 不用再跑第二条命令。`gitpic repos` 是之后想再看一眼时用的（带默认分支、是否私有、能不能写），
-`gitpic branches` 则是看某个仓库有哪些分支。
+落盘 —— 不用再跑第二条命令。`gitpic repos` 是之后想再看一眼时用的（带默认分支、是否私有、能不能写；选择器只提供
+公开且可写的仓库），`gitpic branches` 则是看某个仓库有哪些分支。
 
 想指向自己注册的 OAuth App 就设 `GITPIC_CLIENT_ID`，或 `gitpic auth login --client-id <id>`；scope
 同样可以用 `GITPIC_SCOPE` 覆盖。

@@ -160,6 +160,79 @@ fn every_offline_subcommand_produces_json_when_asked() {
 /// assertion held only because the batch happened to be listed second, so
 /// reordering that array would have failed here with a message blaming batching
 /// for someone else's write.
+#[cfg(unix)]
+#[test]
+fn config_set_waits_for_another_process_and_keeps_both_writes() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let sb = Sandbox::new("config-lock-processes");
+    let ready = sb.dir.join("editor-ready");
+    let release = sb.dir.join("editor-release");
+    let editor = sb.dir.join("holding-editor.sh");
+    std::fs::write(
+        &editor,
+        format!(
+            "#!/bin/sh\nprintf ready > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\n",
+            ready.display(),
+            release.display()
+        ),
+    )
+    .expect("write editor");
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o700))
+        .expect("chmod editor");
+
+    let mut edit = Command::new(env!("CARGO_BIN_EXE_gitpic"));
+    edit.args(["config", "edit"])
+        .env("XDG_CONFIG_HOME", sb.dir.join("cfg"))
+        .env("XDG_DATA_HOME", sb.dir.join("data"))
+        .env("EDITOR", &editor)
+        .env_remove("VISUAL")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let edit = edit.spawn().expect("start editor owner");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "editor never acquired the config lock"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let mut setter = Command::new(env!("CARGO_BIN_EXE_gitpic"));
+    setter
+        .args(["config", "set", "github.owner", "new-owner", "--json"])
+        .env("XDG_CONFIG_HOME", sb.dir.join("cfg"))
+        .env("XDG_DATA_HOME", sb.dir.join("data"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut setter = setter.spawn().expect("start concurrent setter");
+    std::thread::sleep(Duration::from_millis(150));
+    let early = setter.try_wait().expect("poll setter");
+
+    std::fs::write(&release, b"go").expect("release editor");
+    let edit_out = edit.wait_with_output().expect("editor command exits");
+    let set_out = setter.wait_with_output().expect("setter exits");
+    assert!(
+        early.is_none(),
+        "config set bypassed the writer lock: {early:?}"
+    );
+    assert!(
+        edit_out.status.success(),
+        "config edit failed: {edit_out:?}"
+    );
+    assert!(set_out.status.success(), "config set failed: {set_out:?}");
+
+    let text =
+        std::fs::read_to_string(sb.dir.join("cfg/gitpic/config.toml")).expect("read final config");
+    assert!(text.contains("owner = \"new-owner\""), "{text}");
+    assert!(text.contains("repo = \"pics\""), "{text}");
+}
+
 #[test]
 fn a_batch_config_set_lands_every_key() {
     let sb = Sandbox::new("batch-set");
@@ -966,6 +1039,59 @@ fn a_cdn_link_that_would_404_is_refused_before_any_credential() {
 /// a deterministic local
 /// failure, and it means a future regression here fails the test instead of
 /// attempting a live upload to someone else's repository.
+#[test]
+fn an_unknown_path_placeholder_is_rejected_without_changing_the_config() {
+    let sb = Sandbox::new("unknown-placeholder");
+    let (stdout, _, code) = sb.run(&[
+        "config",
+        "set",
+        "upload.path_template",
+        "images/{hash9}-{name}.{ext}",
+        "--json",
+    ]);
+    assert_eq!(code, 2, "unknown placeholders are usage errors: {stdout}");
+    let body = parse(&stdout, "unknown path placeholder");
+    assert_eq!(
+        body.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("USAGE")
+    );
+    assert!(
+        body.pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .is_some_and(|m| m.contains("unknown placeholder")),
+        "{body}"
+    );
+
+    let (stdout, _, code) = sb.run(&["config", "get", "upload.path_template", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        parse(&stdout, "path template after rejected set")
+            .get("value")
+            .and_then(|v| v.as_str()),
+        Some("images/{year}/{month}/{hash8}-{name}.{ext}"),
+        "the failed transaction must not save any part of the change"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn human_errors_escape_terminal_controls_from_paths() {
+    let sb = Sandbox::new("terminal-controls");
+    let path = sb.dir.join("missing\u{1b}[31m\nimage.png");
+    let arg = path.to_str().expect("utf-8 path");
+    let (_, stderr, code) = sb.run(&[arg]);
+    assert_eq!(code, 6, "missing file is still NOT_FOUND: {stderr:?}");
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "raw ESC reached stderr: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("\nimage.png"),
+        "raw newline reached stderr: {stderr:?}"
+    );
+    assert!(stderr.contains("\\x1B[31m\\x0Aimage.png"), "{stderr:?}");
+}
+
 #[test]
 fn an_escaping_path_template_is_refused_before_any_credential() {
     let sb = Sandbox::new("path-template");

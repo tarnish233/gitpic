@@ -2,6 +2,7 @@
 
 use owo_colors::{OwoColorize, Stream};
 use serde::Serialize;
+use std::borrow::Cow;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -295,13 +296,56 @@ pub fn print_json_line<T: Serialize>(value: &T) {
     line(&json_line(value));
 }
 
+/// Make untrusted text safe to render in a terminal while preserving ordinary
+/// Unicode. JSON does not use this path: serde already escapes
+/// control bytes there, so the wire value remains exact.
+pub fn terminal_safe(text: &str) -> Cow<'_, str> {
+    if !text.chars().any(is_terminal_control) {
+        return Cow::Borrowed(text);
+    }
+
+    let mut safe = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if !is_terminal_control(ch) {
+            safe.push(ch);
+        } else if (ch as u32) <= 0xff {
+            safe.push_str(&format!("\\x{:02X}", ch as u32));
+        } else {
+            safe.push_str(&format!("\\u{{{:X}}}", ch as u32));
+        }
+    }
+    Cow::Owned(safe)
+}
+
+fn is_terminal_control(ch: char) -> bool {
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
+/// Write one line of untrusted human-facing data after neutralising terminal controls.
+pub fn untrusted_line(text: &str) {
+    line(&terminal_safe(text));
+}
+
+/// The stderr counterpart to [`untrusted_line`], used for verbose diagnostics.
+pub fn diagnostic(text: &str) {
+    eprintln!("{}", terminal_safe(text));
+}
+
 /// Print successful upload results according to the mode.
 pub fn print_results(mode: Mode, results: &[ItemResult]) {
     match mode {
         Mode::Json => print_json(&SuccessEnvelope { ok: true, results }),
         Mode::Quiet => {
             for r in results {
-                line(&r.output);
+                untrusted_line(&r.output);
             }
         }
         Mode::Human => {
@@ -314,16 +358,16 @@ pub fn print_results(mode: Mode, results: &[ItemResult]) {
 
 fn print_human_item(r: &ItemResult) {
     let check = "✓ uploaded".if_supports_color(Stream::Stdout, |t| t.green().bold().to_string());
-    let name = r
-        .name
-        .if_supports_color(Stream::Stdout, |t| t.bold().to_string());
+    let safe_name = terminal_safe(&r.name);
+    let safe_name_ref = safe_name.as_ref();
+    let name = safe_name_ref.if_supports_color(Stream::Stdout, |t| t.bold().to_string());
     if r.deduped {
         let tag = " (deduped)".if_supports_color(Stream::Stdout, |t| t.yellow().to_string());
         line(&format!("{check} {name}{tag}"));
     } else {
         line(&format!("{check} {name}"));
     }
-    line(&r.output);
+    untrusted_line(&r.output);
 }
 
 /// Print results that succeeded before a failure, followed by the error.
@@ -351,7 +395,7 @@ pub fn print_partial(mode: Mode, results: &[ItemResult], code: &str, message: &s
 /// have made `note:` three different colours.
 pub fn note(text: &str) {
     let label = "note:".if_supports_color(Stream::Stdout, |t| t.yellow().to_string());
-    line(&format!("  {label} {text}"));
+    line(&format!("  {label} {}", terminal_safe(text)));
 }
 
 /// A green `✓` or a red `✗`, for a line reporting one pass/fail check.
@@ -397,7 +441,7 @@ pub fn tick() -> String {
 /// Write `error: <message>` to stderr, coloured only when stderr is a terminal.
 fn eprint_error_label(message: &str) {
     let label = "error:".if_supports_color(Stream::Stderr, |t| t.red().bold().to_string());
-    eprintln!("{label} {message}");
+    eprintln!("{label} {}", terminal_safe(message));
 }
 
 /// Print an error according to the mode (JSON to stdout, human to stderr).
@@ -429,6 +473,18 @@ mod tests {
             deduped: false,
             output: "o".into(),
         }
+    }
+
+    #[test]
+    fn terminal_text_escapes_ansi_and_bidi_controls_but_keeps_unicode_layout() {
+        assert_eq!(
+            terminal_safe("照片\u{1b}[31m.png\r\u{202e}"),
+            "照片\\x1B[31m.png\\x0D\\u{202E}"
+        );
+        assert_eq!(
+            terminal_safe("line one\n\tline two"),
+            "line one\\x0A\\x09line two"
+        );
     }
 
     #[test]

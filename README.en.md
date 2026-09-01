@@ -189,7 +189,7 @@ max_width     = 0       # 0 = no resizing
 quality       = 82      # JPEG quality when compressing (1-100)
 ```
 
-`path_template` placeholders: `{year} {month} {day} {hash} {hash8} {name} {ext}`
+`path_template` placeholders: `{year} {month} {day} {hash} {hash16} {hash8} {name} {ext}`
 
 The upload target can also be overridden by environment variables (never credentials):
 `GITPIC_REPO`, `GITPIC_OWNER`, `GITPIC_BRANCH`, `GITPIC_LINK`. Precedence is
@@ -204,7 +204,6 @@ the file.
 
 ```bash
 gitpic auth login              # authorise in the browser (GitHub device flow)
-gitpic auth login --scope repo # only needed for a private image host
 gitpic auth status             # whose credential this is
 gitpic auth logout             # remove it
 gitpic repos                   # which repositories this credential can upload to
@@ -224,14 +223,16 @@ repositories. That is the narrowest scope that can do gitpic's one job, because 
 no OAuth scope meaning "this one repository", and it is all that is needed: jsDelivr, which
 `link_kind = "cdn"` points at, serves only public repositories.
 
-A **private** image host needs `gitpic auth login --scope repo`. `repo` is broad — read and
-write on every repository you can reach — which is why it is not the default. Only
-`link_kind = "raw"` links resolve from a private repository anyway.
+The image-host repository must be **public**. GitPic returns shareable URLs that carry no
+GitHub credential: jsDelivr does not serve private repositories, and a static
+`raw.githubusercontent.com` URL does not authenticate its visitor. A broader OAuth scope may
+allow the Contents API write, but GitPic refuses the target before the first PUT rather than
+leaving a successful commit paired with a 404 link.
 
 `gitpic auth login` ends by listing the repositories the credential can upload to and
 saving the one you pick, default branch included — there is no second command to run.
-`gitpic repos` is for looking again later (default branch, private, pushable), and
-`gitpic branches` for the branches of one repository.
+`gitpic repos` is for looking again later (default branch, private, pushable; pickers offer
+only public, writable rows), and `gitpic branches` for the branches of one repository.
 
 Point the flow at your own OAuth App with `GITPIC_CLIENT_ID` or
 `gitpic auth login --client-id <id>`; the scope has `GITPIC_SCOPE` as its equivalent.

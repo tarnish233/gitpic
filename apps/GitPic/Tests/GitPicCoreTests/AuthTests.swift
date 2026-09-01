@@ -211,10 +211,25 @@ struct ReposReportTests {
         // asserting rather than assuming.
         #expect(repos[0].isPrivate == false)
         #expect(repos[0].canPush)
+        #expect(repos[0].canBeImageHost)
         // The reason `default_branch` is read at all: assuming `main` here would send
         // every upload to a ref this repository does not have.
         #expect(repos[1].defaultBranch == "master")
         #expect(report.complete == true)
+    }
+
+    @Test("private and read-only repositories are not image-host choices")
+    func eligibility() throws {
+        let report = try JSONDecoder().decode(ReposReport.self, from: Data("""
+        {"ok":true,"repos":[
+          {"owner":"o","name":"private","private":true,
+           "default_branch":"main","can_push":true},
+          {"owner":"o","name":"readonly","private":false,
+           "default_branch":"main","can_push":false}]}
+        """.utf8))
+        let repos = try #require(report.repos)
+        #expect(!repos[0].canBeImageHost)
+        #expect(!repos[1].canBeImageHost)
     }
 
     @Test("a truncated listing says so, and an older CLI's silence does not read as truncated")

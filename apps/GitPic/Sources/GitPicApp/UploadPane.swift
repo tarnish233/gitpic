@@ -10,7 +10,7 @@ struct UploadPane: View {
                 Section("路径") {
                     ConfigField(label: "模板", prompt: "images/{year}/{month}/{hash8}-{name}.{ext}",
                                 text: draft.upload.pathTemplate)
-                    Text("可用占位符：{year} {month} {day} {hash} {hash8} {name} {ext}")
+                    Text("可用占位符：{year} {month} {day} {hash} {hash16} {hash8} {name} {ext}")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 

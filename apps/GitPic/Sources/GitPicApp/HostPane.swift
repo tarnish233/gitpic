@@ -118,27 +118,12 @@ struct HostPane: View {
                         .foregroundStyle(.secondary)
                 }
 
-            // No description under the label, deliberately. What was here was the CLI's
-            // own `no GitHub credential: run \`gitpic auth login\`` — telling someone to
-            // run a command while the button that does it sits directly below — plus a
-            // paragraph about `public_repo` being enough for jsDelivr. The label says the
-            // state and the button says the action.
-            //
-            // One line of that paragraph had to come back, though, and it is the scope. It
-            // was the only place the app named `public_repo` *before* the login, and dropping
-            // it meant someone whose image host is a private repository authorised, waited,
-            // and got an empty repository list — with the remedy being `gitpic auth login
-            // --scope repo` in a terminal, which is a round trip this app promises not to
-            // need. One sentence before the button is cheaper than that.
-            //
-            // The dropped `detail` cost nothing measurable: its only non-CLI value was
-            // 「登录已取消」 from `cancelLogin()`, which that method already overwrites a
-            // moment later by calling `refreshAuth()`, so it was a flash on the way to
-            // the CLI's own answer rather than a message anyone could read.
+            // The default OAuth scope intentionally covers public repositories only.
+            // That is also the product boundary: GitPic emits links that recipients open
+            // without a GitHub credential, so a private repository cannot be an image host.
             case .loggedOut:
                 Label("还没登录", systemImage: "person.crop.circle.badge.questionmark")
-                Text("会申请 `public_repo` 权限，公开仓库够用。图床要用私有仓库的话，"
-                     + "得在终端运行 `gitpic auth login --scope repo`。")
+                Text("会申请 `public_repo` 权限；请选择一个公开仓库作为图床。")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("使用 GitHub 登录") { model.beginLogin() }
                     .disabled(model.toolState != .ready)
@@ -221,7 +206,7 @@ struct HostPane: View {
                 Text(unmatchedLabel).tag(RepoCandidate?.none)
             }
             ForEach(model.repos) { repo in
-                Text(label(for: repo)).tag(RepoCandidate?.some(repo))
+                Text(repo.spec).tag(RepoCandidate?.some(repo))
             }
         }
         .disabled(model.repos.isEmpty)
@@ -232,11 +217,8 @@ struct HostPane: View {
                  + "`gitpic config set github.repo owner/name`。")
                 .font(.caption).foregroundStyle(.orange).textSelection(.enabled)
         } else if model.repos.isEmpty && !model.reposLoading {
-            // Empty and "all private" look identical from here: a `public_repo` token
-            // is not shown private repositories at all.
-            Text("没有可以上传的仓库。图床是私有仓库的话，要用 "
-                 + "`gitpic auth login --scope repo` 重新登录 —— "
-                 + "默认的 public_repo 看不到私有仓库。")
+            Text("没有可用的公开、可写仓库。GitPic 的链接不携带 GitHub 凭据，"
+                 + "所以私有仓库不能作为图床。")
                 .font(.caption).foregroundStyle(.secondary)
         } else if let omitted = omittedNote {
             Text(omitted).font(.caption).foregroundStyle(.secondary)
@@ -312,8 +294,11 @@ struct HostPane: View {
     /// reasons are said rather than left to be guessed at.
     private var omittedNote: String? {
         var reasons: [String] = []
-        if model.skippedRepos > 0 {
-            reasons.append("\(model.skippedRepos) 个没有写权限")
+        if model.skippedReadOnlyRepos > 0 {
+            reasons.append("\(model.skippedReadOnlyRepos) 个没有写权限")
+        }
+        if model.skippedPrivateRepos > 0 {
+            reasons.append("\(model.skippedPrivateRepos) 个私有仓库不能生成公开链接")
         }
         if !model.reposComplete {
             reasons.append("仓库太多，列表被截断")
@@ -328,17 +313,9 @@ struct HostPane: View {
         guard let github = model.draft?.github,
               !github.owner.isEmpty, !github.repo.isEmpty
         else { return "尚未选择" }
-        // Named rather than blanked: this is a target that may well still work, and the
-        // user has to be able to see what it is before replacing it.
+        // Named rather than blanked: this is what uploads are currently targeting, and
+        // the user has to be able to see it before replacing an unusable old choice.
         return "\(github.owner)/\(github.repo)（不在列表中）"
-    }
-
-    /// `owner/name`, plus the one remaining thing that changes how it behaves.
-    private func label(for repo: RepoCandidate) -> String {
-        // Read-only repositories are filtered out upstream, so the only mark left is
-        // the one that changes which link form works: jsDelivr serves public
-        // repositories only.
-        repo.isPrivate ? "\(repo.spec)（私有）" : repo.spec
     }
 
     private var unconfiguredHint: String {

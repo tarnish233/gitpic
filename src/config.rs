@@ -9,12 +9,18 @@
 
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Keeps the per-config advisory lock alive for the duration of a write
+/// transaction. Closing the handle releases the lock on every supported platform.
+pub(crate) struct ConfigWriteLock {
+    _file: File,
+}
 
 /// Every struct here carries `#[serde(default)]` at the container level, so a
 /// missing key falls back to that type's `Default` impl — which is therefore the
@@ -262,15 +268,7 @@ impl Config {
     /// parsed. A missing file is not an error — it means "nothing configured
     /// yet", which `require_target` reports as `CONFIG_MISSING` instead.
     pub fn load() -> Result<Self> {
-        let path = Self::path()?;
-        if !path.exists() {
-            return Ok(Config::default());
-        }
-        let shown = path.display().to_string();
-        let text = std::fs::read_to_string(&path).map_err(|e| {
-            AppError::config_invalid(format!("cannot read config file {shown}: {e}"))
-        })?;
-        Self::parse(&text, &shown)
+        Self::load_from(&Self::path()?)
     }
 
     /// Parse config text, naming the offending file in any error.
@@ -294,16 +292,65 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Persist config to disk (creating parent dirs) with a same-directory
-    /// replace, so an interrupted write cannot leave a partial config behind.
-    ///
-    /// The file is created privately and atomically replaced from a same-directory
-    /// temp file, so interrupted writes cannot leave partial configuration behind.
-    pub fn save(&self) -> Result<PathBuf> {
-        self.save_to(&Self::path()?)
+    /// Load, mutate, validate, and atomically save one config snapshot while holding
+    /// the cross-process writer lock. Atomic rename protects readers from partial
+    /// TOML; this lock separately protects writers from both loading the same old
+    /// snapshot and then replacing each other's changes.
+    pub(crate) fn update<T>(
+        mutate: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<(T, Self, PathBuf)> {
+        let path = Self::path()?;
+        Self::update_to(&path, mutate)
     }
 
-    fn save_to(&self, path: &Path) -> Result<PathBuf> {
+    fn update_to<T>(
+        path: &Path,
+        mutate: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<(T, Self, PathBuf)> {
+        let _lock = Self::lock_for_write_to(path)?;
+        let mut cfg = Self::load_from(path)?;
+        let value = mutate(&mut cfg)?;
+        cfg.validate_input()?;
+        let saved = cfg.save_to_unlocked(path)?;
+        Ok((value, cfg, saved))
+    }
+
+    /// Acquire the config writer lock for operations such as `config edit` that
+    /// cannot fit in a short load/mutate/save closure.
+    pub(crate) fn lock_for_write() -> Result<ConfigWriteLock> {
+        Self::lock_for_write_to(&Self::path()?)
+    }
+
+    fn lock_for_write_to(path: &Path) -> Result<ConfigWriteLock> {
+        ensure_private_parent(path)?;
+        let lock_path = config_lock_path(path);
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&lock_path).map_err(|e| {
+            AppError::general(format!("open config lock {}: {e}", lock_path.display()))
+        })?;
+        fs4::FileExt::lock(&file)
+            .map_err(|e| AppError::general(format!("lock config {}: {e}", path.display())))?;
+        Ok(ConfigWriteLock { _file: file })
+    }
+
+    fn load_from(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Config::default());
+        }
+        let shown = path.display().to_string();
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            AppError::config_invalid(format!("cannot read config file {shown}: {e}"))
+        })?;
+        Self::parse(&text, &shown)
+    }
+
+    pub(crate) fn save_to_unlocked(&self, path: &Path) -> Result<PathBuf> {
         let text = toml::to_string_pretty(self)
             .map_err(|e| AppError::general(format!("serialize: {e}")))?;
         write_private_atomic(path, &text, "config")?;
@@ -399,6 +446,26 @@ impl Config {
     }
 }
 
+fn config_lock_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml");
+    path.with_file_name(format!(".{file_name}.lock"))
+}
+
+fn ensure_private_parent(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| AppError::general(format!("mkdir: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    Ok(())
+}
+
 /// Write `text` to `path` privately and atomically: a 0700 parent, a 0600
 /// same-directory temp file, then a rename over the destination.
 ///
@@ -465,15 +532,10 @@ fn write_atomic_inner(path: &Path, text: &str, what: &str, private: bool) -> Res
     #[cfg(not(unix))]
     let _ = private;
 
-    if let Some(parent) = path.parent() {
+    if private {
+        ensure_private_parent(path)?;
+    } else if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| AppError::general(format!("mkdir: {e}")))?;
-        // The directory is created 0755 by `create_dir_all`; tighten it so the
-        // file cannot be found by listing, not just by reading.
-        #[cfg(unix)]
-        if private {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-        }
     }
 
     let temp_path = temporary_path(path);
@@ -654,12 +716,63 @@ mod tests {
         let mut config = Config::default();
         config.github.owner = "owner".to_string();
         config.github.repo = "repo".to_string();
-        config.save_to(&path).unwrap();
+        config.save_to_unlocked(&path).unwrap();
 
         let saved = fs::read_to_string(&path).unwrap();
         assert!(saved.contains("owner = \"owner\""), "{saved}");
         assert!(saved.contains("repo = \"repo\""), "{saved}");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "temp file survived");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn concurrent_config_updates_rebase_under_one_writer_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = std::env::temp_dir().join(format!(
+            "gitpic-config-lock-{}-{}",
+            std::process::id(),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = dir.join("config.toml");
+        let first_path = path.clone();
+        let second_path = path.clone();
+        let (loaded_tx, loaded_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first = std::thread::spawn(move || {
+            Config::update_to(&first_path, |cfg| {
+                cfg.github.owner = "new-owner".to_string();
+                loaded_tx.send(()).expect("signal first load");
+                release_rx.recv().expect("release first writer");
+                Ok(())
+            })
+        });
+
+        loaded_rx.recv().expect("first writer holds the lock");
+        let (attempted_tx, attempted_rx) = mpsc::channel();
+        let second = std::thread::spawn(move || {
+            attempted_tx.send(()).expect("signal second attempt");
+            Config::update_to(&second_path, |cfg| {
+                cfg.github.repo = "new-repo".to_string();
+                Ok(())
+            })
+        });
+        attempted_rx.recv().expect("second writer started");
+        // Give an unlocked implementation ample time to load and save the old
+        // snapshot before the first writer resumes. With the lock, it waits here.
+        std::thread::sleep(Duration::from_millis(100));
+        release_tx.send(()).expect("release first writer");
+
+        first.join().expect("first thread").expect("first update");
+        second
+            .join()
+            .expect("second thread")
+            .expect("second update");
+        let saved = Config::load_from(&path).expect("final config");
+        assert_eq!(saved.github.owner, "new-owner");
+        assert_eq!(saved.github.repo, "new-repo");
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -695,7 +808,7 @@ mod tests {
             TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         let path = dir.join("config.toml");
-        Config::default().save_to(&path).unwrap();
+        Config::default().save_to_unlocked(&path).unwrap();
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);

@@ -9,6 +9,7 @@ use crate::imageproc::{self, CompressOpts};
 use crate::link;
 use crate::naming;
 use crate::output::{self, ItemResult, Mode};
+use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
@@ -122,16 +123,20 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
         &cfg.github.repo,
         &cfg.github.branch,
     )?;
+    // Both link forms are unauthenticated public URLs. Check the repository once
+    // before any PUT so a private target cannot produce a successful upload paired
+    // with a link that every recipient (and the app's thumbnail loader) sees as 404.
+    reject_private_image_host(gh.repo_info().await?.private)?;
 
     let dedup = cfg.upload.dedup;
 
     let compress = resolve_compress(u, cfg);
 
     if cli.verbose > 0 {
-        eprintln!(
+        output::diagnostic(&format!(
             "gitpic: target {}/{}@{} link={:?} compress={}",
             cfg.github.owner, cfg.github.repo, cfg.github.branch, kind, compress.enabled
-        );
+        ));
     }
 
     let mut results: Vec<ItemResult> = Vec::with_capacity(inputs.len());
@@ -146,12 +151,12 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
         // Pass ownership so an uncompressed upload does not copy the payload.
         let bytes = imageproc::maybe_compress(img.bytes, &compress);
         if cli.verbose > 1 && bytes.len() != orig_len {
-            eprintln!(
+            output::diagnostic(&format!(
                 "gitpic: {} compressed {} -> {} bytes",
                 name,
                 orig_len,
                 bytes.len()
-            );
+            ));
         }
         let hash = naming::sha256_hex(&bytes);
         let remote_path = naming::render_path(template, &name, &hash);
@@ -180,13 +185,13 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
         };
 
         if cli.verbose > 0 {
-            eprintln!(
+            output::diagnostic(&format!(
                 "gitpic: {} -> {} ({} bytes){}",
                 name,
                 outcome.path,
                 outcome.size,
                 if outcome.deduped { " [deduped]" } else { "" }
-            );
+            ));
         }
         let item = build_item(&outcome, &name, kind, cli.effective_format(cfg), cfg);
         // Record to local history (best-effort; never fail an upload for this).
@@ -203,7 +208,7 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
             branch: Some(cfg.github.branch.clone()),
         }) {
             if cli.verbose > 0 {
-                eprintln!("warning: could not record history: {}", e.message);
+                output::diagnostic(&format!("warning: could not record history: {}", e.message));
             }
         }
         results.push(item);
@@ -218,7 +223,7 @@ pub async fn run(cli: &Cli, cfg: &Config, mode: Mode) -> Result<u8> {
             .collect::<Vec<_>>()
             .join("\n");
         if let Err(e) = copy_to_clipboard(&joined) {
-            eprintln!("warning: could not copy to clipboard: {e}");
+            output::diagnostic(&format!("warning: could not copy to clipboard: {e}"));
         }
     }
 
@@ -294,6 +299,21 @@ pub(crate) fn reject_dead_cdn_link(kind: LinkKind, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Refuse a repository that cannot provide durable unauthenticated image links.
+///
+/// GitHub's Contents API can upload to a private repository with a broad token, but
+/// neither jsDelivr nor the static `raw.githubusercontent.com` URL carries that token.
+/// A successful commit followed by a 404 link is not a successful image-host upload.
+pub(crate) fn reject_private_image_host(private: bool) -> Result<()> {
+    if private {
+        return Err(AppError::usage(
+            "the configured repository is private; GitPic links are opened without a \
+             GitHub credential, so choose a public repository for the image host",
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse a path template that dummy-renders to an unusable Contents path.
 ///
 /// Same check as `Config::validate`, on the effective template (`--path` or the
@@ -344,34 +364,43 @@ fn apply_explicit_name(
 fn read_files(files: &[std::path::PathBuf]) -> Result<Vec<InputImage>> {
     let mut out = Vec::with_capacity(files.len());
     for f in files {
-        if !f.exists() {
-            return Err(AppError::not_found(format!(
-                "file not found: {}",
-                f.display()
+        let shown = f.display().to_string();
+        let path_metadata = f
+            .metadata()
+            .map_err(|e| AppError::not_found(format!("read {shown}: {e}")))?;
+        if !path_metadata.file_type().is_file() {
+            return Err(AppError::usage(format!(
+                "{shown} is not a regular file; use --stdin for a pipe or stream"
             )));
         }
-        // Judged from the metadata, before the bytes are in memory. `reject_oversize`
-        // lives inside `put_file`, which is three steps and a whole file-read too late:
-        // `gitpic bigvideo.mov` — a plausible mis-drag out of Finder — allocated three
-        // gigabytes and *then* said the Contents API tops out at 100 MB, and on a
-        // machine with less headroom it was an OOM kill instead, exit 137, outside the
-        // documented 1-10 range that `main`'s "no catch-all arm" comment exists to
-        // protect. Same function and same message as the late check, so the two cannot
-        // disagree about the limit.
-        let len = f
+
+        // Open non-blocking on Unix. The metadata check above refuses ordinary FIFOs
+        // before `open`, and O_NONBLOCK closes the remaining swap race where the path
+        // is replaced by a FIFO between that check and this call. Regular files ignore
+        // the flag. Windows has no equivalent filesystem flag; its pre-open metadata
+        // check still rejects devices and directories.
+        let file =
+            open_input_file(f).map_err(|e| AppError::not_found(format!("read {shown}: {e}")))?;
+        let opened_metadata = file
             .metadata()
-            .map_err(|e| AppError::not_found(format!("read {}: {e}", f.display())))?
-            .len();
-        crate::github::reject_oversize(&f.display().to_string(), len as usize)?;
-        let bytes = std::fs::read(f)
-            .map_err(|e| AppError::not_found(format!("read {}: {e}", f.display())))?;
-        // The same refusal `read_stdin` has always had. Without it `touch shot.png &&
-        // gitpic shot.png` made a real commit in the image-host repo, printed
-        // `✓ uploaded`, and put a markdown link on the clipboard that renders as a
-        // broken image — exit 0, nothing to suggest anything was wrong.
-        if bytes.is_empty() {
-            return Err(AppError::usage(format!("{} is empty", f.display())));
+            .map_err(|e| AppError::not_found(format!("read {shown}: {e}")))?;
+        if !opened_metadata.file_type().is_file() {
+            return Err(AppError::usage(format!(
+                "{shown} is not a regular file; use --stdin for a pipe or stream"
+            )));
         }
+
+        // The handle metadata is authoritative for the object that will be read. The
+        // bounded reader below is the second half: a regular file may grow after this
+        // check, and it still must not allocate beyond the Contents API ceiling.
+        let len = usize::try_from(opened_metadata.len()).unwrap_or(usize::MAX);
+        crate::github::reject_oversize(&shown, len)?;
+        let bytes = read_limited_with(
+            file,
+            &shown,
+            crate::github::CONTENTS_PUT_MAX,
+            AppError::not_found,
+        )?;
         let original = f
             .file_name()
             .and_then(|s| s.to_str())
@@ -380,17 +409,7 @@ fn read_files(files: &[std::path::PathBuf]) -> Result<Vec<InputImage>> {
         // Through `display_name`, like every other input path. This one took the
         // filename verbatim, so the rule `display_name`'s doc states — "the stem is the
         // user's, the extension is the content's" — held for stdin, for the clipboard,
-        // and for a file *only when `--name` was given*. `cp photo.jpg photo.png &&
-        // gitpic photo.png` published JPEG bytes at a `.png` path, which GitHub raw and
-        // jsDelivr both serve as `image/png`, while the same file with `--name photo`
-        // published `.jpg`: same bytes, same intent, opposite content type, decided by
-        // whether a flag happened to be passed.
-        //
-        // `ExtFallback::File` puts the sniffed extension first and the original second,
-        // so a format nothing can sniff — an SVG — still keeps the extension it arrived
-        // with, and a non-UTF-8 filename no longer publishes JPEG bytes as
-        // `image.png`. `None` for `explicit`: `--name` is applied afterwards by
-        // `apply_explicit_name`, which is also the only path that can refuse it.
+        // and for a file *only when `--name` was given*.
         let name = display_name(
             None,
             &bytes,
@@ -401,6 +420,21 @@ fn read_files(files: &[std::path::PathBuf]) -> Result<Vec<InputImage>> {
         out.push(InputImage { name, bytes });
     }
     Ok(out)
+}
+
+fn open_input_file(path: &Path) -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        File::open(path)
+    }
 }
 
 fn read_stdin(name: Option<&str>) -> Result<InputImage> {
@@ -421,13 +455,22 @@ fn read_stdin(name: Option<&str>) -> Result<InputImage> {
 /// File uploads call `reject_oversize` on the metadata *before* `read`. Stdin
 /// has no metadata; counting while reading is the equivalent. The overflowing
 /// chunk is not appended — the buffer stays at or under `cap`.
-fn read_limited<R: Read>(mut reader: R, source: &str, cap: usize) -> Result<Vec<u8>> {
+fn read_limited<R: Read>(reader: R, source: &str, cap: usize) -> Result<Vec<u8>> {
+    read_limited_with(reader, source, cap, AppError::usage)
+}
+
+fn read_limited_with<R: Read>(
+    mut reader: R,
+    source: &str,
+    cap: usize,
+    read_error: impl Fn(String) -> AppError,
+) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
         let n = reader
             .read(&mut buf)
-            .map_err(|e| AppError::usage(format!("read {source}: {e}")))?;
+            .map_err(|e| read_error(format!("read {source}: {e}")))?;
         if n == 0 {
             break;
         }
@@ -650,6 +693,45 @@ mod tests {
         let read = read_files(&[svg]).expect("reads");
         assert_eq!(read[0].name, "logo.svg");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_private_repository_is_refused_before_any_put() {
+        let err = reject_private_image_host(true).expect_err("private host");
+        assert_eq!(err.code, crate::error::ErrorCode::Usage);
+        assert!(err.message.contains("private"), "{}", err.message);
+        assert!(err.message.contains("public repository"), "{}", err.message);
+        reject_private_image_host(false).expect("public host");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_path_is_refused_as_a_non_regular_file() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!(
+            "gitpic-special-file-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("image.png");
+        let listener = UnixListener::bind(&path).expect("bind socket");
+
+        let err = read_files(std::slice::from_ref(&path))
+            .err()
+            .expect("socket is not a file");
+        assert_eq!(err.code, crate::error::ErrorCode::Usage);
+        assert!(
+            err.message.contains("not a regular file"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("--stdin"), "{}", err.message);
+
+        drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

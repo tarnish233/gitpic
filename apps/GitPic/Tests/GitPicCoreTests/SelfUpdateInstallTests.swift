@@ -1116,7 +1116,7 @@ struct SelfUpdateInstallTests {
             mounted = SelfUpdate.inFlightWork.mountInFlight
             if mounted == nil { Thread.sleep(forTimeInterval: 0.01) }
         }
-        try #require(mounted, "stage never registered a mount, so nothing was exercised")
+        _ = try #require(mounted, "stage never registered a mount, so nothing was exercised")
 
         SelfUpdate.undoInFlightWork()
         #expect(done.wait(timeout: .now() + 120) == .success, "stage never finished unwinding")

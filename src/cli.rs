@@ -321,8 +321,8 @@ pub enum AuthAction {
         #[arg(long)]
         no_browser: bool,
 
-        /// OAuth scopes to ask for (default: public_repo; use `repo` for a private
-        /// image host)
+        /// OAuth scopes to ask for (default: public_repo; broader scopes do not make
+        /// private repositories valid image hosts)
         #[arg(long)]
         scope: Option<String>,
 

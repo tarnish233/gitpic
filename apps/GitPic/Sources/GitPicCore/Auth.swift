@@ -52,6 +52,10 @@ public struct RepoCandidate: Codable, Sendable, Hashable, Identifiable {
     /// `owner/name` — the id, the label, and exactly what `github.repo` accepts.
     public var spec: String { "\(owner)/\(name)" }
     public var id: String { spec }
+
+    /// A picker may offer only repositories that can both accept a write and serve
+    /// the resulting unauthenticated public link.
+    public var canBeImageHost: Bool { canPush && !isPrivate }
 }
 
 /// `gitpic repos --json`.

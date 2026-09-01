@@ -161,12 +161,11 @@ final class AppModel {
     /// False when the CLI said its listing was truncated — the picker says so rather
     /// than letting a missing repository read as "you do not have one".
     private(set) var reposComplete = true
-    /// How many the listing returned that cannot be pushed to.
-    ///
-    /// Filtered out of `repos`, because a target that cannot be written to is not a
-    /// choice — but counted, because with no way left to type a repository by hand,
-    /// "why isn't mine in the list" is the one question that could strand someone.
-    private(set) var skippedRepos = 0
+    /// Rows omitted from the picker, kept as separate counts so the pane can explain
+    /// whether the repository is unwritable or private. Private Contents API writes
+    /// are possible, but the emitted links carry no credential and therefore 404.
+    private(set) var skippedReadOnlyRepos = 0
+    private(set) var skippedPrivateRepos = 0
     private(set) var reposLoading = false
     private(set) var reposFailure: String?
 
@@ -349,6 +348,8 @@ final class AppModel {
         // picker after this just cleared it.
         reposGeneration += 1
         repos = []
+        skippedReadOnlyRepos = 0
+        skippedPrivateRepos = 0
         reposFailure = nil
         clearBranches()
         await refreshAuth(onlyIfLoginGeneration: generation)
@@ -376,20 +377,27 @@ final class AppModel {
                 // Only what can actually be uploaded to: the picker is now the only way
                 // to set a target, so offering one that cannot work would be the
                 // "accepted, then silently broken" shape this project refuses.
-                skippedRepos = list.filter { !$0.canPush }.count
-                repos = list.filter(\.canPush)
+                skippedReadOnlyRepos = list.filter { !$0.canPush }.count
+                skippedPrivateRepos = list.filter { $0.canPush && $0.isPrivate }.count
+                repos = list.filter(\.canBeImageHost)
                 reposComplete = report.complete ?? true
             } else {
                 repos = []
+                skippedReadOnlyRepos = 0
+                skippedPrivateRepos = 0
                 reposFailure = report.error.map { "\($0.code)：\($0.message)" }
             }
         } catch let RunFailure.cli(_, error) {
             guard generation == reposGeneration else { return }
             repos = []
+            skippedReadOnlyRepos = 0
+            skippedPrivateRepos = 0
             reposFailure = "\(error.code)：\(error.message)"
         } catch {
             guard generation == reposGeneration else { return }
             repos = []
+            skippedReadOnlyRepos = 0
+            skippedPrivateRepos = 0
             reposFailure = "\(error)"
         }
     }

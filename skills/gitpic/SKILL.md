@@ -83,17 +83,13 @@ rather than leaving it: a repository whose default is `master` configured for `m
 fails every upload on a ref that is not there. If `token_valid`
 is false and `repo_writable` is also false, hand the user `gitpic auth login` and stop.
 
-`repo_writable: false` with `token_valid: true` has one cause worth naming on its own:
-the credential's **scope**. `gitpic auth login` asks for `public_repo`, which cannot write
-to a private repository — and GitHub answers `404`, not `403`, for a repository a token
-cannot see, so this arrives as `REMOTE_NOT_FOUND` rather than as a permission error.
-
-Run `gitpic repos --json` to tell the two apart: if the configured `owner/repo` is not in
-the list, the credential cannot reach it. For a private image host the user needs
-`gitpic auth login --scope repo` — hand them that command, and note that only
-`GITPIC_LINK=raw` links work from a private repository (jsDelivr serves public ones only).
-If the repo *is* in the list with `can_push: false`, the account lacks write access and
-another login will not help.
+`repo_writable: false` with `token_valid: true` usually means the repository is absent,
+the credential cannot reach it, or the account lacks write access. Run `gitpic repos --json`
+to tell those apart. If the repo is present with `can_push: false`, another login will not
+repair the account's permissions. If it has `private: true`, do **not** widen the OAuth scope
+and retry: GitPic's links carry no credential, so private repositories are rejected as image
+hosts even when the Contents API write itself would be allowed. Ask the user to choose a
+public repository instead.
 
 `repo_writable` means **both** that the token may push to the repository **and**
 that the target branch exists. When it is false, `error.code` narrows it down but does
@@ -130,14 +126,11 @@ set. It is the usual explanation when an upload is nevertheless refused with
 happens, say so rather than retrying. A 409 ref conflict is `NETWORK` (5):
 retry once, then report.
 
-`detail` also carries caveats that are not failures, joined by `; ` when there is more
-than one. Two are worth acting on: a **private** repository with `upload.link_kind = "cdn"`
-means every upload succeeds and every link 404s, since jsDelivr serves only public
-repositories — the fix is `gitpic config set upload.link_kind raw`. And `link_kind = "cdn"`
-with a `github.branch` containing `/` is not a caveat but a hard `USAGE` failure, because
-jsDelivr cannot tell that branch apart from the file path: `doctor` now reports it with the
-same code and message the upload itself would, rather than reporting a healthy setup for a
-configuration in which no upload can run.
+`detail` also carries non-fatal caveats, currently branch protection. Two setup states
+are hard `USAGE` failures instead: any **private** repository, because neither emitted link
+form authenticates its visitor; and `link_kind = "cdn"` with a `github.branch` containing
+`/`, because jsDelivr cannot tell that branch apart from the file path. `doctor` reports the
+same failure the upload path would rather than calling either configuration healthy.
 
 There is one credential source, so the report carries no `token_source` field: a
 credential either works (`token_valid: true`) or the user has not run `gitpic auth login`.
@@ -162,8 +155,8 @@ should this go to" instead of guessing an `owner/repo`, and to explain a
 
 - `can_push: false` means the account cannot write there — offer it, do not silently drop
   it, but say so.
-- `private: true` repositories only work with `GITPIC_LINK=raw`, and only when the login
-  used `--scope repo`.
+- `private: true` repositories are diagnostic rows only; do not offer them as image-host
+  choices, because the returned URLs are unauthenticated and will not resolve for recipients.
 - `complete: false` means the listing hit its page ceiling, so a repository the user names
   may exist without appearing. Say that rather than reporting it as absent.
 - `default_branch` is what `github.branch` should be — do not assume `main`.

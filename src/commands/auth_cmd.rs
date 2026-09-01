@@ -109,7 +109,10 @@ async fn login(
         "{} logged in to github.com{who}",
         crate::output::tick()
     ));
-    crate::output::line(&format!("  stored in: {}", path.display()));
+    crate::output::line(&format!(
+        "  stored in: {}",
+        crate::output::terminal_safe(&path.display().to_string())
+    ));
     if let Some(l) = previous.filter(|p| Some(p.as_str()) != stored.login.as_deref()) {
         note(&format!("replaced the credential that was stored for {l}"));
     }
@@ -435,7 +438,10 @@ async fn status(mode: Mode) -> Result<u8> {
         if let Some(at) = &report.expires_at {
             crate::output::line(&format!("  expires: {at}"));
         }
-        crate::output::line(&format!("  stored in: {}", report.path));
+        crate::output::line(&format!(
+            "  stored in: {}",
+            crate::output::terminal_safe(&report.path)
+        ));
         if let Some(detail) = &report.detail {
             note(detail);
         }
@@ -478,7 +484,7 @@ fn logout(mode: Mode) -> Result<u8> {
         crate::output::line(&format!(
             "{} removed {}",
             crate::output::tick(),
-            path.display()
+            crate::output::terminal_safe(&path.display().to_string())
         ));
         // There is no fallback source left, so a logout really is a logout — worth
         // saying, because the next upload will fail until someone logs in again.

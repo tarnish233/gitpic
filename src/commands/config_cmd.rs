@@ -60,7 +60,7 @@ pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
                     path: &shown,
                 });
             } else {
-                crate::output::line(&shown);
+                crate::output::untrusted_line(&shown);
             }
         }
         ConfigAction::Get { key } => {
@@ -73,6 +73,8 @@ pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
                             config: &cfg,
                         });
                     } else {
+                        // TOML serialization escapes controls inside values; its
+                        // newlines are trusted structure and should remain readable.
                         crate::output::line(&toml::to_string_pretty(&cfg).unwrap_or_default());
                     }
                 }
@@ -85,18 +87,19 @@ pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
                             value: &v,
                         });
                     } else {
-                        crate::output::line(&v);
+                        crate::output::untrusted_line(&v);
                     }
                 }
             }
         }
         ConfigAction::Set { pairs } => {
             let kv = pair_args(pairs)?;
-            let mut cfg = Config::load()?;
-            for (key, value) in &kv {
-                set_key(&mut cfg, key, value)?;
-            }
-            let path = cfg.save()?;
+            let (_, cfg, path) = Config::update(|cfg| {
+                for (key, value) in &kv {
+                    set_key(cfg, key, value)?;
+                }
+                Ok(())
+            })?;
             let shown = path.display().to_string();
             // Stored values, not the raw arguments: `link_kind` is lowercased
             // and `repo` may have been split.
@@ -116,7 +119,11 @@ pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
                 });
             } else {
                 let keys = changes.iter().map(|c| c.key).collect::<Vec<_>>().join(", ");
-                crate::output::line(&format!("{} set {keys} in {shown}", crate::output::tick()));
+                crate::output::line(&format!(
+                    "{} set {keys} in {}",
+                    crate::output::tick(),
+                    crate::output::terminal_safe(&shown)
+                ));
             }
         }
         ConfigAction::Edit => {
@@ -138,8 +145,12 @@ pub fn run(action: &ConfigAction, mode: Mode) -> Result<()> {
                 ));
             }
             let path = Config::path()?;
+            // Hold the same cross-process lock as `config set` for the entire editor
+            // session. Otherwise a setter can save a newer snapshot while the editor
+            // still has the old file open, and the editor then overwrites that change.
+            let _lock = Config::lock_for_write()?;
             if !path.exists() {
-                Config::default().save()?;
+                Config::default().save_to_unlocked(&path)?;
             }
             // `VISUAL` before `EDITOR`, which is the convention and is what most people
             // with a GUI editor actually set.

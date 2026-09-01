@@ -96,9 +96,6 @@ struct Probed {
     branch: Option<Result<Branch>>,
     /// A failure that prevented probing at all: no credential, or no client.
     setup_err: Option<AppError>,
-    /// Whether `upload.link_kind` is `cdn`, i.e. whether jsDelivr has to be able to
-    /// serve what is uploaded for the emitted link to work.
-    cdn: bool,
     /// The upload path's own pre-flight refusal, if the configuration would trip it.
     ///
     /// `doctor` never read `cfg.upload.*` at all, and `upload.rs` refuses `cdn` plus a
@@ -113,8 +110,8 @@ struct Probed {
 
 /// What the repository probe found.
 ///
-/// Two facts rather than one bool: `private` decides whether a `cdn` link can ever
-/// resolve, and it arrives on the same response as the permissions.
+/// Two facts rather than one bool: `private` decides whether the repository can be
+/// a public image host, and it arrives on the same response as the permissions.
 #[derive(Debug, Clone, Copy)]
 struct RepoFacts {
     pushable: bool,
@@ -134,8 +131,7 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
     // Asked before `failure` takes ownership below.
     let credential_unresolved = p.setup_err.is_some();
     let mut failure: Option<AppError> = p.setup_err;
-    // Worth reporting but not failures, so they must not reach the exit status. A list
-    // because there are now two, and a run can be in both states at once.
+    // Worth reporting but not failures, so they must not reach the exit status.
     let mut caveats: Vec<String> = Vec::new();
 
     // Synthesised up front so a missing branch can compete with the probe errors
@@ -205,19 +201,10 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
         // downstream of a run that cannot start.
         if let Some(e) = &p.dead_cdn {
             failure = Some(AppError::new(e.code, e.message.clone()));
+        } else if private {
+            failure = crate::commands::upload::reject_private_image_host(true).err();
         } else if let Some(e) = worst {
             failure = Some(AppError::new(e.code, e.message.clone()));
-        }
-        // Caveats are independent of the failure and of each other, so they are
-        // collected rather than chosen between.
-        if private && p.cdn {
-            // Not a failure: the upload really does succeed. It is the *link* that is
-            // dead, which is worse than an error in one way — nothing reports it.
-            caveats.push(
-                "the repository is private and `upload.link_kind` is \"cdn\", so jsDelivr \
-                 cannot serve these links; `gitpic config set upload.link_kind raw`"
-                    .into(),
-            );
         }
         if protected {
             // Not a failure: the rules may well permit this account. Worth saying,
@@ -235,12 +222,13 @@ fn summarize(p: Probed) -> (DoctorReport, u8) {
     // `None` propagates: "may it push" is unanswerable when nobody asked.
     let repo_writable = push_ok.map(|allowed| allowed && branch_present);
 
-    // A dead `cdn` link is counted here, or `ok: true` could stand beside a failure and
-    // the one-value invariant below would not hold.
+    // Pre-flight link failures are counted here, or `ok: true` could stand beside a
+    // failure and the one-value invariant below would not hold.
     let ok = p.config_ok
         && token_valid == Some(true)
         && repo_writable == Some(true)
-        && p.dead_cdn.is_none();
+        && p.dead_cdn.is_none()
+        && !private;
 
     // One value decides all three of `ok`, the exit status and `error`, so a report
     // can no longer claim one thing and exit another. The fallback covers the run
@@ -339,7 +327,6 @@ pub async fn run(cfg: &Config, mode: Mode) -> Result<u8> {
         repo,
         branch,
         setup_err,
-        cdn: matches!(kind, crate::cli::LinkKind::Cdn),
         dead_cdn: crate::commands::upload::reject_dead_cdn_link(kind, &cfg.github.branch).err(),
     });
 
@@ -456,7 +443,6 @@ mod tests {
             })),
             branch: Some(Ok(Branch::Present { protected: false })),
             setup_err: None,
-            cdn: false,
             dead_cdn: None,
         }
     }
@@ -574,7 +560,6 @@ mod tests {
                     repo: None,
                     branch: None,
                     setup_err: Some(AppError::config_missing("no credential")),
-                    cdn: false,
                     dead_cdn: None,
                 },
                 Some(ErrorCode::ConfigMissing),
@@ -615,7 +600,6 @@ mod tests {
         // `release/v1`, and which `Config::validate` has no reason to refuse — reported
         // ✓ ✓ ✓ and exit 0 while every upload exited 2 having sent nothing.
         let (r, exit) = summarize(Probed {
-            cdn: true,
             dead_cdn: Some(AppError::usage("branch contains '/'")),
             ..probed(Ok("me".into()), Ok(true))
         });
@@ -633,35 +617,27 @@ mod tests {
     }
 
     #[test]
-    fn a_private_host_serving_cdn_links_is_a_caveat_and_not_a_failure() {
-        // Every upload succeeds and every jsDelivr link 404s, because jsDelivr serves
-        // only public repositories. `RepoInfo` dropped `private`, so `doctor` could not
-        // see it on a response it already fetched.
+    fn a_private_host_is_a_failure_even_when_it_is_writable() {
+        // The Contents API accepts the write, but both emitted link forms are public,
+        // unauthenticated URLs. A private target must therefore fail the same health
+        // check the upload path now performs before its first PUT.
         let (r, exit) = summarize(Probed {
-            cdn: true,
             repo: Some(Ok(RepoFacts {
                 pushable: true,
                 private: true,
             })),
             ..probed(Ok("me".into()), Ok(true))
         });
-        // A caveat, because the upload really does work — it is the link that is dead,
-        // which is worse in one way: nothing else reports it at all.
-        assert!(r.ok, "the upload is not refused, so this is not a failure");
-        assert_eq!(exit, 0);
+        assert!(!r.ok);
+        assert_eq!(exit, ErrorCode::Usage.exit_code());
+        assert_eq!(
+            r.repo_writable,
+            Some(true),
+            "GitHub write permission still exists"
+        );
         let detail = r.detail.unwrap_or_default();
-        assert!(detail.contains("jsDelivr"), "{detail}");
-        assert!(detail.contains("link_kind raw"), "{detail}");
-        // Same repository on `raw` links has nothing to warn about.
-        let (clean, _) = summarize(Probed {
-            cdn: false,
-            repo: Some(Ok(RepoFacts {
-                pushable: true,
-                private: true,
-            })),
-            ..probed(Ok("me".into()), Ok(true))
-        });
-        assert_eq!(clean.detail, None);
+        assert!(detail.contains("private"), "{detail}");
+        assert!(detail.contains("public repository"), "{detail}");
     }
 
     #[test]
@@ -678,7 +654,6 @@ mod tests {
             repo: None,
             branch: None,
             setup_err: None,
-            cdn: true,
             dead_cdn: None,
         });
         assert_eq!(r.token_valid, None, "nothing was checked, so say nothing");
@@ -694,7 +669,6 @@ mod tests {
             repo: None,
             branch: None,
             setup_err: Some(AppError::config_missing("no GitHub credential")),
-            cdn: true,
             dead_cdn: None,
         });
         assert_eq!(unresolved.token_valid, Some(false));
@@ -710,7 +684,6 @@ mod tests {
             repo: None,
             branch: None,
             setup_err: Some(AppError::config_missing("no GitHub credential")),
-            cdn: false,
             dead_cdn: None,
         });
         assert!(
@@ -737,7 +710,6 @@ mod tests {
             repo: None,
             branch: None,
             setup_err: Some(AppError::config_missing("run `gitpic auth login`")),
-            cdn: false,
             dead_cdn: None,
         });
         assert!(r.config_ok && r.token_valid != Some(true));
@@ -760,7 +732,6 @@ mod tests {
             })),
             branch: Some(Ok(Branch::Missing)),
             setup_err: None,
-            cdn: false,
             dead_cdn: None,
         });
         assert!(
@@ -790,7 +761,6 @@ mod tests {
             })),
             branch: Some(Ok(Branch::Missing)),
             setup_err: None,
-            cdn: false,
             dead_cdn: None,
         });
         assert_eq!(exit, ErrorCode::RemoteNotFound.exit_code());
@@ -810,7 +780,6 @@ mod tests {
             })),
             branch: Some(Ok(Branch::Present { protected: true })),
             setup_err: None,
-            cdn: false,
             dead_cdn: None,
         });
         assert!(r.ok && r.repo_writable == Some(true), "still a healthy run");

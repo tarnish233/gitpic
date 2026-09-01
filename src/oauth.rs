@@ -42,10 +42,9 @@ pub const DEFAULT_CLIENT_ID: &str = "Ov23lixXJLMVM3WBedvm";
 /// "this repository" — and it is all a working image host needs, since jsDelivr, which
 /// `link_kind = "cdn"` points at, serves only public repositories.
 ///
-/// A private image host needs `repo`, which is broad: read and write on every
-/// repository the user can reach. That is why it is not the default — `--scope repo`
-/// asks for it deliberately, and only `link_kind = "raw"` links resolve from a private
-/// repository anyway.
+/// A broader scope can still be requested for a custom OAuth setup, but it does not
+/// make a private repository a valid image host: GitPic's emitted links deliberately
+/// carry no credential, so the upload path refuses private targets before writing.
 pub const DEFAULT_SCOPE: &str = "public_repo";
 
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";

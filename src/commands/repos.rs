@@ -1,10 +1,10 @@
 //! `gitpic repos` — which repositories this credential could upload to.
 //!
 //! Not quite "what does this user own": the answer is scope-limited, because a
-//! `public_repo` token is not shown private repositories at all. So this is already the
-//! set of *usable* targets — which is why a hand-typed `owner/repo` can be spelled
-//! perfectly and still 404. It is what a picker offers, and what a human can read before
-//! typing anything.
+//! `public_repo` token is not shown private repositories at all. The command reports
+//! every reachable row for diagnostics; interactive pickers additionally require a
+//! public, writable repository, because neither jsDelivr nor a static unauthenticated
+//! raw URL can make a private repository into a shareable image host.
 //!
 //! It is also, in [`choose_target`], the picker itself — the only way a target reaches
 //! `config.toml` interactively now that `gitpic init` is gone.
@@ -21,14 +21,14 @@ use serde::Serialize;
 /// repositories at all, and — far likelier — a token whose scope hides them.
 /// `public_repo` is not shown private repositories, so "empty" and "all private" look
 /// identical from here.
-const NOTHING_TO_OFFER: &str = "no repositories are available to this credential.\n\
-     if your image host is a private repository, log in again with \
-     `gitpic auth login --scope repo` — the default `public_repo` scope cannot see \
-     private repositories at all.";
+const NOTHING_TO_OFFER: &str =
+    "no public, writable repositories are available to this credential.\n\
+     GitPic links are meant to be opened without a GitHub credential, so private \
+     repositories cannot be used as image hosts.";
 
 /// What to do when the list cannot be used: the two routes that take a value directly.
-pub(crate) const SET_IT_BY_HAND: &str = "set the image host with `gitpic config set github.repo \
-     owner/name`, or export GITPIC_REPO=owner/name";
+pub(crate) const SET_IT_BY_HAND: &str = "set a public image host with `gitpic config set \
+     github.repo owner/name`, or export GITPIC_REPO=owner/name";
 
 /// The caveats worth printing beside a repository's name.
 ///
@@ -40,12 +40,13 @@ pub(crate) const SET_IT_BY_HAND: &str = "set the image host with `gitpic config 
 fn caveats(r: &RepoCandidate) -> Vec<String> {
     let mut notes = vec![format!("branch {}", r.default_branch)];
     if r.private {
-        // Said next to the name rather than after the choice: jsDelivr serves only
-        // public repositories, so a private one needs `link_kind = raw` — and a private
-        // repository's `raw` links need a token the app does not hold either.
-        notes.push("private".to_string());
+        notes.push("private — not usable as a public image host".to_string());
     }
     notes
+}
+
+fn can_be_image_host(repo: &RepoCandidate) -> bool {
+    repo.can_push && !repo.private
 }
 
 #[derive(Serialize)]
@@ -145,14 +146,15 @@ pub(crate) async fn choose_target(token: &str) -> Result<()> {
     // be a choice that cannot work — the "accepted, then silently broken" shape this
     // project refuses everywhere else — but the count is reported rather than swallowed,
     // because "my repository is missing" is the harder question to answer.
-    let skipped = all.iter().filter(|r| !r.can_push).count();
-    let repos: Vec<RepoCandidate> = all.into_iter().filter(|r| r.can_push).collect();
+    let skipped_read_only = all.iter().filter(|r| !r.can_push).count();
+    let skipped_private = all.iter().filter(|r| r.can_push && r.private).count();
+    let repos: Vec<RepoCandidate> = all.into_iter().filter(can_be_image_host).collect();
     if repos.is_empty() {
         crate::output::line(NOTHING_TO_OFFER);
         return Ok(());
     }
 
-    let mut cfg = Config::load()?;
+    let cfg = Config::load()?;
     let current = repos
         .iter()
         .position(|r| r.owner == cfg.github.owner && r.name == cfg.github.repo);
@@ -171,9 +173,14 @@ pub(crate) async fn choose_target(token: &str) -> Result<()> {
             notes.join(", ")
         ));
     }
-    if skipped > 0 {
+    if skipped_read_only > 0 {
         crate::output::line(&format!(
-            "\n  ({skipped} more you cannot push to, not listed)"
+            "\n  ({skipped_read_only} more you cannot push to, not listed)"
+        ));
+    }
+    if skipped_private > 0 {
+        crate::output::line(&format!(
+            "\n  ({skipped_private} private repositories cannot serve public links, not listed)"
         ));
     }
     if !complete {
@@ -194,31 +201,24 @@ pub(crate) async fn choose_target(token: &str) -> Result<()> {
     };
     let repo = &repos[chosen];
 
-    cfg.github.owner = repo.owner.clone();
-    cfg.github.repo = repo.name.clone();
-    // GitHub's answer, not a guess. Typing this was how a repository whose default is
-    // `master` ended up configured for `main`, with every upload then 404ing on a ref
-    // that does not exist.
-    cfg.github.branch = repo.default_branch.clone();
-    // Checked before the write, never after: a value this file cannot hold must not
-    // reach disk under a "✓ saved", because every later command loads the file first
-    // and would then fail with `CONFIG_INVALID` — the next login included.
-    cfg.validate_input()?;
-    let path = cfg.save()?;
+    let (_, cfg, path) = Config::update(|cfg| {
+        cfg.github.owner = repo.owner.clone();
+        cfg.github.repo = repo.name.clone();
+        // GitHub's answer, not a guess. Typing this was how a repository whose default
+        // is `master` ended up configured for `main`, with every upload then 404ing on
+        // a ref that does not exist. The update transaction reloads after acquiring the
+        // writer lock, so unrelated settings changed by another process are retained.
+        cfg.github.branch = repo.default_branch.clone();
+        Ok(())
+    })?;
 
     crate::output::line(&format!(
         "\n{} {} on {} — saved to {}",
         crate::output::tick(),
         repo.spec(),
         cfg.github.branch,
-        path.display()
+        crate::output::terminal_safe(&path.display().to_string())
     ));
-    if repo.private && cfg.upload.link_kind == "cdn" {
-        crate::output::note(
-            "jsDelivr serves only public repositories. For a private image host, run \
-             `gitpic config set upload.link_kind raw`.",
-        );
-    }
     Ok(())
 }
 
@@ -264,6 +264,20 @@ fn parse_choice(reply: &str, count: usize) -> Result<usize> {
 mod tests {
     use super::*;
     use crate::error::ErrorCode;
+
+    #[test]
+    fn picker_candidates_must_be_public_and_writable() {
+        let candidate = |private, can_push| RepoCandidate {
+            owner: "o".to_string(),
+            name: "r".to_string(),
+            private,
+            default_branch: "main".to_string(),
+            can_push,
+        };
+        assert!(can_be_image_host(&candidate(false, true)));
+        assert!(!can_be_image_host(&candidate(true, true)));
+        assert!(!can_be_image_host(&candidate(false, false)));
+    }
 
     #[test]
     fn a_choice_is_one_based() {

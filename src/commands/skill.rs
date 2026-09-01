@@ -244,7 +244,7 @@ fn run_path(mode: Mode) -> Result<u8> {
         return Ok(0);
     }
     for t in &targets {
-        crate::output::line(&t.path.display().to_string());
+        crate::output::untrusted_line(&t.path.display().to_string());
     }
     Ok(0)
 }
@@ -348,7 +348,7 @@ fn run_install(
             crate::output::tick(),
             item.action,
             env!("CARGO_PKG_VERSION"),
-            item.path,
+            crate::output::terminal_safe(&item.path),
         ));
     }
     // After the lines, so what landed is on screen before the reason the rest did not.
@@ -423,7 +423,7 @@ fn select_interactively(detected: Vec<Target>) -> Result<Vec<Target>> {
             "  [{}] {:width$}  {}  ({})",
             i + 1,
             t.agent_list(),
-            t.path.display(),
+            crate::output::terminal_safe(&t.path.display().to_string()),
             action.label(),
         ));
     }

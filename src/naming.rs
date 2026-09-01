@@ -64,6 +64,7 @@ fn sanitize_ext(ext: &str) -> Option<String> {
 pub fn is_safe_remote_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
+        && !path.chars().any(char::is_control)
         && !path
             .split('/')
             .any(|seg| seg == ".." || seg.is_empty() || seg == ".")
@@ -83,6 +84,10 @@ pub fn is_safe_remote_path(path: &str) -> bool {
 /// `USAGE` from `--path` — which is the split `Config::validate` already uses for
 /// every other check.
 pub fn check_template(template: &str) -> std::result::Result<(), String> {
+    check_placeholders(template)?;
+    if template.chars().any(char::is_control) {
+        return Err("must not contain control characters".to_string());
+    }
     let sample = render_path(template, "sample.png", &"0".repeat(64));
     if is_safe_remote_path(&sample) {
         return Ok(());
@@ -92,10 +97,46 @@ pub fn check_template(template: &str) -> std::result::Result<(), String> {
     ))
 }
 
+const PLACEHOLDERS: &[&str] = &[
+    "{year}", "{month}", "{day}", "{hash}", "{hash16}", "{hash8}", "{name}", "{ext}",
+];
+
+fn check_placeholders(template: &str) -> std::result::Result<(), String> {
+    let bytes = template.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => {
+                let Some(relative_end) = bytes[index + 1..].iter().position(|b| *b == b'}') else {
+                    return Err(format!(
+                        "contains an unclosed placeholder starting at byte {index}"
+                    ));
+                };
+                let end = index + 1 + relative_end;
+                let placeholder = &template[index..=end];
+                if !PLACEHOLDERS.contains(&placeholder) {
+                    return Err(format!(
+                        "contains unknown placeholder {placeholder:?}; supported placeholders are {}",
+                        PLACEHOLDERS.join(" ")
+                    ));
+                }
+                index = end + 1;
+            }
+            b'}' => {
+                return Err(format!(
+                    "contains an unmatched `}}` at byte {index}; placeholders must use `{{name}}` syntax"
+                ));
+            }
+            _ => index += 1,
+        }
+    }
+    Ok(())
+}
+
 /// Render the path template.
 ///
 /// Supported placeholders:
-///   {year} {month} {day} {hash} {hash8} {name} {ext}
+///   {year} {month} {day} {hash} {hash16} {hash8} {name} {ext}
 pub fn render_path(template: &str, original_name: &str, hash_hex: &str) -> String {
     let now = chrono::Local::now();
     let path = Path::new(original_name);
@@ -107,6 +148,7 @@ pub fn render_path(template: &str, original_name: &str, hash_hex: &str) -> Strin
         .unwrap_or_else(|| "png".to_string());
 
     let hash8 = &hash_hex[..hash_hex.len().min(8)];
+    let hash16 = &hash_hex[..hash_hex.len().min(16)];
     // Use the slug when available; otherwise fall back to the content hash so
     // non-ASCII filenames stay unique instead of all becoming the same name.
     let slug = slugify(stem);
@@ -120,6 +162,7 @@ pub fn render_path(template: &str, original_name: &str, hash_hex: &str) -> Strin
         .replace("{year}", &format!("{:04}", now.year()))
         .replace("{month}", &format!("{:02}", now.month()))
         .replace("{day}", &format!("{:02}", now.day()))
+        .replace("{hash16}", hash16)
         .replace("{hash8}", hash8)
         .replace("{hash}", hash_hex)
         .replace("{name}", &name)
@@ -178,8 +221,8 @@ mod tests {
     #[test]
     fn template_renders_placeholders() {
         let hash = "abcdef1234567890";
-        let p = render_path("images/{hash8}-{name}.{ext}", "My Photo.PNG", hash);
-        assert_eq!(p, "images/abcdef12-my-photo.png");
+        let p = render_path("images/{hash16}-{hash8}-{name}.{ext}", "My Photo.PNG", hash);
+        assert_eq!(p, "images/abcdef1234567890-abcdef12-my-photo.png");
     }
 
     #[test]
@@ -307,5 +350,27 @@ mod tests {
         check_template("{name}.{ext}").expect("a bare name");
         // `{name}` slugifies `.` to `-`, so it cannot inject a `..` segment.
         check_template("{name}/x.png").expect("a literal segment after {name}");
+    }
+    #[test]
+    fn unknown_or_unbalanced_placeholders_are_rejected() {
+        for bad in [
+            "images/{hash9}-{name}.{ext}",
+            "images/{owner}/{name}.{ext}",
+            "images/{hash",
+            "images/hash}/{name}.{ext}",
+        ] {
+            let why = check_template(bad).expect_err(bad);
+            assert!(
+                why.contains("placeholder") || why.contains("unmatched"),
+                "{bad:?}: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_characters_are_not_valid_path_literals() {
+        let why = check_template("images/\u{1b}[31m/{name}.{ext}").expect_err("escape");
+        assert!(why.contains("control"), "{why}");
+        assert!(!is_safe_remote_path("images/line\nfeed.png"));
     }
 }
