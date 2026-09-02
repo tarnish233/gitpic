@@ -72,7 +72,8 @@ struct UploadPane: View {
                     Group {
                     LabeledContent("最大宽度") {
                         HStack(spacing: 12) {
-                            Slider(value: intBinding(draft.upload.maxWidth), in: 0...4096, step: 64)
+                            Slider(value: intBinding(draft.upload.maxWidth, step: 64),
+                                   in: 0...4096)
                                 .frame(width: 180)
                             Text(draft.upload.maxWidth.wrappedValue == 0
                                  ? "不限制" : "\(draft.upload.maxWidth.wrappedValue) px")
@@ -82,7 +83,7 @@ struct UploadPane: View {
                     }
                     LabeledContent("质量") {
                         HStack(spacing: 12) {
-                            Slider(value: intBinding(draft.upload.quality), in: 1...100, step: 1)
+                            Slider(value: intBinding(draft.upload.quality), in: 1...100)
                                 .frame(width: 180)
                             Text("\(draft.upload.quality.wrappedValue)")
                                 .monospacedDigit().foregroundStyle(.secondary)
@@ -98,8 +99,17 @@ struct UploadPane: View {
     }
 
     /// Slider works in Double; the config stores Int.
-    private func intBinding(_ b: Binding<Int>) -> Binding<Double> {
+    ///
+    /// The snapping lives here rather than in `Slider(value:in:step:)` because on
+    /// macOS that initialiser draws a tick mark per step under the track — 64 dots
+    /// under 最大宽度 and 99 under 质量, which read as a stray hairline under each
+    /// slider at this size. Rounding in the setter lands on exactly the same values
+    /// (multiples of 64, and whole integers) with nothing drawn.
+    ///
+    /// The getter returns the already-snapped value, so the knob still settles on
+    /// the step it committed to instead of wherever the pointer stopped.
+    private func intBinding(_ b: Binding<Int>, step: Int = 1) -> Binding<Double> {
         Binding(get: { Double(b.wrappedValue) },
-                set: { b.wrappedValue = Int($0.rounded()) })
+                set: { b.wrappedValue = Int(($0 / Double(step)).rounded()) * step })
     }
 }
