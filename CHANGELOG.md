@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.12] - 2026-09-02
+
+### Compression sliders drop the tick marks and step exactly as before
+
+- The max-width and quality sliders no longer draw a row of tick marks beneath the track
+- Values are unchanged: max width still lands on multiples of 64, and quality is still a whole number
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+### App
+
+- On macOS, `Slider(value:in:step:)` draws one tick per step under the track — 64 dots for
+  `0...4096 step 64` and 99 for `1...100 step 1`. Across these rows' 180pt they merge into a
+  hairline that reads as a row divider appearing out of nowhere, a few points away from the real
+  row divider, which spans the full width. Two lines of similar weight that close together read as
+  a mistake. The snapping moved into the binding's setter and the sliders no longer receive a
+  `step`, so the ticks have nothing left to be derived from. The getter still returns the
+  already-snapped value, so the knob settles on the step it committed to: neither the feel nor the
+  values changed, and only the dots are gone.
+
 ## [0.20.11] - 2026-09-01
 
 ### Safer uploads and configuration updates

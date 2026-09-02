@@ -1,6 +1,6 @@
 [package]
 name = "gitpic"
-version = "0.20.11"
+version = "0.20.12"
 edition = "2021"
 # Verified, not guessed: `image 0.25.10` declares 1.88.0 and the `icu_*` crates
 # reqwest pulls in declare 1.86, so this is the floor the dependency graph sets —

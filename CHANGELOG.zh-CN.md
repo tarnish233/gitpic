@@ -4,6 +4,23 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.20.12] - 2026-09-02
+
+### 压缩滑块不再画刻度，取值一点没变
+
+- 压缩里的最大宽度和质量滑块，下方不再画出一排刻度点
+- 取值没有变化：最大宽度仍然只落在 64 的倍数上，质量仍然是整数
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+### App
+
+- macOS 上 `Slider(value:in:step:)` 会按 step 的数量在轨道下画刻度：`0...4096 step 64` 是 64 个点，
+  `1...100 step 1` 是 99 个点。在这两行 180pt 的宽度上它们糊成一条横线，看起来像凭空多出来的行分隔线，
+  而旁边真正的行分隔线是贯穿整行的 —— 两条线粗细相近、位置相差几个点，读起来只会觉得这里画错了。
+  量化改到 binding 的 setter 里做，Slider 不再收到 `step`，刻度就失去了可画的依据。getter 返回的仍是
+  已量化的值，所以旋钮照旧吸附到它实际提交的那一档：手感和取值都没有变，消失的只有那排点。
+
 ## [0.20.11] - 2026-09-01
 
 ### 上传和配置的边界更牢靠
