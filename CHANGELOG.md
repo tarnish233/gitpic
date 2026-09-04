@@ -4,6 +4,76 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-09-05
+
+### One way in and one way on: the DMG, then the app updates itself
+
+- Installing the app is now the DMG dragged to Applications, clearing quarantine once
+- The terminal command is a button in the app: 设置 ▸ 通用 ▸ 命令行
+- Updates no longer split between Homebrew and manual — it is always 下载并更新
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+Homebrew support is retired whole: the `gitpic` cask, the `gitpic_cli` formula and the
+`tarnish233/homebrew-tap` repository all go together. Since the author is the only user, no
+transitional shim, `cask_renames.json` or deprecation notice was kept. Migrating is once: download
+the DMG first, then `brew uninstall --cask gitpic && brew untap tarnish233/homebrew-tap`, drag the
+app across, clear quarantine, and click 安装命令行工具 in the settings window.
+
+### App
+
+- New 安装命令行工具 (设置 ▸ 通用 ▸ 命令行). It symlinks the `gitpic` embedded in the bundle to
+  `~/.local/bin/gitpic` and writes zsh (`~/.zfunc/_gitpic`), bash
+  (`~/.local/share/bash-completion/completions/gitpic`) and fish
+  (`~/.config/fish/completions/gitpic.fish`) completions. `~/.local/bin` rather than
+  `/usr/local/bin` because the latter is `root:wheel` and would mean raising an administrator
+  prompt out of an unnotarised bundle, while the former is user-owned, a plain `mkdir -p`, and
+  outside TCC's protected paths. A link rather than a copy, so the command tracks the app's
+  version and cannot go stale.
+- The link is installed by writing `.gitpic-<uuid>` and `rename(2)`-ing it into place:
+  `createSymbolicLink` fails on an existing path, and unlink-then-create leaves a window in which
+  the command does not exist. Removal compares each completion file byte for byte against what it
+  would generate and leaves edited ones alone, with an explanation, rather than overwriting
+  silently.
+- The pane reports two things separately: link status (not installed / installed / dangling /
+  pointing elsewhere / occupied by a real file) and reachability from a login shell (reachable /
+  shadowed by some path / not on PATH / unreadable). Separate because they differ by three orders
+  of magnitude — one `lstat` against a login-shell probe capped at 8 seconds. Reachability does
+  **not** read `ProcessInfo.environment["PATH"]`: a Finder-launched app inherits only
+  `/usr/bin:/bin:/usr/sbin:/sbin`, which would report "not on PATH" for everybody.
+- The login-shell probe now runs `-l -i` rather than `-l` alone. zsh reads `.zshrc` for
+  *interactive* shells only, so a login-but-not-interactive `zsh -l -c` skips it — measured on
+  this machine, whose PATH export lives at `~/.zshrc:126`: `-l -c` did not see `~/.local/bin` and
+  `-l -i -c` did. The bug stayed hidden while the only tool probed was `gh`, whose
+  `/opt/homebrew/bin` arrives from `.zprofile`, a file login shells do read. `~/.local/bin` is the
+  first path commonly exported from `.zshrc` that the probe has been asked about, and it is
+  exactly where this release's new button puts its link, so the wrong answer landed squarely on
+  the new feature.
+- **The app never edits a shell config file**, and that is held by a type rather than a comment:
+  `Shell.setUp` returns the lines to paste and no writer for them exists in either target, with a
+  source scan asserting `.zshrc`, `.bash_profile`, `.bashrc` and `config.fish` appear nowhere under
+  `Sources/` outside that one literal.
+- The update route collapses from five cases to two (`selfInstall` / `unavailable`). Removing the
+  Homebrew branches removed `Updater.resolve`'s only `await` — the network probe against the tap
+  was the entire reason it was async — and with it the whole apparatus built around that suspension
+  point: the `resolvingUpgradePath` re-entrancy guard, the `while true` retry loop, blanking
+  `upgradePath` during the probe, and the cached-route allowlist. One defect goes with them: the
+  confirm button is no longer a silent no-op during a re-probe.
+- Route resolution moved ahead of presenting the sheet, so the first frame already has an answer
+  and the 正在确认升级方式… row is gone along with the frame of flicker it cost.
+
+### CLI
+
+- `gitpic update cask` is removed, as is `release.rs`'s Contents-API read of the tap's
+  `Casks/gitpic.rb`.
+- `install_source.rs` goes from five install sources to three: `App`, `Cargo`, `Unknown`.
+  `CaskApp`, `Formula`, the Caskroom ownership check and the Cellar branch are all deleted.
+  `current_exe()` is still canonicalised first, for a new reason: `~/.local/bin/gitpic` is a
+  symlink, and unresolved it is inside neither a bundle nor a `CARGO_HOME`, so the one install that
+  needs no action at all would be told to go and download something.
+
+
+
 ## [0.20.12] - 2026-09-02
 
 ### Compression sliders drop the tick marks and step exactly as before

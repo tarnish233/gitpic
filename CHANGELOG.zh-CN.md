@@ -4,6 +4,60 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.21.0] - 2026-09-05
+
+### 安装和更新只剩一条路：下 DMG，之后 app 自己更新
+
+- 装 app 改成下 DMG 拖进 Applications，第一次需要自己解除隔离
+- 终端命令改成在 app 里点一下装：设置 ▸ 通用 ▸ 命令行
+- 更新不再分 Homebrew / 手动两种情况，永远是「下载并更新」
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+Homebrew 支持整体退役：cask `gitpic`、formula `gitpic_cli` 和 `tarnish233/homebrew-tap` 仓库一起
+下线。因为只有作者一人在用，没有保留任何过渡兼容层、`cask_renames.json` 或废弃提示。迁移一次：
+下好 DMG 之后 `brew uninstall --cask gitpic && brew untap tarnish233/homebrew-tap`，拖进
+Applications，解除隔离，再进设置点一下「安装命令行工具」。
+
+### App
+
+- 新增「安装命令行工具」（设置 ▸ 通用 ▸ 命令行）。它把 bundle 内嵌的 `gitpic` 软链到
+  `~/.local/bin/gitpic`，并写入 zsh (`~/.zfunc/_gitpic`)、bash
+  (`~/.local/share/bash-completion/completions/gitpic`) 和 fish
+  (`~/.config/fish/completions/gitpic.fish`) 三份补全。选 `~/.local/bin` 而不是 `/usr/local/bin`：
+  后者属 `root:wheel`，要从一个未公证的 bundle 里弹管理员授权才能写；前者用户自有，`mkdir -p` 即可，
+  也不在 TCC 保护范围内。软链而不是复制，所以命令永远跟着 app 的版本走，不可能过期。
+- 建链用先写 `.gitpic-<uuid>` 再 `rename(2)` 的方式原子替换：`createSymbolicLink` 遇到已存在会失败，
+  而先删后建会留下一段命令不存在的窗口。卸载时逐字节比对补全文件，改过的留下并说明，不静默覆盖。
+- 面板分别报告两件事：软链状态（未安装 / 已安装 / 悬空 / 指向别处 / 被真实文件占用）和登录 shell 里的
+  可达性（可达 / 被某个路径遮挡 / 不在 PATH 上 / 读不到）。两者拆开是因为代价差三个数量级 —— 前者一次
+  `lstat`，后者一次最多 8 秒的登录 shell 探测。可达性**不读** `ProcessInfo.environment["PATH"]`：
+  Finder 启动的 app 只继承 `/usr/bin:/bin:/usr/sbin:/sbin`，那样会对所有人误报「不在 PATH 上」。
+- 登录 shell 探测改用 `-l -i`，不再只用 `-l`。zsh 只对**交互式** shell 读 `.zshrc`，所以
+  login-但-非交互的 `zsh -l -c` 会跳过它 —— 实测本机（PATH 导出在 `~/.zshrc:126`）：`-l -c` 看不到
+  `~/.local/bin`，`-l -i -c` 看得到。这个错误一直藏着，因为过去只探测 `gh`，而它的
+  `/opt/homebrew/bin` 来自 `.zprofile`（login shell 确实会读）；`~/.local/bin` 是第一个通常从
+  `.zshrc` 导出的路径，也正好是本次新功能建链的地方，于是错误答案正落在新功能上。
+- **app 永不修改用户的 shell 配置文件**，而且这条用类型保证而非注释：`Shell.setUp` 只返回需要粘贴的
+  文本，两个 target 里都不存在它的 writer；另有一条源码扫描断言 `.zshrc` / `.bash_profile` /
+  `.bashrc` / `config.fish` 只允许出现在那一处字面量里。
+- 更新路由从五个分支塌缩为两个（`selfInstall` / `unavailable`）。删掉 brew 分支后 `Updater.resolve`
+  唯一的 `await` 也没了 —— 它异步的全部原因就是那次访问 tap 的网络探测。于是围绕它建立的整套机制一起
+  消失：`resolvingUpgradePath` 重入守卫、`while true` 重试循环、探测期间把 `upgradePath` 置 nil、
+  以及缓存白名单。顺带修掉一个缺陷：确认按钮在重新探测期间不再静默无操作。
+- 路由解析移到 sheet 抬起之前，所以第一帧就有结论，「正在确认升级方式…」这一行连带它那一帧闪烁一起
+  删掉了。
+
+### CLI
+
+- 移除 `gitpic update cask` 子命令，以及 `release.rs` 里对 tap 的 `Casks/gitpic.rb` 读取。
+- `install_source.rs` 的安装来源从五种减为三种：`App`、`Cargo`、`Unknown`。`CaskApp`、`Formula`、
+  Caskroom 归属判定和 Cellar 分支全部删除。`current_exe()` 仍然先 canonicalize —— 理由换成了新的
+  `~/.local/bin/gitpic` 软链：不解析的话它既不在 bundle 里也不在 `CARGO_HOME` 下，会给唯一一种
+  「什么都不用做」的安装印出「去发布页下载」。
+
+
+
 ## [0.20.12] - 2026-09-02
 
 ### 压缩滑块不再画刻度，取值一点没变
