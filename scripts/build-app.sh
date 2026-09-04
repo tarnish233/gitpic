@@ -48,11 +48,11 @@ if [[ -z "$GITPIC_BIN" ]]; then
   # check below was described as what made that safe. It is not: it compares *versions*, so
   # it catches a binary left over from before a version bump and is blind to one left over
   # from earlier the same day. Measured — a `target/release/gitpic` from the previous
-  # evening, still 0.20.9, was embedded into an 0.20.9 bundle and shipped without the
-  # `update cask` subcommand that had been added since. Nothing failed. The app degrades
-  # quietly in that state (a missing subcommand reads as "could not read the tap", so every
-  # Homebrew user gets the command with a caveat instead of the real answer), which makes it
-  # harder to notice rather than easier.
+  # evening, still 0.20.9, was embedded into an 0.20.9 bundle and shipped without a
+  # subcommand that had been added since. Nothing failed at build time and nothing failed
+  # at launch: the app only finds out when something asks the embedded CLI for the thing it
+  # cannot do, which is one pane deep in the settings window rather than anywhere a smoke
+  # test walks. That makes the state harder to notice rather than easier.
   #
   # `cargo build` is incremental, so this is a no-op when the binary is already current —
   # the reuse saved nothing worth this failure mode. `release.yml` was never exposed because

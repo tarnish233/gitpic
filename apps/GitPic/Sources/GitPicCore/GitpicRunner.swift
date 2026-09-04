@@ -35,7 +35,7 @@ extension RunFailure {
     ///
     /// Here rather than in the app because it is the one place that can be tested — and
     /// because it was `String(describing:)` in the app, which printed the enum. A user with
-    /// an app built from source and an older `gitpic_cli` on `PATH` got
+    /// an app built from source and an older standalone `gitpic` on `PATH` got
     /// `undecodable(status: 2, raw: "error: unrecognized subcommand \'update\'")` as an
     /// orange banner on 设置 ▸ 通用: every case except `.cli` rendered as Swift syntax.
     ///
@@ -100,21 +100,6 @@ public actor GitpicRunner {
     /// browser: two pending device codes for one account is a state with no sensible
     /// UI, and the second would invalidate nothing but the user's attention.
     private nonisolated static let loginQueue = DispatchQueue(label: "dev.gitpic.app.login")
-
-    /// The tap lookup's own queue, off `gate` for the reason spelled out on `tapCask`.
-    /// Serial as well, so two sheet openings in a row cannot put two of them on the
-    /// machine — there is nothing to gain from the second and the answer would be the same.
-    private nonisolated static let tapQueue = DispatchQueue(label: "dev.gitpic.app.tap")
-
-    /// Shorter than the CLI's own 20 s request ceiling on purpose, so this side is the
-    /// binding one. Coming off `gate` removed the accident that used to bound this.
-    ///
-    /// It bounds when the child is *asked* to stop, not when it is gone: `ChildProcess.run`
-    /// terminates, waits up to 2 s, `SIGKILL`s and waits up to 1 s more, all after the
-    /// deadline. So the worst case is nearer 13 s than 10 — stated because four doc comments
-    /// used to say "10 s" flatly, and a reader sizing the sheet's wait against it would be
-    /// three seconds short.
-    private nonisolated static let tapTimeout: TimeInterval = 10
 
     public init(tools: ToolPaths) { self.tools = tools }
 
@@ -210,23 +195,6 @@ public actor GitpicRunner {
     /// all: coming off the gate is what makes a bound necessary, since the gate is
     /// the only thing that was keeping two spawns apart.
     ///
-    /// **This deliberately does not honour task cancellation, and re-adding it is a bug.**
-    /// A `withCheckedThrowingContinuation` is not cancellable on its own, so cancelling the
-    /// awaiting task neither ends the `await` nor touches the child — and one caller *depends*
-    /// on that. `AppModel.resolveUpgradePath` runs inside `UpdateSheet`'s `.task(id:)`, which
-    /// SwiftUI cancels the moment a new report moves the generation; its loop then notices the
-    /// generation moved and asks again, and that second ask is made from a task that is already
-    /// cancelled. Its own comment says so: "the probe already running is the one that has to
-    /// notice."
-    ///
-    /// A `withTaskCancellationHandler` here was tried and reverted, having been measured: with
-    /// it, the first probe is killed mid-flight *and the re-query is killed before it starts*,
-    /// because `onCancel` fires immediately on an already-cancelled task. `CaskOwnership.verdict`
-    /// turns any failure into `Offer.unknown`, so the new report resolved to 「暂时读不到
-    /// Homebrew 提供的版本」 instead of a real comparison — wrong information where the
-    /// alternative is an honest 「正在确认升级方式…」 for the length of the bound. What the
-    /// handler was meant to buy is not worth that: the only bounded caller is a read-only
-    /// lookup, capped by ``tapTimeout``, on its own queue, blocking nothing.
     nonisolated func run(
         _ args: [String],
         on queue: DispatchQueue? = nil,
@@ -474,28 +442,15 @@ extension GitpicRunner {
         try await runJSON(["update", "check", "--json"], as: UpdateReport.self)
     }
 
-    /// What `brew upgrade --cask gitpic` would install, asked only when a cask owns us.
-    ///
-    /// **Deliberately not on `gate`**, for the reason `loginEvents` is not: the gate has no
-    /// timeout, and this one goes to the network. The CLI bounds a single attempt at 20 s
-    /// with a 10 s connect and retries once anonymously if GitHub refuses the credential, so
-    /// worst case is around forty seconds — and on `gate` that is forty seconds in front of
-    /// every upload, on the sheet-open path. Deleting twenty-eight seconds of exactly that
-    /// shape is what `bb07783` was for; putting forty back wearing a different hat would be
-    /// the worse regression. A read-only lookup races with nothing: it writes no file at all,
-    /// which is a weaker claim than the one that justifies `loginQueue`.
-    ///
-    /// Coming off the gate is why the bound is here rather than left to the CLI. Ten seconds
-    /// is shorter than the CLI's own ceiling on purpose, so this side is the real one — see
-    /// ``tapTimeout`` for why the wall-clock worst case is nearer thirteen. That bound, and not
-    /// task cancellation, is what stops a wedged child outliving the sheet: ``run`` deliberately
-    /// does not honour cancellation, for a reason spelled out there. A timeout is not a failure
-    /// to report: it means the tap could not be read, which is a state the caller has an answer
-    /// for — and it arrives as `RunFailure.timedOut` rather than as an empty decode failure, so
-    /// the log says so.
-    public func tapCask() async throws -> TapCask {
-        try await runJSON(["update", "cask", "--json"], as: TapCask.self,
-                          on: Self.tapQueue, timeout: Self.tapTimeout)
+    /// Generate one completion script. This command deliberately does not use `--json`:
+    /// stdout is the script itself, and the exit status is the success contract.
+    public func completion(for shell: CommandLineTool.Shell) async throws -> Data {
+        let out = try await run(["completion", shell.rawValue])
+        guard out.status == 0 else { throw Self.failure(out) }
+        guard !out.stdout.isEmpty else {
+            throw RunFailure.undecodable(status: out.status, raw: "gitpic 没有输出补全脚本")
+        }
+        return out.stdout
     }
 
     /// Every branch on one repository.

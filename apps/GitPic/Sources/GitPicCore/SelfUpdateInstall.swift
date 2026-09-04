@@ -396,9 +396,9 @@ extension SelfUpdate {
             inFlightWork.release(mount: mount)
         }
         // The digest was taken through one descriptor; `hdiutil` is about to open the path
-        // again. Between those two opens sits a `Task.checkCancellation` and a hop onto
-        // `probeQueue`, which is serial and shared with a 20 s `brew list --cask` — so the
-        // window is not instants, it is tens of seconds. Without this the digest would prove
+        // again. Between those two opens sits a `Task.checkCancellation` and a hop onto the
+        // staging queue, so the bytes must be checked again immediately before use. Without this
+        // the digest would prove
         // something about bytes that are never installed.
         //
         // Placed as late as possible, immediately before the attach, because everything this
@@ -799,8 +799,8 @@ extension SelfUpdate {
     ///    `.accessory`: once it has quit there is no Dock icon and no menu-bar icon, so a
     ///    script that dies before reopening costs the user the entire app.
     /// 6. **`PATH` is set explicitly.** Not a root-safety measure — nothing here runs
-    ///    elevated — but the app's own PATH has a Homebrew prefix prepended, and a swap script
-    ///    has no business resolving `mv` through a user-writable directory. `lsof` lives in
+    ///    elevated — but a swap script must not resolve `mv` through a user-writable directory.
+    ///    `lsof` lives in
     ///    `/usr/sbin`, which is already on it.
     /// 7. **`launch`, `candidates` and `image` are one-liners.** Everything this script does to
     ///    the outside world beyond `mv` goes through them, so a test can replace exactly those
@@ -851,9 +851,9 @@ extension SelfUpdate {
         # /var/folders/... reached through the /var symlink.
         #
         # Only the parent is resolved, and the leaf is kept exactly as written: after the swap
-        # the leaf is a real directory `mv` has just made, so resolving it would follow a
-        # symlinked GitPic.app — a brew cask's, pointing into the Caskroom — to a path the new
-        # bundle will never be at. Two bash builtins rather than doing it in the generator,
+        # the leaf is a real directory `mv` has just made, so resolving a GitPic.app that is itself
+        # a symlink would produce a path the new bundle never occupies. Two bash builtins rather
+        # than doing it in the generator,
         # because Foundation answers the wrong question: measured,
         # `URL.resolvingSymlinksInPath()` returns /tmp for /private/tmp, the *logical* path and
         # the opposite of what lsof prints, and leaves /var/folders untouched.

@@ -335,8 +335,10 @@ gitpic/
   计数被换成**按确切名字逐个断言**。宽松 glob 之所以一直没出事，只因为 publish job 跑在
   Linux —— `ls gitpic-*` 在大小写不敏感的文件系统上会匹配到 `GitPic-*`。
 - **红线 2 依然有效**：app 永远不进插件清单，`len(plugins) == 1` 保持不变。
-- **不能标 prerelease**：Homebrew tap 的更新流程读 `releases/latest`，该端点跳过 prerelease，
-  且它的 cron 失败时不报错。所以未公证这件事写进 release notes，而不是写进 prerelease 标记。
+- **不能标 prerelease**：app 自己的更新检查读 `releases/latest`，该端点跳过 prerelease。DMG 是
+  唯一的安装方式、应用内自更新是唯一的升级方式，所以这个端点是整条分发链唯一的一根线；标了
+  prerelease 就等于让所有已装的 app 静默看不到新版本。所以未公证这件事写进 release notes，
+  而不是写进 prerelease 标记。
 
 ---
 
@@ -346,7 +348,9 @@ gitpic/
 - **契约对齐测试**：一个测试实际调用打包的 gitpic 二进制拿 `--json` 输出并解码，确保 Swift 侧 `Codable` 与 `src/output.rs` 不漂移。这是防止"CLI 改了字段 GUI 静默失效"的唯一手段。
 - **人工验收清单**（无法自动化的部分，逐条勾）：
   - ~~M1：从 Finder 启动 app，拖一个 png 到刘海落区~~ → 搁置，见 §9
-  - Finder 启动下 `gh` 解析成功（这是 C1 的回归点）
+  - ~~Finder 启动下 `gh` 解析成功（这是 C1 的回归点）~~（`gh` 探测整套已删，见 §1 与 §5 的批注）
+  - Finder 启动下 `~/.local/bin/gitpic` 的可达性判断正确（C1 的现回归点：登录 shell 探测必须读到
+    `.zshrc`，否则会对本机误报「不在 PATH 上」）
   - ~~无刘海外接屏 / 多屏切换下面板定位正确~~（刘海面板已删除，不再适用）
   - 菜单栏 popover 落区可用（C2 的兜底路径）
 - **菜单对齐**：`NSMenuItem` 按图片自身尺寸绘制，SF Symbol 每个字形的包围盒都不一样

@@ -7,13 +7,9 @@ import Foundation
 /// exist.** GitPic is signed ad-hoc — no Developer ID, no notarisation (`build-app.sh`) —
 /// so there is no signature chain and macOS itself cannot vouch for a download's origin.
 /// What verifies it is the SHA-256 that `api.github.com` reports for the asset, fetched over
-/// TLS, compared against the bytes that arrive. That is **the same trust root Homebrew
-/// uses**: a cask's `sha256` is likewise a hash fetched over TLS from GitHub, and brew has
-/// no signature chain either. So this is not a weakening of the path GitPic already shipped.
-///
-/// What neither model survives is a compromised GitHub account or CI — the hash and the
-/// bytes would both be the attacker's. The only real improvement is a Developer ID plus
-/// notarisation, which is out of reach for both paths equally.
+/// TLS and compared against the bytes that arrive. This does not survive a compromised GitHub
+/// account or CI — the hash and the bytes would both be the attacker's. The only real improvement
+/// is a Developer ID plus notarisation.
 public enum SelfUpdate {
 
     /// How far along a download is. `total` is `nil` when the server sends no
@@ -163,8 +159,8 @@ public enum SelfUpdate {
         //
         // **No `connectionProxyDictionary`, deliberately.** This used to be introduced as "the
         // asymmetry with `Updater.upgradeAndRelaunch`" — which forwarded `HTTPS_PROXY`/`ALL_PROXY`
-        // to brew and called that "the difference between an upgrade and a stall". That function
-        // went with the Homebrew install path, so there is no asymmetry left to explain: this is
+        // to the old external updater and called that "the difference between an upgrade and a
+        // stall". That path is gone, so there is no asymmetry left to explain: this is
         // now the only thing that downloads an update, and it goes direct. The measurement the
         // decision rests on is unchanged. URLSession does not
         // read those variables at all (measured: with every one of them pointed at a dead
@@ -178,8 +174,8 @@ public enum SelfUpdate {
         // while the *same* proxy serves `api.github.com` fine (200 in 0.25 s). A release
         // asset redirects to `release-assets.githubusercontent.com`, a host the proxy does
         // not carry — so honouring the environment would have broken the download it was
-        // meant to rescue. brew still needs the variables because `curl` and `git` do read
-        // them and go through the proxy whether or not it works for the asset host.
+        // meant to rescue. This path therefore follows the system network configuration rather
+        // than command-line proxy environment variables.
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData

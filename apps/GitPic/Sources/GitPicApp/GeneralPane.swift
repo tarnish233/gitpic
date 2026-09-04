@@ -58,11 +58,7 @@ struct GeneralPane: View {
                 // The label is short; the caption carries the two facts it dropped — that
                 // this checks rather than installs, and that it does so daily. Nothing here
                 // ever replaces the app on its own: a found update is reported, and the
-                // sheet's button is the only thing that acts on it — by downloading the
-                // release's disk image, verifying it against the SHA-256 GitHub publishes and
-                // swapping the bundle, or, for a bundle a Homebrew cask owns, by handing over
-                // `brew upgrade --cask gitpic` and installing nothing at all. Which of the two
-                // is `SelfUpdate.route`'s first question; see `CaskOwnership`.
+                // sheet's button is the only thing that downloads, verifies and installs it.
                 CaptionedToggle(
                     label: "自动更新",
                     caption: "每天检查一次，发现新版本会告诉你，不会自动装。"
@@ -113,6 +109,23 @@ struct GeneralPane: View {
                     isOn: Binding(get: { model.finderServiceEnabled },
                                   set: { model.setFinderServiceEnabled($0) }))
             }
+
+
+            CommandLineSection(
+                status: model.commandLineStatus,
+                reach: model.commandLineReach,
+                probing: model.commandLineProbing,
+                completionsInstalled: model.completionsInstalled,
+                working: model.commandLineWorking,
+                installDisabled: model.toolState != .ready,
+                failure: model.commandLineFailure,
+                onInstall: { replacing in
+                    Task { await model.installCommandLineTool(replacing: replacing) }
+                },
+                onRemove: {
+                    Task { await model.removeCommandLineTool() }
+                },
+                onCopySetup: model.copyCommandLineSetup)
         }
         .formChrome()
         // Both switches mirror state that 系统设置 can change, so both are re-read
@@ -129,6 +142,7 @@ struct GeneralPane: View {
         // request per visit — see `UpdateSchedule`. Like `.onAppear` above it fires once per
         // mount and not on reopen, which is why `showWindow` calls this too.
         .task { await model.checkForUpdatesIfDue() }
+        .task { await model.refreshCommandLine() }
     }
 
     /// One line for "where does the update situation stand".

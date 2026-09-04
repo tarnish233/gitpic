@@ -36,12 +36,12 @@ jobs:
   # The difference is who consumes the promise. Publishing untested code ships a broken
   # binary. Publishing code whose dependency graph wants a newer rustc than
   # `rust-version` claims ships nothing wrong at all — `Cargo.toml` says as much
-  # directly above the field: "Only affects building from source; the Homebrew and
-  # release binaries are built by CI on stable." Checked, rather than assumed: `gitpic`
-  # is not on crates.io, so `cargo install gitpic` is not a consumer, and the tap's
-  # `Formula/gitpic_cli.rb` installs a prebuilt `.tar.gz` with `bin.install` and never
-  # compiles the crate. The only consumer is somebody who clones and builds, who finds
-  # out in the first second and can raise the floor.
+  # directly above the field: "Only affects building from source; the release binaries
+  # and the copy embedded in GitPic.app are built by CI on stable." Checked, rather than
+  # assumed: `gitpic` is not on crates.io, so `cargo install gitpic` is not a consumer,
+  # and no distribution channel compiles the crate — the DMG carries a binary CI built.
+  # The only consumer is somebody who clones and builds, who finds out in the first
+  # second and can raise the floor.
   #
   # So putting this on `publish`'s `needs` would trade five perfectly good prebuilt
   # artifacts for a refusal to release — and the floor is already flush, since the note

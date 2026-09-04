@@ -16,7 +16,7 @@
 # WHAT IT TOUCHES, AND WHAT IT REFUSES TO
 #   * writes only to ~/Applications/GitPic.app and a temp build directory;
 #   * never reads, writes, or opens anything in /Applications — the machine's own GitPic
-#     (Homebrew's, usually) is recorded before and after and the run fails if it moved;
+#     is recorded before and after and the run fails if it moved;
 #   * gives the test copy its own CFBundleIdentifier so Launch Services cannot conflate it
 #     with the installed one, and re-signs it ad-hoc;
 #   * appends to the machine-wide ~/Library/Logs/GitPic.log and GitPic-update.log, and
@@ -303,19 +303,12 @@ done
 [[ -n "$SHEET" ]] || fail "the update sheet never appeared (is $OLD_VERSION really older than $TARGET_VERSION?)"
 
 step "waiting for the upgrade route to resolve"
-# The action row is 「正在确认升级方式…」 until the route is known. Ownership is a directory scan
-# and a readlink, where it used to cost up to a 20 s `brew list --cask` per Homebrew prefix — the
-# probe is still the row's shape rather than a fixed sleep, because a fixed sleep would be either
-# a guess or a delay. Three buttons means a route was offered (下载并更新, 打开发布页 and 稍后);
-# two means `.unavailable`, which is a different failure and worth saying so.
-#
-# **This test copy must land on the self-install branch, and that is now a real question.** A
-# cask-managed bundle is handed `brew upgrade --cask gitpic` instead of being installed over, and
-# button 1 is then 复制升级命令 — which this script would click, copy a string, and then wait
-# forever for a process that was never going to be replaced. The copy lives in `~/Applications`
-# and no Caskroom entry points at it, so `CaskOwnership.detect` answers "not cask" and the
-# self-install branch is the right one. Asserted rather than assumed, because the failure mode
-# without the assertion is a 60 s timeout reading "never settled", which says nothing about why.
+# Still a probe of the row's shape rather than a fixed sleep, even though the route is now
+# resolved synchronously before the sheet is presented — the model holds the answer on the
+# sheet's first frame, but the accessibility tree is populated by AppKit and not by that
+# assignment, so a fixed sleep would be either a guess or a delay. Three buttons means a route
+# was offered (下载并更新, 打开发布页 and 稍后); two means `.unavailable`, which is a different
+# failure and worth saying so.
 ROUTED=""
 BUTTONS=""
 for _ in $(seq 1 60); do
@@ -328,24 +321,29 @@ if [[ -z "$ROUTED" ]]; then
       稍后). The log line beginning 'update: no in-app upgrade' says which reason."
   fail "the sheet's action row never settled (found $BUTTONS button(s))"
 fi
-# `Updater.resolve` logs the ownership verdict unconditionally, before the route.
+# `Updater.resolve` logs the route it chose, and the version in that line comes from the same
+# `report.latest` this script read out of `gitpic update check --json` — so this also asserts the
+# sheet is about to install *that* version rather than some other one.
+#
+# **A positive assertion, where this used to assert the absence of a Homebrew verdict.** Positive
+# is the stronger shape for the same reason the negative one needed the byte offset below: an
+# assertion that also passes when the interesting line is missing entirely is a guard that cannot
+# fail, which is worse than no guard.
 #
 # Scoped to this run's bytes with `LOG_MARK`, the way the wait at the top of the script is. The
 # log is append-only and machine-wide (line 23), and the *installed* /Applications/GitPic.app
-# writes to the same file — so a bare `grep` over the whole thing passes for ever after any
-# earlier run, or any sheet ever opened on a non-cask copy, has written the line once. That is a
-# guard that cannot fail, which is worse than no guard: the regression it exists for would sail
-# past it into the click below, copy a string, and time out saying nothing was replaced — exactly
-# the uninformative failure this was added to replace.
-if ! tail -c "+$((LOG_MARK + 1))" "$APP_LOG" | grep -q 'update: not cask'; then
-  fail "this copy was taken for a Homebrew-managed bundle, so button 1 is 复制升级命令 and not
-      下载并更新. The log line beginning 'update: cask' says which cask claimed it — a Caskroom
-      entry under /opt/homebrew or /usr/local resolving to $TEST_APP would do it."
+# writes to the same file — so a bare `grep` over the whole thing would pass for ever after any
+# earlier run had written the line once, and the regression this exists for would sail past it
+# into the click below and time out saying nothing was replaced.
+if ! tail -c "+$((LOG_MARK + 1))" "$APP_LOG" \
+     | grep -qF "update: offering to install $TARGET_VERSION"; then
+  fail "the sheet did not offer to install $TARGET_VERSION, so button 1 is not 下载并更新. The
+      log lines beginning 'update:' written since this run started say what it decided instead."
 fi
 
 step "下载并更新"
 # Positional, because the sheet's own buttons report their AXDescription as 「按钮」 and
-# nothing else — measured. Button 1 is the leading prominent action in either route.
+# nothing else — measured. Button 1 is the leading prominent action.
 ax 'click button 1 of group 1 of sheet 1 of window 1' >/dev/null
 
 step "confirming in the alert"

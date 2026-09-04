@@ -289,28 +289,13 @@ pub enum Command {
 
 /// A subcommand rather than a bare `gitpic update`, and the shape is a promise.
 ///
-/// `gitpic update` on its own would read as "install the update", which this does not do. The
-/// reason is not the one recorded here before — "the app is a Homebrew cask signed ad-hoc, so
-/// there is no signature chain to verify a self-downloaded replacement against" — which
-/// `Updater`'s header retracts: the installer verifies the SHA-256 `api.github.com` reports for
-/// the asset, which is the same trust root a cask's own `sha256` rests on, so ad-hoc signing
-/// never separated the two.
-///
-/// What holds is that for most installs the right actor is somebody else. A cask or a formula
-/// is brew's to upgrade, and [`crate::install_source`] now says which — so the verb keeps the
-/// door open for an `apply` that could only ever mean the installs nobody else manages, without
-/// today's spelling having promised it.
+/// `gitpic update` on its own would read as "install the update", which the CLI does not do.
+/// Requiring `check` keeps an installation verb possible later without today's spelling having
+/// promised one.
 #[derive(Debug, Subcommand)]
 pub enum UpdateAction {
     /// Report the latest release and what changed in it
     Check,
-    /// Report which version the Homebrew cask offers, installing nothing
-    ///
-    /// A separate verb rather than part of `check`, because it costs a second request that
-    /// only a Homebrew-managed install has any use for. GitPic's update sheet asks this when
-    /// it finds a cask owns its bundle, so that it can say whether `brew upgrade` would
-    /// actually do something before telling anyone to run it.
-    Cask,
 }
 
 #[derive(Debug, Subcommand)]
@@ -451,7 +436,6 @@ mod tests {
             vec!["branches"],
             vec!["paste"],
             vec!["update", "check"],
-            vec!["update", "cask"],
         ] {
             for global in [vec!["--json"], vec!["-q"], vec!["-vv"]] {
                 let mut argv = vec!["gitpic"];
@@ -694,38 +678,17 @@ mod tests {
         ));
     }
 
-    /// `update`'s verbs, and the flag table below, kept in step by hand.
-    ///
-    /// `check` was once the only subcommand with no parse test, "which is how it also ended up
-    /// missing from the global-flag table below" — and `cask` then repeated the omission exactly,
-    /// arriving with neither. That is why both verbs are named here and both are rows in the
-    /// table: the note is only worth keeping if the next verb trips over it.
-    ///
-    /// `check` is required, and that is the part worth pinning: a bare `gitpic update` must
-    /// not parse, because it reads as "install the update" — which this does not do and,
-    /// per `commands::update`, should not. Requiring the verb keeps an `apply` possible later
-    /// without today's spelling having promised it.
-    ///
-    /// `gitpic --json update cask` is the exact invocation `GitpicRunner.tapCask` makes, and the
-    /// app's whole Homebrew branch is downstream of it parsing. When it does not, the app shows
-    /// every cask user the upgrade command with a 「暂时读不到」 caveat and nothing fails, so a
-    /// green suite would have been the only signal.
+    /// `check` is required: a bare `gitpic update` reads as "install the update", which this
+    /// command does not do. Keeping its parse covered also keeps the global-flag table above in
+    /// step with the subcommands.
     #[test]
-    fn update_verbs_parse_and_the_verb_is_required() {
+    fn update_check_parses_and_the_verb_is_required() {
         assert!(matches!(
             Cli::try_parse_from(["gitpic", "update", "check"])
                 .unwrap()
                 .command,
             Some(Command::Update {
                 action: UpdateAction::Check
-            })
-        ));
-        assert!(matches!(
-            Cli::try_parse_from(["gitpic", "update", "cask"])
-                .unwrap()
-                .command,
-            Some(Command::Update {
-                action: UpdateAction::Cask
             })
         ));
         assert!(Cli::try_parse_from(["gitpic", "update"]).is_err());

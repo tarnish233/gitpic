@@ -136,6 +136,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // process — and flipping a stale switch writes the wrong value back.
         AppModel.shared.refreshFinderService()
         AppModel.shared.refreshLaunchAtLogin()
+        Task { await AppModel.shared.refreshCommandLine() }
         // And the daily update check, for exactly the reason the paragraph above gives. This
         // was the missing half of it: `GeneralPane`'s `.task` fires once when the pane is
         // first mounted, so "checks again whenever the window is opened" — which is the

@@ -96,25 +96,22 @@ struct SettingsWindowView: View {
     /// own idea of "refresh" is what broke the two-way shape: 通用 re-reads two system
     /// switches, which is neither the CLI's `busy` nor the skill scan.
     ///
-    /// `.general` is never refreshing, and that is not an oversight. Its two reads are a
-    /// login-item status (measured 3–6 ms warm) and a `pbs` preference read (1.9 ms on a
-    /// cold domain) — together an order of magnitude below the quarter second `busy`
-    /// itself waits before admitting to anything (see `AppModel.busyDelay`), so a spinner
-    /// here could only ever be a flicker for work that was already over.
+    /// 通用 now also asks the user's login shell which `gitpic` wins on PATH. That probe can
+    /// take up to eight seconds, so unlike the two system-state reads it needs visible progress.
     private var refreshing: Bool {
         switch activeTab {
-        case .agent:                            model.skillTargetsLoading || model.skillInstallID != nil
-        case .general:                          false
-        case .host, .upload, .history, .about:  model.busy
+        case .agent:   model.skillTargetsLoading || model.skillInstallID != nil
+        case .general: model.commandLineProbing || model.commandLineWorking
+        case .host, .upload, .history, .about: model.busy
         }
     }
 
     /// What ⌘R means on this pane.
     private var refreshHelp: String {
         switch activeTab {
-        case .agent:                            "重新检查 Agent（⌘R）"
-        case .general:                          "重新读取系统开关状态（⌘R）"
-        case .host, .upload, .history, .about:  "重新读取配置与历史（⌘R）"
+        case .agent:   "重新检查 Agent（⌘R）"
+        case .general: "重新读取系统状态与命令行（⌘R）"
+        case .host, .upload, .history, .about: "重新读取配置与历史（⌘R）"
         }
     }
 
@@ -316,10 +313,9 @@ struct SettingsWindowView: View {
         case .agent:
             await model.loadSkillTargets()
         case .general:
-            // Synchronous, and awaiting nothing is the honest shape: both reads are
-            // property lookups on system frameworks, not subprocesses.
             model.refreshLaunchAtLogin()
             model.refreshFinderService()
+            await model.refreshCommandLine()
         case .host, .upload, .history, .about:
             await model.reload()
         }

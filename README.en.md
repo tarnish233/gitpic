@@ -19,9 +19,17 @@ config, same upload history. There is one way to authenticate — `gitpic auth l
 
 ## GitPic.app (macOS menu bar)
 
+Download `GitPic-<version>-macos-arm64.dmg` from the
+[releases page](https://github.com/tarnish233/gitpic/releases), open it, drag GitPic across
+to Applications, then clear the quarantine attribute:
+
 ```bash
-brew install tarnish233/tap/gitpic      # the app, plus the terminal command
+xattr -dr com.apple.quarantine /Applications/GitPic.app
 ```
+
+**That step is not optional.** The app is locally signed and not notarised by Apple, so
+without it macOS refuses to open the app at all. Only a fresh manual install needs it —
+in-app updates handle the attribute themselves.
 
 Use the menu to pick a file, or upload whatever is on the clipboard — the link goes
 straight to the clipboard, and both success and failure are reported as system
@@ -38,31 +46,17 @@ appears — and can be turned off — in 系统设置 ▸ 通用 ▸ 登录项�
 separate settings.
 
 **Update checks** run once a day by default, and can be run on demand from the 通用 pane or the
-menu bar. A new version is shown with its release notes, and what happens next depends on who
-installed this copy.
+menu bar. A new version is shown with its release notes and a 下载并更新 button beside them:
+GitPic fetches that release's disk image and replaces the bundle itself.
 
-**Installed by hand** (the DMG's app in `/Applications` or `~/Applications`): one 下载并更新
-button, and GitPic fetches the release's disk image and replaces the bundle itself. The image is
-verified against the SHA-256 GitHub publishes for that file first, which is the same check
-Homebrew makes against a cask — **no checksum, no install** — and the download, verification and
-copy all happen before GitPic quits, so a failure changes nothing. The swap needs the app to quit
-(nothing can replace a running bundle) and reopens it afterwards. A copy kept anywhere else is
-sent to the release page, and the sheet says which reason applied.
+The image is verified against the SHA-256 GitHub publishes for that file first — **no checksum,
+no install** — and the download, verification and copy all happen before GitPic quits, so a
+failure changes nothing. The swap needs the app to quit (nothing can replace a running bundle)
+and reopens it afterwards, quarantine attribute and all, so an update never sends you back to
+`xattr`.
 
-**Installed with Homebrew**: GitPic does not replace the bundle. It hands you
-`brew upgrade --cask gitpic` with a 复制升级命令 button beside it, so Homebrew stays the only
-thing managing that install and its records cannot drift from what is on disk. Running the command
-quits the app before the swap and reopens it afterwards, because the cask declares
-`uninstall quit:`.
-
-Before offering the command GitPic asks the tap which version its cask actually declares, rather
-than assuming the release's — the two are not always in step. A release exists the moment it is
-published, while the tap follows by dispatch with a six-hourly cron behind it. So when Homebrew
-has not caught up you are told 已是 Homebrew 提供的最新版本 instead of being handed a command that
-would do nothing; wait for Homebrew and it will arrive. When that version cannot be read at all —
-offline, rate-limited, or the tap moved the file — the command is still offered, with a note that
-this time it went unchecked: a network that is down says nothing about whether your upgrade path
-works. The terminal equivalents are `gitpic update check` and `gitpic update cask`.
+A copy kept outside `/Applications` or `~/Applications` is sent to the release page instead of
+being replaced in place, and the sheet says which reason applied.
 
 **Nothing needs a terminal to get started.** Open the settings window → 图床 → 「使用
 GitHub 登录」: the one-time code appears in the window and the browser opens on its own.
@@ -74,44 +68,36 @@ name nor a `master` repository configured for `main` is reachable any more.
 The terminal route is the same thing, in one command: `gitpic auth login` ends by listing
 the repositories you can upload to. Both share one credential and one config.
 
-> Apple Silicon only, macOS 14+. The app is locally signed and not notarised by Apple —
-> installing with brew clears the quarantine attribute for you. If you install by hand
-> from the [releases page](https://github.com/tarnish233/gitpic/releases), open
-> `GitPic-<version>-macos-arm64.dmg`, drag GitPic across to Applications, and then clear
-> the quarantine yourself or it will not open:
->
-> ```bash
-> xattr -dr com.apple.quarantine /Applications/GitPic.app
-> ```
+> Apple Silicon only, macOS 14+.
 
 ## Command line
 
-**Installing the app already gives you the command line.** The cask links the `gitpic`
-embedded in the app to `$(brew --prefix)/bin/gitpic` and generates bash, zsh and fish
-completions — the terminal and the app run the same file, so upgrading the app *is*
-upgrading the command and the two cannot be at different versions. Config and history are
-shared too: change the repository in the app and the terminal sees it immediately, and
-the other way round.
+**Installing the app gives you the command line too, one click away.** 设置 ▸ 通用 ▸ 命令行 →
+「安装命令行工具」. It **links** the `gitpic` embedded in the app to `~/.local/bin/gitpic` and
+writes bash, zsh and fish completions. A link rather than a copy, so the terminal and the app run
+the same file: upgrading the app *is* upgrading the command, and the two cannot be at different
+versions. Config and history are shared too — change the repository in the app and the terminal
+sees it immediately, and the other way round.
 
-For the command line alone, or on Linux / Intel Mac / CI:
+The same pane tells you the truth about it: whether the link is installed, where it points, and
+which `gitpic` a login shell actually finds. If another `gitpic` sits earlier on `PATH`, it names
+the path that wins rather than claiming success.
+
+If `~/.local/bin` is not on your `PATH`, add it in your shell config:
 
 ```bash
-brew install tarnish233/tap/gitpic_cli
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-**Do not install both.** They compete for the same `bin/gitpic` and the same three
-completions, and whichever goes second skips linking (a formula installed second ends
-with `brew link` failing). Uninstall one before switching.
+zsh completions additionally want `fpath=(~/.zfunc $fpath)` and
+`autoload -Uz compinit && compinit`. The lines to paste are shown in the pane —
+**GitPic never edits your shell config files itself.**
 
-Other ways: download the archive for your platform from the
-[releases page](https://github.com/tarnish233/gitpic/releases) and unpack `gitpic`
-(macOS, Linux and Windows are all built by CI on `v*` tags; on macOS run
-`xattr -d com.apple.quarantine ./gitpic`), or build from source with
-`cargo install --path .` (needs Rust 1.88+).
-
-Homebrew installs all three completions for you (reopen the terminal for zsh). For a
-manual install, generate them yourself: `gitpic completion zsh > ~/.zfunc/_gitpic`, and
-likewise for bash and fish.
+Without the app, or on Linux / Intel Mac / Windows / CI: download the archive for your platform
+from the [releases page](https://github.com/tarnish233/gitpic/releases) and unpack `gitpic` (all
+three are built by CI on `v*` tags; on macOS run `xattr -d com.apple.quarantine ./gitpic`), or
+build from source with `cargo install --path .` (needs Rust 1.88+). Generate completions yourself
+for that route: `gitpic completion zsh > ~/.zfunc/_gitpic`, and likewise for bash and fish.
 
 ### Usage
 

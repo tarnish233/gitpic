@@ -95,11 +95,9 @@ async fn dispatch(cli: &Cli, mode: Mode) -> Result<u8> {
         // on a machine whose config is broken — the fix may well be in the release the
         // user does not have yet. It does read the image-host credential when there is one,
         // to raise GitHub's rate limit, but every way that can fail collapses to an
-        // anonymous request (`release::best_effort_token`), so a broken login cannot stop
-        // either of these answering.
+        // anonymous request (`release::best_effort_token`), so a broken login cannot stop it.
         Some(Command::Update { action }) => match action {
             cli::UpdateAction::Check => commands::update::run(mode).await,
-            cli::UpdateAction::Cask => commands::update::cask(mode).await,
         },
 
         Some(Command::Doctor { .. }) => {

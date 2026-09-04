@@ -96,8 +96,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in SettingsWindowController.prewarm() }
         // Tidying, one launch after the fact: an upgrade script is still running when it
         // reopens this app, so it can only be deleted by a later launch than the one it
-        // caused. See `Updater.sweepStaleScripts()`.
-        Task { @MainActor in Updater.sweepStaleScripts() }
+        // caused. See `Updater.sweepStaleScripts()`. Once discovery has found the new
+        // embedded CLI, refresh the real completion files if their recorded version is old.
+        Task { @MainActor in
+            Updater.sweepStaleScripts()
+            _ = await resolvedRunner()
+            await AppModel.shared.refreshCompletionsIfStale()
+        }
     }
 
     // MARK: - Tools

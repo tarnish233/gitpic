@@ -10,8 +10,8 @@
 - `github.rs` — GitHub Contents API client (upload, dedup, health checks).
 - `naming.rs`, `link.rs`, `imageproc.rs`, `output.rs`, `error.rs` — path/hash, URL/markdown, compression, human/JSON output, error types.
 - `history.rs` — the upload log the app's 历史 pane reads.
-- `release.rs` — the update check behind `gitpic update check`, and the tap lookup behind `gitpic update cask`: version parsing and comparison, the `releases/latest` fetch, the release's assets (name, size, download URL, GitHub's `digest`) that the app installs an update from, and a Contents-API read of the tap's `Casks/gitpic.rb` answering what `brew upgrade --cask gitpic` would install. Both origins are compile-time constants on purpose, pinned by a test — their text is rendered inside GitPic's own window, so nothing configurable may choose them, and download URLs come from the API rather than a template for the same reason.
-- `install_source.rs` — which of the five ways this binary was installed (cask app, hand-installed app, `gitpic_cli` formula, `cargo install`, or unknown), so `gitpic update` prints the one upgrade command that install actually wants instead of two to choose between. Canonicalises `current_exe()` first: the cask links `bin/gitpic` into the app bundle, and on Apple platforms the un-canonicalised path is the symlink, which classifies the commonest install of all as neither an app nor a formula. Distinct from `GitPicCore`'s `CaskOwnership`, which asks whether *the bundle* is cask-managed rather than where *this binary* came from.
+- `release.rs` — the update check behind `gitpic update check`: version parsing and comparison, the `releases/latest` fetch, and the release's assets (name, size, download URL, GitHub's `digest`) that the app installs an update from. The origin is a compile-time constant on purpose, pinned by a test — its text is rendered inside GitPic's own window, so nothing configurable may choose it, and download URLs come from the API rather than a template for the same reason.
+- `install_source.rs` — which of the three ways this binary was installed (inside GitPic.app, `cargo install`, or unknown), so `gitpic update` prints the one upgrade command that install actually wants instead of two to choose between. Canonicalises `current_exe()` first: the app links `~/.local/bin/gitpic` into the bundle, so the commonest install of all is invoked through a symlink, and on Apple platforms the un-canonicalised path is that symlink — which classifies it as neither an app nor a cargo bin and prints "download it again" for the one install that updates itself.
 - `testutil.rs` — `#[cfg(test)]` only: the loopback stub server, a canned response, and the request reader shared by `github`'s and `release`'s tests. One `sock.read` is not a whole request; the module says what that cost twice.
 - `commands/` — one module per action (`upload`, `auth_cmd`, `repos`, `branches`, `doctor`, `list`, `config_cmd`, `completion`, `skill`, `update`).
 
@@ -30,113 +30,45 @@ was rejected, the test that was wrong — goes *below* the marker and into the c
 message, which is where someone reading the code will look for it. Nothing is lost by
 being brief up top; it is only moved to the reader who wants it.
 
-Homebrew lives in the separate `tarnish233/homebrew-tap` repo, as **two entries with
-different names on purpose**. The cask is **`gitpic`** (`Casks/gitpic.rb`) and installs
-the app; the formula is **`gitpic_cli`** (`Formula/gitpic_cli.rb`) and installs only the
-binary. The bare name belongs to the cask because that is what most people want, and
-`cask_renames.json` maps the old `gitpic_app` onto it so an installed keg migrates on
-`brew upgrade`; don't remove it. There is no `formula_renames.json` any more — it was
-deleted in 0.11.5 because keeping it made `gitpic` ambiguous between a formula and a
-cask, which Homebrew resolves silently and in favour of the formula.
+**Distribution is one path: the DMG, then the app updates itself.** There is no Homebrew
+cask, no `gitpic_cli` formula and no `tarnish233/homebrew-tap` — all three were retired
+together, and nothing transitional was left behind because the only user is the author. Do
+not reintroduce a brew install path without first saying why the in-app updater is not
+enough.
 
-The app asset is `GitPic-<version>-macos-arm64.dmg` — a disk image with an
-`/Applications` symlink beside the app, so a manual install is the usual drag-across. It
-was a `.zip` up to 0.13.1; the tap's updater reads whichever of the two a release
-actually shipped and writes that extension into the cask's `url`, which is what let the
-format change without the cask and the release having to be edited in one breath.
+The app asset is `GitPic-<version>-macos-arm64.dmg` — a disk image with an `/Applications`
+symlink beside the app, so installing is the usual drag-across. It was a `.zip` up to 0.13.1.
 
-The cask also provides the *command*: it links the CLI inside the bundle to
-`bin/gitpic` and generates the three completions, so the app and the terminal share one
-file and cannot be at different versions. The two entries therefore compete for
-`bin/gitpic` — install one, not both — and the formula exists for Linux, Intel, CI, and
-anyone who wants no app.
+**The quarantine flag is the one manual step, and it is not optional.** The app is ad-hoc
+signed and not notarised, so a freshly downloaded copy refuses to open *at all* until
+`xattr -dr com.apple.quarantine /Applications/GitPic.app`. The cask's `preflight` used to do
+this silently and nothing does it now, which is why the release notes and both READMEs say it
+immediately after the drag rather than as a footnote. Self-update is unaffected —
+`SelfUpdateInstall` copies with `ditto --noqtn` and strips the attribute itself — so only a
+fresh manual install ever needs the command.
 
-**One cask stanza the app's updater depends on. Do not drop it.**
+**`releases/latest` is the single thread the whole thing hangs from.** It is what the app's
+own update check polls, so a release flagged prerelease is a release no installed app can
+see, silently and indefinitely. See constraint 3 in `release.yml`'s header.
 
-`uninstall quit: "dev.gitpic.app"` makes brew quit the app before it swaps the bundle and reopen
-it afterwards (`Cask::Upgrade` passes `quit: true` by default). Without it a
-`brew upgrade --cask gitpic` typed into a terminal replaces a bundle that is still running. This
-is now **load-bearing rather than a courtesy**: the app's update sheet hands that exact command to
-every Homebrew user instead of installing anything itself, and GitPic is `.accessory`, so brew's
-reopen is the only thing that puts the menu-bar icon back.
+**The terminal `gitpic` command comes from the app, on request.** 设置 ▸ 通用 ▸ 命令行 links
+`~/.local/bin/gitpic` at the copy inside the bundle and writes three completions
+(`~/.zfunc/_gitpic`, `~/.local/share/bash-completion/completions/gitpic`,
+`~/.config/fish/completions/gitpic.fish`). Linking rather than copying is what keeps the
+command and the app from ever being at different versions — the one property the cask
+genuinely provided. `~/.local/bin` rather than `/usr/local/bin` because it is user-owned:
+no privileged helper, and no authorisation prompt out of an unnotarised bundle. Two rules
+for anything touching `GitPicCore/CommandLineTool.swift`:
 
-**The cask intentionally does not declare `auto_updates true`. Do not add it back.** It was
-removed only after 0.20.10 — the first version whose `SelfUpdate.route` defers every cask-managed
-bundle to brew — was published and the tap's 0.20.10 version and SHA-256 were verified against the
-release. The order mattered: removing it before the app policy changed would have left brew's
-receipt comparison and the old app installer both writing `/Applications/GitPic.app`. Now the
-stanza would be a false assertion that the artifact updates itself, while plain receipt comparison
-is the behaviour the cask wants.
-
-Two details explain why the absence is deliberate:
-
-- **The stanza never governed the command the app prints.** `brew upgrade --cask gitpic` names the
-  cask explicitly, and `Cask::Upgrade` takes the `cask.outdated?(greedy: true)` branch for a named
-  cask (`cask/upgrade.rb:70`), which skips the `auto_updates` comparison entirely and falls through
-  to plain receipt inequality (`cask/cask.rb:442`). The stanza affects only bare `brew upgrade` and
-  `brew outdated`.
-- `HOMEBREW_UPGRADE_AUTO_UPDATES_CASKS`, which the old text cited as "defaults on", is marked
-  `odeprecated` with `replacement: "the default behaviour"` (`env_config.rb:745-755`). It was a
-  knob to point at, and it is going away.
-
-Without the stanza, brew compares its receipt again. **One transitional hazard remains for old
-0.20.9 installs, worth a CHANGELOG line rather than code:** a cask user who self-updated has a
-bundle ahead of that receipt, so a bare `brew upgrade` can reinstall an older tap version over it.
-The common shape (bundle 0.20.10, receipt 0.20.9, tap 0.20.10) is one redundant download that
-repairs the receipt, not a downgrade; a real downgrade needs the bundle to be ahead of the *tap*,
-which takes skipping a version in-app inside the tap's lag window. It closes after one
-`brew upgrade`. The app itself cannot cause it: `route` compares the tap against the installed
-bundle, so it never prints a command that would move backwards.
-
-The app-side half of this is `SelfUpdate.route`, `CaskOwnership` and `Updater`, whose headers
-carry the full argument. **The two repositories still have to move together**, just in the other
-direction now: the app defers to brew for a cask-managed bundle, so a cask that drops
-`uninstall quit:` means telling people to run a command that replaces a running app.
-
-The tap's `update-gitpic.yml` rewrites only the `version`, `sha256` and `url` lines by targeted
-`sub!`, so hand-written stanzas survive a release. It does not regenerate the cask.
-
-**How the tap learns about a release.** Two paths, and the second one exists because the
-first cannot be trusted alone:
-
-1. `release.yml`'s `publish` job fires a `repository_dispatch` (`gitpic-released`) at
-   the tap the moment the release is up, carrying the version in `client_payload`. With
-   a valid token the tap follows within seconds. It needs `secrets.TAP_DISPATCH_TOKEN` —
-   a fine-grained PAT limited to the tap with Contents: write, because `GITHUB_TOKEN`
-   cannot reach another repository. The step is guarded on the secret being non-empty
-   and is `continue-on-error`, so a missing or expired token cannot fail a release that
-   has already published.
-2. The tap's six-hourly cron (`17 */6 * * *`) still polls `releases/latest`. **Keep it.**
-   It is what catches whatever the dispatch missed, and it does not alarm on failure —
-   so renaming a release asset here breaks the tap silently, with up to six hours before
-   anyone notices.
-
-The tap asserts that `releases/latest` matches the version the dispatch named, and fails
-loudly when they disagree: publishing and `latest` moving are not one atomic act, and a
-run that started a moment early would pin the tap to the *previous* release and report
-success.
-
-**The token expires, and path 1 dies quietly when it does — so check the tap after every
-release.** Measured: the dispatch worked for eleven releases and then returned `Bad
-credentials (HTTP 401)` on every one from 0.20.0 on, the token having stopped working
-between 09:32 and 14:41 on 2026-08-24. `continue-on-error` did exactly what it is there
-for and the release runs stayed green, so three releases fell back to the cron with
-nothing anywhere saying so. The step now tells the two cases apart — no token versus a
-token the tap refused — and raises a `::warning::` plus a step-summary line for either,
-which shows on the run page rather than two clicks down. That helps only if someone
-looks, so confirm the tap moved:
-
-```bash
-gh api repos/tarnish233/gitpic/releases/tags/vX.Y.Z \
-  --jq '.assets[]|select(.name|endswith(".dmg")).digest'
-gh api repos/tarnish233/homebrew-tap/contents/Casks/gitpic.rb --jq .content \
-  | base64 -d | grep -E 'version |sha256'
-```
-
-Disagreeing means the dispatch did not land. Push it by hand with `gh workflow run
-update-gitpic.yml --repo tarnish233/homebrew-tap`, and fix the cause: a new fine-grained
-PAT scoped to `tarnish233/homebrew-tap` alone with Contents: write, then `gh secret set
-TAP_DISPATCH_TOKEN --repo tarnish233/gitpic`.
+- **It never edits a shell rc file.** `Shell.setUp` returns the lines for the user to paste
+  and no writer for them exists in either target; a source scan in `CommandLineToolTests`
+  fails if `.zshrc`, `.bash_profile`, `.bashrc` or `config.fish` appears anywhere under
+  `Sources/` outside that one literal.
+- **Reachability is measured with a login shell, never with `ProcessInfo.environment["PATH"]`.**
+  A Finder-launched app inherits only `/usr/bin:/bin:/usr/sbin:/sbin`, so the environment
+  reports "not on PATH" for everybody, including machines where it plainly is.
+  `ToolDiscovery.loginShellProbe` returns the *unresolved* winning PATH entry, which is the
+  spelling the link has to be compared against.
 
 `apps/GitPic/` is a macOS menu-bar app (SwiftUI) that drives the CLI over its
 `--json` contract; `scripts/build-app.sh` builds the bundle with the `gitpic`
@@ -197,7 +129,7 @@ machine. It is not a ship gate: it needs an Accessibility grant, rewrites
 `Cargo.toml` to `0.0.1` for the length of the run, hits GitHub's unauthenticated
 rate limit from a worktree with no credential, and the confirmation-alert click
 is not reliable from an agent session. It touches only `~/Applications`, refuses
-to run if `/Applications/GitPic.app` (this machine's own, usually Homebrew's)
+to run if `/Applications/GitPic.app` (this machine's own installed copy)
 moves, and drives the three quits separately when it does run: 「退出 GitPic」 in
 the status menu (our code), and the `terminate:` AppKit synthesises for a
 Dock-menu Quit and for the Apple Event a logout or restart sends. ⌘Q is not

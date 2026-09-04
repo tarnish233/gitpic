@@ -140,9 +140,11 @@ struct ConfigFailureTests {
 
 /// Every `RunFailure` has to read as a sentence, because all three of them reach a label.
 ///
-/// The one that made this necessary: an app built from source finds an older `gitpic_cli` on
-/// `PATH`, `gitpic update check --json` hits clap's "unrecognized subcommand", and 设置 ▸ 通用
-/// showed `undecodable(status: 2, raw: "error: unrecognized subcommand \'update\'")` in orange.
+/// The one that made this necessary: an app built from source finds an older `gitpic` on `PATH`
+/// — a Homebrew `gitpic_cli` at the time, and now whatever `~/.local/bin/gitpic` points at, which
+/// is the same shape and the same failure — `gitpic update check --json` hits clap's
+/// "unrecognized subcommand", and 设置 ▸ 通用 showed
+/// `undecodable(status: 2, raw: "error: unrecognized subcommand \'update\'")` in orange.
 /// Only `.cli` had ever been given words; the other two fell through to
 /// `String(describing:)`, which prints the enum.
 @Suite("A failure reads as a sentence, not as Swift")

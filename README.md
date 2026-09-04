@@ -17,9 +17,15 @@
 
 ## GitPic.app（macOS 菜单栏）
 
+从[发布页](https://github.com/tarnish233/gitpic/releases)下 `GitPic-<版本>-macos-arm64.dmg`，
+打开后把 GitPic 拖到 Applications，然后解除隔离：
+
 ```bash
-brew install tarnish233/tap/gitpic      # App + 终端命令
+xattr -dr com.apple.quarantine /Applications/GitPic.app
 ```
+
+**这一步不是可选的。** App 是本机签名、未经 Apple 公证的，不解除隔离 macOS 会直接拒绝打开。
+只有手动装的这一次需要 —— 之后的应用内更新会自己处理隔离属性。
 
 从菜单里选文件上传，或上传剪贴板里的图 —— 链接直接进剪贴板，成功与失败都走
 系统通知。**也可以在 Finder 里选中图片按右键，点「GitPic 上传至图床」**（App 没在运行会被
@@ -31,24 +37,14 @@ brew install tarnish233/tap/gitpic      # App + 终端命令
 macOS 自己的登录项，所以「系统设置 ▸ 通用 ▸ 登录项与扩展」里也能看到、也能关掉，两边永远是同一个开关。
 
 **检查更新**默认每天自动查一次，也可以在「通用」页或菜单栏里随时手动查。发现新版本时会显示这一版
-的更新内容，接下来分两种情况，取决于这份 GitPic 是谁装的。
+的更新内容，旁边是一个「下载并更新」按钮 —— 由 GitPic 自己下载该版本的磁盘映像来替换。
 
-**手动装的**（DMG 解压到 `/Applications` 或 `~/Applications`）：一个「下载并更新」按钮，由 GitPic
-自己下载该版本的磁盘映像来替换。替换前会先核对 GitHub 为该文件公布的 SHA-256 —— 和 Homebrew 校验
-cask 是同一件事，**拿不到校验和就不装**；而且下载、校验、复制全都发生在退出之前，失败什么都不会改动。
-替换本身要先退出（没有办法替换正在运行的 bundle），装完自动重开。放在别处的副本会被指向发布页，
-弹窗里会说明是哪一种原因。
+替换前会先核对 GitHub 为该文件公布的 SHA-256，**拿不到校验和就不装**；而且下载、校验、复制全都发生
+在退出之前，失败什么都不会改动。替换本身要先退出（没有办法替换正在运行的 bundle），装完自动重开，
+隔离属性一并处理好 —— 所以更新之后不需要再敲一遍 `xattr`。
 
-**Homebrew 装的**：GitPic 不会自己替换 bundle，而是把 `brew upgrade --cask gitpic` 交给你，旁边有个
-「复制升级命令」。这样 Homebrew 始终是这份安装的唯一管理者，它的安装记录不会和磁盘上的版本脱节。
-按下命令之后 brew 会先退出 app、装完再打开它（cask 声明了 `uninstall quit:`）。
-
-给出命令之前 GitPic 会先问 tap 里的 cask 到底是哪个版本，而不是拿 GitHub 上的发布版本充数 —— 这两个
-不一定同步：release 一发布就存在，tap 要靠 dispatch 跟进（后面还垫了一个六小时的 cron）。所以如果
-Homebrew 那边还没跟上，你看到的是「已是 Homebrew 提供的最新版本」而**不是**一条跑了也没用的命令 ——
-这种情况下等 Homebrew 跟上即可。要是这个版本号一时读不到（离线、被限流、tap 改了路径），命令还是会给
-你，只是旁边会写明这次没能核对 —— 网络不通并不说明你的升级路径有问题。终端里等价的两条查询命令是
-`gitpic update check` 和 `gitpic update cask`。
+装在 `/Applications` 或 `~/Applications` 之外的副本会被指向发布页而不是就地替换，弹窗里会说明是哪
+一种原因。
 
 **第一次用不需要开终端。** 打开设置窗口 → 图床页 → 「使用 GitHub 登录」，一次性码会显示在窗口里、
 浏览器自动打开；授权完成后下面的下拉框会列出你可以上传的仓库，选一个，按右上角「保存」写进配置文件。
@@ -58,37 +54,31 @@ Homebrew 那边还没跟上，你看到的是「已是 Homebrew 提供的最新�
 想用终端也一样，而且只有一条命令：`gitpic auth login` 登录成功后会直接把可选仓库列出来让你挑。
 两边共用同一份凭据和配置。
 
-> 仅 Apple Silicon，需要 macOS 14+。App 是本机签名、未经 Apple 公证的 —— 用 brew 装时隔离属性由
-> brew 解除；若从[发布页](https://github.com/tarnish233/gitpic/releases)下
-> `GitPic-<版本>-macos-arm64.dmg` 手动装（打开后把 GitPic 拖到 Applications），**必须**自己解除
-> 隔离，否则打不开：
->
-> ```bash
-> xattr -dr com.apple.quarantine /Applications/GitPic.app
-> ```
+> 仅 Apple Silicon，需要 macOS 14+。
 
 ## 命令行
 
-**装了 App 就已经有命令行了。** cask 会把 App 内嵌的那份 `gitpic` 链接到
-`$(brew --prefix)/bin/gitpic`，并生成 bash、zsh、fish 三份补全 —— 终端和 App 用的是同一个文件，
-所以升 App 就是升命令，两者不可能版本不一致。配置和历史也是同一份：App 里改了仓库，终端里立刻
-生效，反之也一样。
+**装了 App 就有命令行，点一下就行。** 设置 ▸ 通用 ▸ 命令行 → 「安装命令行工具」。它把 App 内嵌的那份
+`gitpic` **链接**到 `~/.local/bin/gitpic`，并写好 bash、zsh、fish 三份补全。链接而不是复制，所以终端
+和 App 用的是同一个文件 —— 升 App 就是升命令，两者不可能版本不一致。配置和历史也是同一份：App 里改了
+仓库，终端里立刻生效，反之也一样。
 
-只要命令行，或者用 Linux / Intel Mac / CI：
+同一页会说实话：链接装没装、指向哪里、以及登录 shell 里 `gitpic` 到底命中哪一个。要是 PATH 上还有另
+一份 `gitpic` 排在前面，它会把胜出的那条路径写出来，而不是假装装好了。
+
+`~/.local/bin` 不在 PATH 上的话，把这行加进 shell 配置：
 
 ```bash
-brew install tarnish233/tap/gitpic_cli
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-**两个别都装。** 它们抢同一个 `bin/gitpic` 和同三份补全，后装的那个会跳过链接（formula 后装会以
-`brew link` 失败结束）。要换先卸掉另一个。
+zsh 补全另外还要 `fpath=(~/.zfunc $fpath)` 和 `autoload -Uz compinit && compinit`。需要粘的行界面上
+会摆出来 —— **GitPic 自己永远不会去改你的 shell 配置文件。**
 
-其他方式：从[发布页](https://github.com/tarnish233/gitpic/releases)下对应平台的压缩包解压出
-`gitpic`（macOS、Linux、Windows 都有，CI 在 `v*` tag 上构建；macOS 需
+不装 App，或者用 Linux / Intel Mac / Windows / CI：从[发布页](https://github.com/tarnish233/gitpic/releases)
+下对应平台的压缩包解压出 `gitpic`（CI 在 `v*` tag 上构建；macOS 需
 `xattr -d com.apple.quarantine ./gitpic`），或者从源码 `cargo install --path .`（需要 Rust 1.88+）。
-
-用 brew 装时三份补全是自动装好的（zsh 重开终端生效）。手动装的话自己生成：
-`gitpic completion zsh > ~/.zfunc/_gitpic`，bash、fish 同理。
+这种装法补全自己生成：`gitpic completion zsh > ~/.zfunc/_gitpic`，bash、fish 同理。
 
 ### 用法
 

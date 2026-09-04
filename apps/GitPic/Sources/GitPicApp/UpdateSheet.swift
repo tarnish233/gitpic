@@ -7,29 +7,11 @@ import GitPicCore
 /// what is in it, do you want it. Raised by a *manual* check, and by 「查看更新内容」 for one
 /// the daily check found — never by the daily check itself, which reports through
 /// Notification Center instead of interrupting whatever the window was being used for.
-///
-/// The prominent action depends on who installed the app, and only one of the two installs
-/// anything. 「下载并更新」 downloads and swaps the bundle; 「复制升级命令」 puts
-/// `brew upgrade --cask gitpic` on the pasteboard for a bundle a cask owns, and this sheet stays
-/// open behind it because the user's next move is a terminal. A third outcome has neither: when
-/// the tap has not caught up with the release yet, there is nothing to install and no command
-/// worth running — see `Updater`'s header and `SelfUpdate.Route`.
-///
-/// The button it replaced, 「立即更新」, quit the app and spawned brew. This one copies a line of
-/// text.
 struct UpdateSheet: View {
     @Bindable var model: AppModel
     let report: UpdateReport
 
     @State private var confirmingInstall = false
-
-    /// Whether the Homebrew command has been copied, so the button can say so.
-    ///
-    /// Inline rather than a notification: the confirmation belongs next to the thing that was
-    /// copied, and this sheet stays open afterwards — there is nothing to install, so the user's
-    /// next move is a terminal. Reset with the report, since a new report means a new route and
-    /// possibly a different command.
-    @State private var copied = false
 
     /// The release notes, parsed once per report rather than once per redraw.
     ///
@@ -38,7 +20,7 @@ struct UpdateSheet: View {
     /// inside `body`, which SwiftUI re-evaluates on every observed change. A download emits
     /// hundreds of progress ticks for a five-megabyte image, so the notes were being re-parsed
     /// hundreds of times to produce a value that cannot have changed. `nil` only for the frames
-    /// before the `.task` below has run, which ``notes`` covers by parsing inline.
+    /// before the `.onChange` below has run, which ``notes`` covers by parsing inline.
     @State private var renderedNotes: AttributedString?
 
     var body: some View {
@@ -50,24 +32,11 @@ struct UpdateSheet: View {
             actions
         }
         .frame(width: 480, height: 420)
-        // Asked when the sheet appears rather than at launch: for a Homebrew-managed bundle it
-        // goes to the network to find out what the cask offers, and nothing before this moment
-        // needs the answer. It also needs the completed report, because which route is available
-        // depends on what the release published.
-        //
-        // The old note here said this "spawns `brew list`, which is up to 20 s of somebody
-        // else's process". Nothing spawns brew any more — ownership is a directory scan — and
-        // what remains is one bounded `gitpic update cask`, off the spawn gate. See
-        // `CaskOwnership` and `GitpicRunner.tapCask`.
-        //
-        // Keyed on the report generation, not on appearance alone: a check that lands while
-        // this sheet is open replaces the report the route was derived from, and a route
-        // computed from the previous one may name an asset this release does not have. See
-        // `AppModel.updateGeneration`.
-        .task(id: model.updateGeneration) {
+        // Keyed on the report generation: a check that lands while this sheet is open replaces
+        // the report the route was derived from, and notes must follow it without reparsing on
+        // every download-progress redraw.
+        .onChange(of: model.updateGeneration, initial: true) { _, _ in
             renderedNotes = Self.markdown(UpdateReport.displayMarkdown(report.summary))
-            copied = false
-            await model.resolveUpgradePath()
         }
     }
 
@@ -142,25 +111,7 @@ struct UpdateSheet: View {
                             .buttonStyle(.borderedProminent)
                         Text(Self.size(asset.size))
                             .font(.caption).foregroundStyle(.secondary)
-                    case .homebrewManaged, .homebrewUnverified:
-                        // Homebrew owns this bundle, so the prominent action is the command
-                        // rather than an install. It sits exactly where the deleted 立即更新
-                        // button was, and does something narrower: that one quit the app and
-                        // spawned brew, this one copies a line of text.
-                        Button(copied ? "已复制" : "复制升级命令") {
-                            copied = model.copyUpgradeCommand()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        // Not disabled once copied: the pasteboard is shared with everything
-                        // else on the machine, so a second copy after something overwrote it is
-                        // a reasonable thing to want. The label is the confirmation; the button
-                        // stays a button.
-                    case .unavailable, .homebrewUpToDate, .none:
-                        // No button at all rather than a disabled one: there is nothing to
-                        // offer here, and a greyed-out control with a tooltip is a worse answer
-                        // than the sentence printed below it. `homebrewUpToDate` is in this arm
-                        // deliberately — brew has nothing to install, so a command would be a
-                        // command that does nothing.
+                    case .unavailable, .none:
                         EmptyView()
                     }
                     Button("打开发布页") {
@@ -171,32 +122,13 @@ struct UpdateSheet: View {
                         .keyboardShortcut(.cancelAction)
                 }
             }
-            if model.upgradePath == nil, model.downloadProgress == nil {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("正在确认升级方式…").font(.caption).foregroundStyle(.secondary)
-                }
-            } else if case .unavailable(let reason, _) = model.upgradePath {
-                // The reason, not a guess at it. This line used to say 「不是用 Homebrew 装的，
-                // 或者机器上没有 brew」 for every failure — which was already wrong for a
-                // bundle brew manages at a path this app is not running from, and is wrong in
-                // more ways now that "the directory cannot be written" and "the release has no
-                // verifiable image" are also possible.
-                //
-                // **The `brew upgrade` sentence is gone from here**, and it was a live bug: it
-                // was appended to *every* refusal, so a copy running from `~/Downloads` on a
-                // machine with no cask was told to run a command that answers
-                // `Error: Cask 'gitpic' is not installed`. A cask-managed bundle no longer
-                // reaches this branch at all — it has its own, below — so the only readers left
-                // here are the ones for whom that command was always wrong.
+            if case .unavailable(let reason) = model.upgradePath {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(reason).font(.caption).foregroundStyle(.secondary)
                     Text("可以到发布页手动下载。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .textSelection(.enabled)
-            } else {
-                homebrewExplanation
             }
         }
         .padding(16)
@@ -204,60 +136,11 @@ struct UpdateSheet: View {
             Button("下载并安装") { model.performUpgrade() }
             Button("取消", role: .cancel) {}
         } message: {
-            // The order matters and is stated, because it is what makes this safe: everything
-            // that can go wrong happens while the window is still here.
-            //
-            // It no longer opens by saying 「这份 GitPic 不是 Homebrew 装的，所以由 GitPic 自己
-            // 安装更新」. That sentence explained a fork by *denying* one of its branches, and
-            // it was wrong for brew users when it was written. There is a fork again, but this
-            // alert is now only reachable from 下载并更新 — a bundle a cask owns is offered a
-            // command and never gets here — so provenance is settled before the reader arrives
-            // and does not need restating. What they want to know is what is about to happen.
+            // Everything that can go wrong happens while the window is still here.
             Text("会先下载并校验，全部通过之后才退出并替换，完成后自动重新打开——"
                  + "下载或校验失败的话什么都不会改动。\n\n"
                  + "替换那一步记录在 GitPic-update.log 里；万一失败，原来的版本仍然可用。\n\n"
-                 + "校验用的是 GitHub 为这个文件公布的 SHA-256，和 Homebrew 验证 cask 的方式相同。")
-        }
-    }
-
-    /// What the three Homebrew outcomes say under the buttons.
-    ///
-    /// The command is shown as a selectable monospaced row, not folded into prose. Two reasons:
-    /// the house idiom for something the user has to retype is `.caption.monospaced()` plus
-    /// `.textSelection(.enabled)` (see `HostPane`'s one-time code), and a command wrapped into a
-    /// Chinese sentence is a command someone mistypes. The button copies it so most people never
-    /// retype it at all.
-    ///
-    /// `homebrewUpToDate` prints no command on purpose. Its whole point is that
-    /// `brew upgrade --cask gitpic` would answer "the latest version is already installed" and
-    /// exit 0 during the tap's lag, so offering it would be offering a command that does nothing.
-    /// It has **two** sentences because the case covers two different situations: the bundle and
-    /// the cask agreeing, which is the tap simply lagging, and the bundle being *ahead* of the
-    /// cask, which is what a user who self-installed before this version shipped looks like. One
-    /// sentence for both said 「已是 Homebrew 提供的最新版本（bundle 的版本号）」, which claims
-    /// Homebrew provides a version it does not and tells that user to wait for what they have.
-    @ViewBuilder private var homebrewExplanation: some View {
-        switch model.upgradePath {
-        case .homebrewManaged(let command, let installed, let available):
-            VStack(alignment: .leading, spacing: 4) {
-                Text("这份 GitPic 由 Homebrew 管理，请在终端里升级："
-                     + "\(installed) → \(available)")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text(command).font(.caption.monospaced()).textSelection(.enabled)
-            }
-        case .homebrewUnverified(let command, let reason):
-            VStack(alignment: .leading, spacing: 4) {
-                Text("这份 GitPic 由 Homebrew 管理。\(reason)，所以先按下面这条命令升级：")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text(command).font(.caption.monospaced()).textSelection(.enabled)
-            }
-        case .homebrewUpToDate(let installed, let offered):
-            Text(installed == offered
-                 ? "已是 Homebrew 提供的最新版本（\(installed)）。新版本要等 Homebrew 跟上之后才能装。"
-                 : "当前 \(installed) 比 Homebrew 提供的 \(offered) 新，所以没有可以装的更新。")
-                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-        case .selfInstall, .unavailable, .none:
-            EmptyView()
+                 + "校验使用 GitHub 为这个文件公布的 SHA-256。")
         }
     }
 

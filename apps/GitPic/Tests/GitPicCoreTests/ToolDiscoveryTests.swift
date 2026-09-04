@@ -119,4 +119,57 @@ struct LoginShellLookupTests {
         let absent = "gitpic-absent-\(UUID().uuidString)"
         #expect(ToolDiscovery.loginShellLookup(absent) == nil)
     }
+
+    /// **The probe has to reach `.zshrc`, and with `-l` alone it did not.**
+    ///
+    /// zsh reads `.zshrc` for *interactive* shells only, so a login-but-not-interactive
+    /// `zsh -l -c` sources `.zshenv`, `.zprofile` and `.zlogin` and skips `.zshrc` entirely. That
+    /// went unnoticed while the only tool asked about was `gh`, whose `/opt/homebrew/bin` comes
+    /// from `brew shellenv` in `.zprofile` — a file login shells do read. `~/.local/bin`, where
+    /// the app's own *install the command-line tool* button puts its link, is the first path this
+    /// probe has been asked about that people commonly export from `.zshrc`, and the pane was
+    /// reporting "not on PATH" to someone whose terminal resolves the command perfectly well.
+    ///
+    /// Hermetic, and deliberately not via `setenv`: the environment is handed to the child alone,
+    /// so this test does not perturb the others running beside it. `ZDOTDIR` redirects every one
+    /// of zsh's per-user startup files, so writing only a `.zshrc` under it makes "which files
+    /// did the shell read" the single variable.
+    @Test("the probe reads .zshrc, which only an interactive shell does")
+    func probeReachesZshrc() throws {
+        let shell = "/bin/zsh"
+        try #require(FileManager.default.isExecutableFile(atPath: shell),
+                     "this test is about zsh's own startup-file rules")
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitpic-zdotdir-\(UUID().uuidString)")
+        let bin = root.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // A tool that exists *only* on the PATH that `.zshrc` adds, so finding it is proof the
+        // file was read rather than proof the tool is common.
+        let tool = "gitpic-zshrc-\(UUID().uuidString.prefix(8))"
+        let executable = bin.appendingPathComponent(tool)
+        try Data("#!/bin/sh\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        // `.zshrc` only. No `.zprofile`, so a non-interactive login shell has nowhere else to
+        // learn this directory from.
+        try Data("export PATH=\"\(bin.path):$PATH\"\n".utf8)
+            .write(to: root.appendingPathComponent(".zshrc"))
+
+        let probe = ToolDiscovery.loginShellProbe(tool, environment: [
+            "ZDOTDIR": root.path,
+            "HOME": root.path,
+            "PATH": "/usr/bin:/bin",
+            "SHELL": shell,
+        ])
+        #expect(probe.path?.lastPathComponent == tool,
+                """
+                the probe missed a tool that only `.zshrc` puts on PATH — \
+                `-i` has probably been dropped from its argument list. \
+                reason: \(probe.reason ?? "none"), conclusive: \(probe.conclusive)
+                """)
+    }
 }

@@ -3,8 +3,8 @@ import Foundation
 /// Where the `gitpic` binary actually lives.
 ///
 /// This type exists because of one measured fact: a Finder-launched `.app` gets
-/// `PATH=/usr/bin:/bin:/usr/sbin:/sbin` and nothing else, so nothing on a
-/// Homebrew or nix prefix can be found by name. `gitpic` ships inside the bundle
+/// `PATH=/usr/bin:/bin:/usr/sbin:/sbin` and nothing else, so tools in user or
+/// custom prefixes cannot be found by name. `gitpic` ships inside the bundle
 /// and is therefore located by path, not by PATH — but the probe below still
 /// exists for `swift run` during development, where there is no bundle.
 ///
@@ -42,7 +42,7 @@ public enum ToolDiscovery {
            FileManager.default.isExecutableFile(atPath: bundled.path) {
             return bundled
         }
-        for p in ["/opt/homebrew/bin/gitpic", "/usr/local/bin/gitpic"]
+        for p in [CommandLineTool.link.path]
         where FileManager.default.isExecutableFile(atPath: p) {
             return URL(fileURLWithPath: p)
         }
@@ -50,9 +50,8 @@ public enum ToolDiscovery {
     }
 
     /// Ask the user's login shell where a tool is. A login shell sources the user's
-    /// profile, so this covers nix, asdf, and custom prefixes that no hardcoded list
-    /// would catch. Verified to return `/opt/homebrew/bin/gh` even from a
-    /// Finder-launched process whose own PATH lacks it.
+    /// profile, so this covers nix, asdf, and custom prefixes that the Finder process's
+    /// minimal PATH does not contain.
     ///
     /// Every measurement quoted here was taken while this probe was locating `gh`, the
     /// second tool the app used to need. The tool name is a parameter and the parse is
@@ -63,12 +62,18 @@ public enum ToolDiscovery {
     }
 
     /// What one login-shell probe found, and whether "nothing" is an answer.
-    struct ShellProbe {
-        let path: URL?
+    public struct ShellProbe: Sendable {
+        public let path: URL?
         /// True only when the shell demonstrably reached the lookup **and** the lookup printed
         /// nothing. Only then does `path == nil` mean the tool is not there.
-        let conclusive: Bool
-        let reason: String?
+        public let conclusive: Bool
+        public let reason: String?
+
+        public init(path: URL?, conclusive: Bool, reason: String?) {
+            self.path = path
+            self.conclusive = conclusive
+            self.reason = reason
+        }
     }
 
     /// Printed by the shell either side of the lookup, the opening one only if `command -v`
@@ -82,55 +87,44 @@ public enum ToolDiscovery {
 
     /// ``loginShellLookup(_:)`` with the reason it came back empty.
     ///
-    /// **The negative answer needs its own evidence, and the exit status is not it.** This
-    /// probe's `conclusive` used to be `!out.timedOut`, which reads the *positive* answer's
-    /// reasoning (below) onto a question it does not cover: when there is no path, whether the
-    /// shell ever got as far as asking is the only thing that matters, and a prompt non-zero
-    /// exit with empty stdout looks identical to "the tool is not installed". Measured on this
-    /// machine, all four of these return promptly, with empty stdout and no timeout:
+    /// A negative answer needs evidence that the shell reached `command -v`; an exit status is
+    /// not enough because profile code can terminate before the lookup. The two markers bracket
+    /// the lookup's output. Nothing between them is a conclusive absence; an unusable alias,
+    /// function or noisy profile remains inconclusive rather than becoming a confident wrong
+    /// answer.
     ///
-    /// | shell / profile                    | status | stdout |
-    /// | ---------------------------------- | ------ | ------ |
-    /// | `/bin/tcsh -l -c` (no `command`)   | 1      | empty  |
-    /// | `/bin/csh -l -c`                   | 1      | empty  |
-    /// | `.zprofile` containing `exit 1`    | 1      | empty  |
-    /// | `.zprofile` containing `exec true` | **0**  | empty  |
+    /// **`-i` as well as `-l`, and leaving it out was a silent wrong answer.** zsh reads
+    /// `.zshrc` for *interactive* shells only; `-l -c` is a login shell that is not interactive,
+    /// so it sources `.zshenv`, `.zprofile` and `.zlogin` and skips `.zshrc` entirely. bash
+    /// divides its files the same way. Measured on macOS 26.6 against this machine, whose
+    /// `export PATH="$HOME/.local/bin:$PATH"` lives at `~/.zshrc:126`:
+    /// `zsh -l -c` did not see `~/.local/bin` and `zsh -l -i -c` did.
     ///
-    /// The last one is why the exit status cannot be the fix either. All four used to come back
-    /// `conclusive: true, path: nil`.
+    /// The bug stayed hidden for as long as the only tool asked about was `gh`, because
+    /// `/opt/homebrew/bin` arrives via `eval "$(brew shellenv)"` in `.zprofile` — a file login
+    /// shells do read. `~/.local/bin` is the first path this probe has been asked about that a
+    /// person is likely to export from `.zshrc`, and it is where the app's own *install the
+    /// command-line tool* button puts its link, so the wrong answer landed squarely on the new
+    /// feature: a pane reporting "not on PATH" to someone whose terminal resolves `gitpic`
+    /// perfectly well, and telling them to add an entry they already have.
     ///
-    /// **What that used to cost, and what it costs now.** This probe had a second caller: the
-    /// Homebrew ownership question, where a false "absent" folded into "not brew's" and
-    /// authorised replacing whatever was in `/Applications`. That caller is gone, and it did not
-    /// come back when the ownership question did — `CaskOwnership.detect` reads the Caskroom's own
-    /// symlinks instead of asking `brew` whether it exists, so no shell is involved and there is
-    /// no "could not tell" to fold. The evidence below is kept as measured, because the
-    /// bracketing it justifies is still what makes the *remaining* caller correct: a false
-    /// "absent" now means `locateGitpic` reports no CLI on a machine that has one, which is a
-    /// milder failure than an unwanted install but still a wrong answer, and still reachable
-    /// exactly for the custom-prefix users this probe exists to serve — the hardcoded paths are
-    /// checked first, so only they get here.
+    /// A login *and* interactive shell is also simply the more faithful model of the question
+    /// being asked — "what does the user's terminal find" — because that is what Terminal.app
+    /// opens. The cost is that `.zshrc` runs, so a heavy plugin manager now runs inside the
+    /// 8-second timeout; that is bounded by the timeout and reported as
+    /// ``ShellProbe/conclusive`` false rather than as an absence, and profile chatter on stdout
+    /// was already tolerated by the bracketed parse below.
     ///
-    /// So the shell is made to prove it ran, and to bracket its answer. It prints
-    /// ``probeOpen`` before the lookup — guarded by `command -v /bin/sh`, a lookup of something
-    /// that exists on every macOS, so the guard fails only where `command -v` itself does not
-    /// work — and ``probeClose`` after it. Measured: zsh, bash, sh, ksh and dash print both;
-    /// tcsh and csh print nothing at all. What is between the marks is the lookup's output,
-    /// which separates the two remaining cases:
+    /// An interactive shell is safe to spawn here because ``ChildProcess/run`` gives the child
+    /// `FileHandle.nullDevice` as stdin, so a shell that would otherwise wait for a line reads
+    /// EOF and exits.
     ///
-    /// - nothing between them → the tool really is not there → conclusive.
-    /// - something between them that is not a usable path → the tool exists as an alias or a
-    ///   shell function (measured: zsh prints `brew` for a function and `alias brew=…` for an
-    ///   alias — the measurement was taken against `brew`, which is no longer a tool this
-    ///   locates, and is left as recorded because the parse it exercises is unchanged), which
-    ///   ``commandVPath(in:tool:)`` rightly refuses to spawn — but it is *not* absence.
-    ///
-    /// The closing mark is what keeps a late-flushing profile job out of that second case:
-    /// measured, `[gpg-agent] ready` arriving after the lookup lands *after* ``probeClose`` and
-    /// so cannot turn "the tool is not here" into "cannot tell". A job that flushes in the
-    /// microseconds between the two marks still can, and that is the safe direction — an
-    /// inconclusive answer, rather than a confident wrong one.
-    static func loginShellProbe(_ tool: String) -> ShellProbe {
+    /// `environment` exists so a test can hand the child a `ZDOTDIR` and prove which startup
+    /// files a given flag set actually reaches. Production passes `nil` and the child inherits.
+    public static func loginShellProbe(
+        _ tool: String,
+        environment: [String: String]? = nil
+    ) -> ShellProbe {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         guard FileManager.default.isExecutableFile(atPath: shell) else {
             return ShellProbe(path: nil, conclusive: false,
@@ -140,9 +134,10 @@ public enum ToolDiscovery {
         do {
             out = try ChildProcess.run(
                 executable: URL(fileURLWithPath: shell),
-                args: ["-l", "-c",
+                args: ["-l", "-i", "-c",
                        "command -v /bin/sh >/dev/null 2>&1 && echo \(probeOpen);"
                            + " command -v \(tool); echo \(probeClose)"],
+                environment: environment,
                 timeout: 8)
         } catch {
             return ShellProbe(path: nil, conclusive: false,
@@ -150,8 +145,7 @@ public enum ToolDiscovery {
         }
         // Decoded leniently: `String(data:encoding: .utf8)` returns nil for the
         // *whole* blob when one byte in it is not UTF-8, so a latin-1 motd
-        // (measured: `caf\xe9 welcome\n/opt/homebrew/bin/gh\n`) would discard an
-        // answer sitting right there. Repaired bytes become U+FFFD and fail
+        // would discard an answer sitting beside that byte. Repaired bytes become U+FFFD and fail
         // `commandVPath` on their own line.
         //
         // `out.status` and `out.timedOut` deliberately do not gate the *positive*
@@ -161,8 +155,8 @@ public enum ToolDiscovery {
         // away a complete answer when a profile leaves a job holding stdout open
         // (ssh-agent, gpg-agent, nvm): the pipe never reaches EOF, so the
         // 8-second bound fires and kills the shell *after* the path was written.
-        // Measured: stdout already held `/opt/homebrew/bin/gh` at the moment the
-        // reader had to be killed. Scanned over the whole blob for that reason,
+        // The answer can already be in stdout when the reader has to be killed. Scanned over the
+        // whole blob for that reason,
         // marks and all — neither mark is absolute, so neither can be mistaken
         // for a path.
         let stdout = String(decoding: out.stdout, as: UTF8.self)
@@ -207,7 +201,7 @@ public enum ToolDiscovery {
     /// The blob is never trimmed and taken as one path. `-l` means the profile
     /// has already spoken on stdout — nvm/conda/rbenv init chatter, a motd,
     /// `fortune`, a stray `echo` in `.zprofile` — so joining it all tested
-    /// `"Using node v20.11.0\n/opt/homebrew/bin/gitpic"` as a filename, failed
+    /// `"Using node v20.11.0\n/custom/bin/gitpic"` as a filename, failed
     /// `isExecutableFile`, and reported the tool as missing. A noise line from
     /// `command -v` must not be taken as the tool path; that is what this parse
     /// is for, on the machines the probe exists for: nix, asdf, a custom prefix,

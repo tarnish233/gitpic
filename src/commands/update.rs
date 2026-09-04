@@ -13,20 +13,10 @@
 //! to read "nothing here reads `config.toml` or the credential", which the second half made
 //! false.
 //!
-//! It checks, and it does not install. That is a statement about *this binary*, and the
-//! reason is the one about the CLI: a `gitpic` on `PATH` can have come from the cask (a
-//! symlink into the app bundle, so it upgrades when the app upgrades), from a `GitPic.app`
-//! installed by hand, from the `gitpic_cli` formula, from `cargo install --git`, or from an
-//! unpacked tarball. Those want different upgrade commands and this process could perform at
-//! most one of them, so it reports instead. How the *app* decides what to do is a separate
-//! question with a separate answer; see `SelfUpdate.route` in `GitPicCore`.
-//!
-//! What it no longer does is make the reader pick. The note used to print the cask's command
-//! and the formula's command side by side, on the grounds that this process could not tell
-//! them apart — which was true of the code and not of the machine. [`crate::install_source`]
-//! tells them apart, so exactly one command is printed, and the reader for whom neither of
-//! the old two was right (a hand-installed bundle, a cargo build, a tarball) gets an answer
-//! instead of a wrong command that fails with "no available formula".
+//! It checks, and it does not install. That is a statement about *this binary*: the embedded
+//! command follows its app's in-app updater, a cargo-installed command uses Cargo, and an
+//! unpacked binary has no safe installation mechanism to infer. [`crate::install_source`]
+//! distinguishes those shapes and prints one applicable next step instead of guessing.
 
 use crate::error::Result;
 use crate::output::Mode;
@@ -50,51 +40,6 @@ pub async fn run(mode: Mode) -> Result<u8> {
     }
 
     human(&report);
-    Ok(0)
-}
-
-/// `gitpic update cask` — what would `brew upgrade --cask gitpic` actually install?
-///
-/// A command rather than something the app does for itself, because everything network-shaped
-/// in this project goes through this binary: `GitPicCore` never talks to `api.github.com`, and
-/// the origin has to stay a compile-time constant for the reason recorded on the tap constant
-/// in [`crate::release`].
-///
-/// It answers about the *cask*, not the release, and that difference is the whole point. The
-/// app learns a release exists the moment it is published, while the tap follows by dispatch
-/// with a six-hourly cron behind it — so "there is a new version" and "brew can install it"
-/// are different questions, and only this one decides whether telling someone to run
-/// `brew upgrade` would do anything.
-pub async fn cask(mode: Mode) -> Result<u8> {
-    let tap = crate::release::tap_cask().await?;
-
-    if mode.is_json() {
-        crate::output::print_json(&tap);
-        return Ok(0);
-    }
-    if mode.is_quiet() {
-        // The version or nothing, the same rule `check` follows: "could not tell" must not be
-        // a string a script has to match on.
-        if let Some(version) = &tap.version {
-            crate::output::line(version);
-        }
-        return Ok(0);
-    }
-    match &tap.version {
-        Some(version) => {
-            crate::output::line(&format!("the {} cask offers {version}", tap.cask));
-            crate::output::note(&format!(
-                "this is what `brew upgrade --cask {}` would install",
-                tap.cask
-            ));
-        }
-        // Not an error: the file was read. It just says something this cannot compare, and a
-        // guess here would be worse than admitting it.
-        None => crate::output::line(&format!(
-            "the {} cask declares no version this can compare",
-            tap.cask
-        )),
-    }
     Ok(0)
 }
 
@@ -124,9 +69,7 @@ fn human(report: &UpdateReport) {
         }
         crate::output::line("");
         crate::output::line(&report.url);
-        // One command, for the install this binary actually came from. Printing the cask's and
-        // the formula's side by side was wrong for whoever had neither, and `brew upgrade` on
-        // the wrong one of the two reports "no available formula".
+        // One instruction, for the install this binary actually came from.
         crate::output::note(&crate::install_source::detect().upgrade_hint());
         return;
     }

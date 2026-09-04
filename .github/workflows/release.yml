@@ -13,10 +13,12 @@
 #     instead of publishing anything itself.
 #  3. This is a **normal release, never a prerelease**, even though the app is
 #     ad-hoc signed and not notarised. `repos/.../releases/latest` skips
-#     prereleases, and the Homebrew tap's updater polls exactly that endpoint on a
-#     cron that does not fail — so a prerelease flag here would stop the formula
-#     updating, silently and indefinitely. The notarisation caveat lives in the
-#     release notes instead, next to the app asset.
+#     prereleases, and that endpoint is what the app's own update check polls — so
+#     a prerelease flag here would stop every installed app seeing the release,
+#     silently and indefinitely. Since the DMG is the only way to install the app,
+#     and in-app self-update the only way to move it forward, that endpoint is the
+#     single thread the whole distribution story hangs from. The notarisation
+#     caveat lives in the release notes instead, next to the app asset.
 name: Release
 
 on:
@@ -316,8 +318,8 @@ jobs:
   # a lint that did not exist when the tag was cut fails code that never saw it, and
   # re-running an old tag, which the release-notes extraction below is written to keep
   # working, stops being possible. Nothing ships worse for being unlinted, so the lints
-  # get `continue-on-error` and speak through annotations instead: the same trade the
-  # tap step at the bottom of this file makes, for the same stated reason.
+  # get `continue-on-error` and speak through annotations instead: a red step inside a
+  # green run, where the alternative is refusing to publish a release that is fine.
   #
   # Note what that argument is *not*. It is not "keep only the deterministic checks":
   # `cargo test` runs on the same floating `@stable`, and `--locked` deliberately holds
@@ -482,24 +484,31 @@ jobs:
 
           # The app ships in this release too, and it is not notarised. Stated
           # here, next to its asset, rather than encoded in a prerelease flag the
-          # Homebrew tap's updater would trip over (see the header comment).
+          # app's own update check would trip over (see the header comment).
           cat >> RELEASE_NOTES.md <<'NOTES'
 
           ## GitPic.app
 
           `GitPic-<version>-macos-arm64.dmg` in this release is the macOS menu-bar
-          app, same version as the CLI and with that CLI embedded. Open it and drag
-          GitPic across to Applications.
+          app, same version as the CLI and with that CLI embedded. Apple Silicon
+          only. To install it:
 
-          It is ad-hoc signed and **not notarised**, so macOS refuses to open it
-          after download until you clear the quarantine flag:
+          1. Open the DMG and drag GitPic across to Applications.
+          2. Clear the quarantine flag — **this step is not optional.** The app is
+             ad-hoc signed and not notarised, so until you run this macOS refuses
+             to open it at all:
 
-          ```sh
-          xattr -dr com.apple.quarantine /Applications/GitPic.app
-          ```
+             ```sh
+             xattr -dr com.apple.quarantine /Applications/GitPic.app
+             ```
 
-          Apple Silicon only. Authorise with `gitpic auth login` — or in the app,
-          设置 ▸ 图床 ▸ 使用 GitHub 登录.
+          3. Launch it, and authorise with 设置 ▸ 图床 ▸ 使用 GitHub 登录 (or
+             `gitpic auth login` in a terminal).
+
+          Updates after that are handled by the app itself: 检查更新 downloads the
+          next DMG, verifies its SHA-256 and swaps the bundle, quarantine included.
+          For the `gitpic` command in your terminal, 设置 ▸ 通用 ▸ 命令行 installs
+          a link to the copy inside the app, so it stays in step with every update.
           NOTES
 
       - name: Download the CLI artifacts
@@ -558,77 +567,3 @@ jobs:
             dist/gitpic-*
             dist-app/GitPic-*
           fail_on_unmatched_files: true
-
-      # Tell the tap now, instead of leaving it to notice.
-      #
-      # The tap finds out by polling `releases/latest` on a six-hourly cron, so a
-      # release was real but not yet installable for up to six hours — measured the
-      # hard way: 0.13.0 was published at 05:17Z while the tap still pinned 0.11.5,
-      # and `brew upgrade` had nothing to offer. This makes it seconds — while the
-      # token is good, which is a condition worth reading the last paragraph about.
-      #
-      # **The cron on the tap stays.** This is the fast path, not the only path: a
-      # missing secret, an expired token or a GitHub hiccup drops back to the poll
-      # rather than leaving the tap stuck. That is also why `continue-on-error` is
-      # here — by the time this step runs the release is already published, and
-      # failing the job would mark a perfectly good release as failed for something
-      # the cron will fix on its own.
-      #
-      # `GITHUB_TOKEN` cannot do this: its scope is this repository. A cross-repo
-      # dispatch needs write access to the tap, which is what TAP_DISPATCH_TOKEN is
-      # for.
-      #
-      # The "nobody has set the token" case is checked **in the script, not in `if:`**.
-      # The obvious spelling — `if: secrets.TAP_DISPATCH_TOKEN != ''` — is not merely
-      # discouraged, it does not parse: the `secrets` context is not among those
-      # available to a step's `if`, and GitHub rejects the whole workflow file for it,
-      # producing a zero-second failed run named after the file with no jobs in it.
-      # Measured the hard way — it took this workflow down on `main` until it was fixed.
-      # Mapping the secret into a job-level `env` would satisfy `if:` but hands the
-      # token to every other step in the job, which is worse than a two-line check.
-      #
-      # The version travels with the event, and the tap asserts it matches what
-      # `releases/latest` tells it. Publishing and `latest` moving are not atomic, so
-      # a tap that read one second too early would pin the *previous* version and
-      # then sit on it until the next cron — a silent wrong answer, which is the one
-      # outcome worth failing loudly over.
-      #
-      # **A rejected token has to be said out loud, and that is what this step got
-      # wrong.** `continue-on-error` was doing its job for the release and hiding a
-      # regression at the same time: the dispatch worked for eleven releases and then
-      # started returning `Bad credentials (HTTP 401)` somewhere between 09:32 and
-      # 14:41 on 2026-08-24, and 0.20.0, 0.20.1 and 0.20.2 each fell back to the
-      # six-hourly cron with nothing reporting it. A red step inside a green run is not
-      # a report; three releases went by. So the two cases are now told apart — no
-      # token (expected, fine) versus a token the tap refused (broken, needs a human) —
-      # and both are raised as a `::warning::` annotation and written to the step
-      # summary, where they show up on the run page instead of two clicks down. Neither
-      # fails the release, because by this point it is already published and marking a
-      # good release failed is its own harm. `continue-on-error` stays for genuinely
-      # unexpected failures only; the expected ones now exit 0 deliberately.
-      - name: Tell the tap a release landed
-        if: startsWith(github.ref, 'refs/tags/')
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
-          VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          note() {
-            echo "::warning title=Tap not notified::$1"
-            echo "⚠️ **The Homebrew tap was not notified.** $1" >> "$GITHUB_STEP_SUMMARY"
-          }
-          if [[ -z "${GH_TOKEN:-}" ]]; then
-            note "TAP_DISPATCH_TOKEN is not set, so brew users get ${VERSION} whenever the tap's six-hourly cron next runs."
-            exit 0
-          fi
-          # `--input -` with real JSON rather than `-f client_payload[version]=…`,
-          # so the nesting is unambiguous and the version is never shell-interpolated
-          # into a URL or a query string.
-          if printf '{"event_type":"gitpic-released","client_payload":{"version":"%s"}}' \
-            "$VERSION" | gh api repos/tarnish233/homebrew-tap/dispatches --input -
-          then
-            echo "dispatched gitpic-released for $VERSION"
-          else
-            note "TAP_DISPATCH_TOKEN was rejected — see the error above. Renew the fine-grained PAT (scope: tarnish233/homebrew-tap, Contents: write) with \`gh secret set TAP_DISPATCH_TOKEN\`. Until then every release waits up to six hours for the tap's cron."
-          fi

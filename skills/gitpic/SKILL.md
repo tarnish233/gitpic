@@ -5,8 +5,8 @@ description: >-
   Markdown link. Use when the user wants to "upload an image", "turn this image
   into a link", "host an image", "get a markdown link for a screenshot",
   "把图片上传图床", or "生成图片 markdown 链接". Requires the `gitpic` CLI installed
-  and authenticated with `gitpic auth login` (install gitpic via
-  `brew install tarnish233/tap/gitpic_cli`).
+  and authenticated with `gitpic auth login` (install gitpic from
+  https://github.com/tarnish233/gitpic/releases).
 ---
 
 # gitpic — GitHub image host uploader
@@ -20,17 +20,16 @@ calling it programmatically, and `--no-copy` on the upload commands.
 First check whether the CLI exists: `command -v gitpic`. If it is missing,
 install it one of these ways, then verify with `gitpic --version`:
 
-- Homebrew (macOS/Linux, recommended — also auto-installs shell completions):
-  ```bash
-  brew install tarnish233/tap/gitpic_cli
-  ```
-  The formula is `gitpic_cli`; the command it installs is `gitpic`.
-- Prebuilt binary: download the matching asset from the latest
-  [release](https://github.com/tarnish233/gitpic/releases), extract, and put
+- Prebuilt binary — the one you can do yourself: download the matching asset from
+  the latest [release](https://github.com/tarnish233/gitpic/releases), extract, and put
   `gitpic` on `PATH`. On macOS clear the quarantine flag first:
   ```bash
   xattr -d com.apple.quarantine ./gitpic 2>/dev/null; chmod +x ./gitpic
   ```
+- If the user already has GitPic.app, the same CLI is inside it: ask them to open
+  设置 ▸ 通用 ▸ 命令行 and click 安装命令行工具. That links `~/.local/bin/gitpic` into
+  the app bundle, so it tracks every app update instead of going stale, and it installs
+  shell completions. You cannot click it for them.
 - From source (needs Rust 1.88 or newer):
   ```bash
   cargo install --git https://github.com/tarnish233/gitpic

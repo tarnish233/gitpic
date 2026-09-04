@@ -3,8 +3,8 @@ import Foundation
 /// Append-only launch log at `~/Library/Logs/GitPic.log`.
 ///
 /// This exists because the app's hardest failure mode is invisible from the UI: a
-/// Finder-launched bundle gets `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so nothing on a
-/// Homebrew or nix prefix is findable by name, and if `gitpic` is not located the app
+/// Finder-launched bundle gets `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so tools in user or
+/// custom prefixes are not findable by name, and if `gitpic` is not located the app
 /// cannot upload at all. Recording the resolved path at launch turns "uploads
 /// mysteriously fail" into one line to read.
 public enum Diagnostics {

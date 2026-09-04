@@ -710,6 +710,203 @@ final class AppModel {
         return String(describing: error)
     }
 
+    // MARK: - The command-line tool
+
+    /// The entry at ~/.local/bin/gitpic, inspected without following it.
+    private(set) var commandLineStatus: CommandLineTool.Status = .notInstalled
+    /// What the user's login shell would execute for `gitpic`.
+    private(set) var commandLineReach: CommandLineTool.Reach = .unknown(
+        reason: "还没有检查登录 shell。")
+    private(set) var commandLineProbing = false
+    private(set) var completionsInstalled = false
+    /// Separate from ``busy``: this work belongs to 通用 and must not disable config saves.
+    private(set) var commandLineWorking = false
+    private(set) var commandLineFailure: String?
+
+    private var commandLineProbeGeneration = 0
+    private nonisolated static let commandLineProbeQueue =
+        DispatchQueue(label: "dev.gitpic.app.commandline-probe")
+    private static let completionsVersionKey = "commandline.completionsVersion"
+
+    /// Re-read the cheap link/completion facts, then ask a login shell which PATH entry wins.
+    ///
+    /// The probe runs on its own thread. `ChildProcess.run` blocks while draining pipes, and
+    /// putting its eight-second ceiling on the cooperative pool would park one of that pool's
+    /// threads for the whole wait.
+    func refreshCommandLine() async {
+        guard let tools else {
+            if toolState == .missing {
+                commandLineStatus = .notInstalled
+                commandLineReach = .unknown(
+                    reason: "找不到 GitPic 内置的 gitpic，无法检查命令行安装。")
+                commandLineProbing = false
+                completionsInstalled = false
+            }
+            return
+        }
+
+        commandLineStatus = CommandLineTool.status(
+            of: CommandLineTool.link, expecting: tools.gitpic)
+        completionsInstalled = currentCompletionsInstalled()
+        commandLineProbeGeneration += 1
+        let generation = commandLineProbeGeneration
+        commandLineProbing = true
+
+        let probe = await Self.probeCommandLine()
+        guard commandLineProbeGeneration == generation else { return }
+        commandLineReach = CommandLineTool.reach(of: CommandLineTool.link, probe: probe)
+        commandLineProbing = false
+    }
+
+    /// Install the link and all three completion scripts from the bundled CLI.
+    func installCommandLineTool(replacing: Bool) async {
+        guard let runner, let tools, !commandLineWorking else { return }
+        commandLineWorking = true
+        commandLineFailure = nil
+        defer { commandLineWorking = false }
+
+        do {
+            // Generate first, so a CLI failure leaves the existing command and completions
+            // untouched rather than producing a half-installed result.
+            let completions = try await commandLineCompletions(using: runner)
+            try CommandLineTool.install(
+                at: CommandLineTool.link,
+                pointingTo: tools.gitpic,
+                replacing: replacing)
+            // Written unconditionally, unlike removal, which byte-compares before deleting.
+            // The asymmetry is deliberate but it is a trade, not an oversight: a byte compare
+            // cannot tell "ours, one version stale" from "the user edited it", because a refresh
+            // exists precisely to make the file differ from what is on disk. Overwriting on an
+            // *explicit* install is what the button was pressed for; the same call from
+            // `refreshCompletionsIfStale` is unprompted, and that is the one worth revisiting —
+            // recording a hash of what we wrote would separate the two cases.
+            for shell in CommandLineTool.Shell.allCases {
+                guard let contents = completions[shell] else { continue }
+                try CommandLineTool.writeCompletion(contents, for: shell)
+            }
+            recordCurrentCompletionsVersion()
+            await refreshCommandLine()
+            notify(
+                title: "命令行工具安装完成",
+                body: "已安装 gitpic 和 bash、zsh、fish 补全。")
+        } catch {
+            commandLineFailure = Self.commandLineMessage(error)
+            Diagnostics.log("command line install failed: \(String(describing: error))")
+            // Re-read after a failure too. Install writes a link and then three files, so a
+            // permission error partway through leaves real state the pane would otherwise keep
+            // describing as it was before the attempt — the one reading a user consults to decide
+            // what to do about the failure they are being shown.
+            await refreshCommandLine()
+        }
+    }
+
+    /// Remove our link and only completion files that still equal freshly generated output.
+    func removeCommandLineTool() async {
+        guard let runner, let tools, !commandLineWorking else { return }
+        commandLineWorking = true
+        commandLineFailure = nil
+        defer { commandLineWorking = false }
+
+        do {
+            let completions = try await commandLineCompletions(using: runner)
+            let result = try CommandLineTool.remove(
+                at: CommandLineTool.link,
+                expecting: tools.gitpic,
+                completions: completions)
+            Self.defaults.removeObject(forKey: Self.completionsVersionKey)
+            await refreshCommandLine()
+
+            if result.preserved.isEmpty {
+                notify(title: "命令行工具已移除", body: "gitpic 链接和 GitPic 生成的补全已移除。")
+            } else {
+                let shells = result.preserved.map(\.rawValue).joined(separator: "、")
+                notify(
+                    title: "命令行工具已移除",
+                    body: "保留了内容被修改过的 \(shells) 补全文件。")
+            }
+        } catch {
+            commandLineFailure = Self.commandLineMessage(error)
+            Diagnostics.log("command line removal failed: \(String(describing: error))")
+            // Same reason as install's catch: removal deletes a link and then up to three files,
+            // so a failure partway through has already changed what the pane is describing.
+            await refreshCommandLine()
+        }
+    }
+
+    /// Refresh real completion files after an app update made the embedded CLI newer.
+    func refreshCompletionsIfStale() async {
+        guard let runner, let tools, let version = embeddedCLIVersion else { return }
+        guard CommandLineTool.status(of: CommandLineTool.link, expecting: tools.gitpic) == .linked
+        else { return }
+        guard Self.defaults.string(forKey: Self.completionsVersionKey) != version
+                || !CommandLineTool.completionsExist()
+        else {
+            completionsInstalled = true
+            return
+        }
+
+        do {
+            let completions = try await commandLineCompletions(using: runner)
+            for shell in CommandLineTool.Shell.allCases {
+                guard let contents = completions[shell] else { continue }
+                try CommandLineTool.writeCompletion(contents, for: shell)
+            }
+            Self.defaults.set(version, forKey: Self.completionsVersionKey)
+            completionsInstalled = true
+            Diagnostics.log("command line completions refreshed for \(version)")
+        } catch {
+            commandLineFailure = Self.commandLineMessage(error)
+            Diagnostics.log("command line completion refresh failed: \(String(describing: error))")
+        }
+    }
+
+    func copyCommandLineSetup() {
+        guard let setUp = CommandLineTool.Shell.zsh.setUp else { return }
+        if Clipboard.write(setUp.lines.joined(separator: "\n")) {
+            notify(title: "已复制 zsh 设置", body: "把这两行加入 \(setUp.file)。")
+        } else {
+            commandLineFailure = "写剪贴板失败，请手动复制 zsh 设置。"
+        }
+    }
+
+    private func commandLineCompletions(
+        using runner: GitpicRunner
+    ) async throws -> [CommandLineTool.Shell: Data] {
+        var result: [CommandLineTool.Shell: Data] = [:]
+        for shell in CommandLineTool.Shell.allCases {
+            result[shell] = try await runner.completion(for: shell)
+        }
+        return result
+    }
+
+    private var embeddedCLIVersion: String? {
+        Bundle.main.infoDictionary?["GitPicEmbeddedCLIVersion"] as? String
+    }
+
+    private func currentCompletionsInstalled() -> Bool {
+        guard CommandLineTool.completionsExist() else { return false }
+        guard let version = embeddedCLIVersion else { return true }
+        return Self.defaults.string(forKey: Self.completionsVersionKey) == version
+    }
+
+    private func recordCurrentCompletionsVersion() {
+        guard let version = embeddedCLIVersion else { return }
+        Self.defaults.set(version, forKey: Self.completionsVersionKey)
+    }
+
+    private static func commandLineMessage(_ error: Error) -> String {
+        if let failure = error as? CommandLineTool.Failure { return failure.message }
+        return cliMessage(error)
+    }
+
+    private nonisolated static func probeCommandLine() async -> ToolDiscovery.ShellProbe {
+        await withCheckedContinuation { continuation in
+            commandLineProbeQueue.async {
+                continuation.resume(returning: ToolDiscovery.loginShellProbe("gitpic"))
+            }
+        }
+    }
+
     // MARK: - The Finder right-click switch
 
     /// Whether the Finder right-click item is switched on.
@@ -844,18 +1041,9 @@ final class AppModel {
 
     /// How many reports have landed this launch.
     ///
-    /// Exists so a route can be tied to the report it came out of. Three of
-    /// ``SelfUpdate/Route``'s refusals — 「读不懂最新版本号」, 「并不比最新发布 X 旧」 and every
-    /// `AssetChoice.none` — are facts about the *release*, not about this install, and
-    /// ``resolveUpgradePath()`` used to cache them as `retryable: false` for the life of the
-    /// process. GitHub computes an asset's digest asynchronously *after* the upload, so a check
-    /// that landed in that window cached 「GitHub 没有报 … 的校验和」 and no later release ever got
-    /// an install button until the app was relaunched — precisely the failure mode `retryable`
-    /// was introduced to eliminate.
-    ///
-    /// A counter rather than comparing reports, because `UpdateReport` is a decoded payload with
-    /// no identity of its own, and "the same latest with a digest that has appeared since" has
-    /// to count as a different report.
+    /// Exists so a route can be tied to the report it came out of. GitHub may compute an asset's
+    /// digest after the upload, so two reports for the same release can still lead to different
+    /// installability answers.
     private(set) var updateGeneration = 0
 
     /// Why the last check could not complete.
@@ -925,10 +1113,6 @@ final class AppModel {
     /// The highest ticket ``observeInstall`` has acted on, within the current gate.
     private var lastProgressTicket: UInt64 = 0
 
-    /// An upgrade-path probe is in flight. The `upgradePath == nil` guard did not hold across
-    /// its own `await`, so two sheet appearances could both spawn one.
-    private var resolvingUpgradePath = false
-
     /// The user asked for a check while one was already running.
     ///
     /// The in-flight guard cannot tell a manual request from the automatic check it collided
@@ -981,40 +1165,12 @@ final class AppModel {
     /// without this record, a daily check kept telling the user about the release they had
     /// already seen and decided against. Persisted, because being quiet only until the next
     /// launch is not being quiet. Nothing else is suppressed — 设置 ▸ 通用 and the sheet still
-    /// say so for as long as the update stands, which is where someone who wants to act on it
-    /// later goes looking.
-    ///
-    /// **``forgetAnnouncement()`` exists because one situation can spend this record on a
-    /// moment the user could not act on.** The banner is posted when the check finds a release;
-    /// which upgrade is actually on offer is only worked out later, when the sheet opens. A
-    /// Homebrew user inside the tap's lag therefore gets their one banner for a version the
-    /// sheet then declines to install, and once `announcedVersion` equals that release no
-    /// further banner for it can ever fire — including after the tap lands and
-    /// `brew upgrade` would work. Before this policy the single notification was always
-    /// actionable, because the app installed for everyone.
+    /// say so for as long as the update stands.
     private(set) var announcedVersion: String? = AppModel.defaults
         .string(forKey: AppModel.announcedKey) {
         didSet { Self.defaults.set(announcedVersion, forKey: Self.announcedKey) }
     }
 
-    /// Drop the record of the banner for `version`, so a later check may announce it again.
-    ///
-    /// Called only for `homebrewUpToDate` — the one outcome that offers nothing at all.
-    /// `homebrewUnverified` hands over the command, so its banner was actionable and stays
-    /// spent.
-    ///
-    /// The cost is at most one banner per daily check for as long as the tap lags, and that is
-    /// the right trade rather than a nag: the tap normally follows a release by dispatch within
-    /// minutes and by cron within six hours, so a daily check almost never lands twice inside
-    /// the window. When it does lag for days, AGENTS.md records how that happens — an expired
-    /// dispatch token, which went unnoticed across three releases — and a daily reminder that
-    /// Homebrew has not caught up is precisely the signal that was missing.
-    func forgetAnnouncement(of version: String) {
-        guard announcedVersion == version else { return }
-        announcedVersion = nil
-        Diagnostics.log("update: \(version) was announced but Homebrew cannot install it yet"
-                        + " — allowing it to be announced again")
-    }
 
     fileprivate static let defaults = UserDefaults.standard
     fileprivate static let lastCheckKey = "update.lastCheck"
@@ -1128,143 +1284,29 @@ final class AppModel {
     @discardableResult
     func presentUpdateSheet() -> Bool {
         guard SettingsWindowController.isOnScreen else { return false }
+        resolveUpgradePath()
         updateSheetPresented = true
         return true
     }
 
-    /// Ask which upgrade this install can be offered. Called when the sheet appears, and again
-    /// whenever a new report lands under it.
+    /// Resolve the upgrade once for the report currently shown.
     ///
-    /// **Only a definite answer is kept, and only for the report it came from.** Two separate
-    /// bugs live here, and they pull in the same direction.
-    ///
-    /// `guard upgradePath == nil` cached whatever came back, including the two failures that say
-    /// nothing about this install: `brew list --cask` hitting its 20 s bound (its own doc comment
-    /// names Homebrew's housekeeping as a cause) and the 8 s login-shell probe timing out. Either
-    /// one then told a user with a perfectly good Homebrew 「这份 GitPic 不是用 Homebrew 装的」 for
-    /// the rest of the process's life, with quitting the app as the only way to ask again. That
-    /// is what `retryable` fixed.
-    ///
-    /// But three of the `retryable: false` refusals are computed from the *report* rather than
-    /// from this machine — 「读不懂最新版本号」, 「并不比最新发布 X 旧」 and every
-    /// `AssetChoice.none` — and `update` is reassigned on every check. Caching those for the
-    /// process was the same bug wearing the other hat: a check landing in the window where
-    /// GitHub has not yet computed an asset's digest cached 「GitHub 没有报 … 的校验和」 and no
-    /// later release could ever offer an install again. So `retryable` keeps its narrow meaning
-    /// — "asking the machine again could answer differently" — and the *report* generation
-    /// decides whether the cached route is about the release in front of the user at all.
-    func resolveUpgradePath() async {
-        if upgradePathGeneration == updateGeneration {
-            if case .unavailable(_, retryable: false) = upgradePath { return }
-            if case .selfInstall = upgradePath { return }
-            // **No Homebrew case is listed here, and adding one would be a bug.** This is an
-            // allowlist, so they fall through and are recomputed — which is what they need. The
-            // report's generation is not a sufficient key for them: the *tap* can move without
-            // the report moving at all, since a release is published the moment it exists while
-            // the tap follows by dispatch with a six-hourly cron behind it. Cache
-            // `homebrewUpToDate` and reopening the sheet would keep repeating 「已是 Homebrew
-            // 提供的最新版本」 with no command even after `brew upgrade` had started working —
-            // the same shape as the bug described above, arriving from the other direction.
-            //
-            // **What that buys is a fresh answer per sheet opening, and no more than that.**
-            // `resolveUpgradePath` has one caller, `UpdateSheet`'s `.task(id:)`, so a sheet left
-            // open does not re-ask: the id only moves when a new check lands. Someone who leaves
-            // it open across the tap catching up still reads the old sentence until they close
-            // and reopen it. That is a real limit and is accepted here — the alternative is
-            // polling the tap behind an idle window — but it is narrower than "for the life of
-            // the process", which is what caching would cost.
-            //
-            // The recomputation is bounded: `GitpicRunner.tapCask` is off the spawn gate with a
-            // 10 s ceiling, and `resolvingUpgradePath` below stops two from stacking.
-        }
-        // The old guard also did not hold across the `await`, so two sheet appearances could
-        // both spawn the probe.
-        guard !resolvingUpgradePath else { return }
-        // Nothing to resolve without a report: the answer depends on which assets the release
-        // published, so it cannot be computed before the check has completed.
-        guard update != nil else { return }
-        resolvingUpgradePath = true
-        defer { resolvingUpgradePath = false }
-        // Back to `nil` for the duration, because that is what `UpdateSheet` renders as
-        // 「正在确认升级方式…」. Leaving the previous retryable failure in place would show the
-        // 「不能在这里直接升级」 paragraph while the probe that may contradict it is running.
-        upgradePath = nil
-        // A loop, not one call. A check completing *while* the probe runs moves the generation
-        // on, and `UpdateSheet`'s `.task(id:)` cannot recover from that on its own — it re-enters
-        // and is turned away by the in-flight guard above. So the probe already running is the
-        // one that has to notice, and discard a route it computed from a report the user is no
-        // longer looking at. It converges: `checkForUpdates` allows one check at a time, so each
-        // extra pass is a real new report and not a spin.
-        //
-        // **This runs inside a task SwiftUI has already cancelled, and the second pass depends
-        // on `GitpicRunner.run` ignoring that.** Moving the generation is exactly what makes
-        // `.task(id:)` tear this task down, so by the time `continue` is reached
-        // `Task.isCancelled` is true. Measured: with a `withTaskCancellationHandler` in `run`,
-        // the first probe is killed mid-flight and the re-query is killed *before it starts*,
-        // because `onCancel` fires immediately on an already-cancelled task — and since
-        // `CaskOwnership.verdict` turns every failure into `Offer.unknown`, the new report
-        // resolved to 「暂时读不到 Homebrew 提供的版本」 instead of a real comparison. The
-        // prohibition is recorded on `run` itself; this is the caller it exists for.
-        while true {
-            guard let report = update else { return }
-            let generation = updateGeneration
-            let route = await Updater.resolve(report: report, runner: runner)
-            guard generation == updateGeneration else {
-                Diagnostics.log("update: a newer report landed mid-probe — resolving again")
-                continue
-            }
-            upgradePath = route
-            upgradePathGeneration = generation
-            // The banner for this release was spent on a version Homebrew cannot install yet,
-            // so let a later check announce it again — see `forgetAnnouncement(of:)`.
-            if case .homebrewUpToDate = route { forgetAnnouncement(of: report.latest) }
-            return
-        }
+    /// The generation is the idempotence key: a route may outlive repeated sheet openings, but
+    /// never the report whose asset and digest it carries.
+    func resolveUpgradePath() {
+        guard let report = update, upgradePathGeneration != updateGeneration else { return }
+        upgradePath = Updater.resolve(report: report)
+        upgradePathGeneration = updateGeneration
     }
 
-    /// Do the upgrade that was resolved, and quit.
-    ///
-    /// Still one arm that installs. The Homebrew cases are here to say so explicitly rather than
-    /// through a `default:` — nothing is installed over a cask-managed bundle, and the command
-    /// the user copies is `copyUpgradeCommand`'s business, not an upgrade this process performs.
-    /// That is the difference from the arm `bb07783` deleted, which handed the install to
-    /// `brew upgrade --cask gitpic` and could fail *before* the app quit — hence the `catch` that
-    /// used to be here, setting 「启动升级失败」 while this process was still alive to show it.
-    /// `performSelfInstall` reports its own failures through `updateFailure` from inside its
-    /// `Task`, so there is nothing to catch at this level any more.
+    /// Do the resolved upgrade. Installation failures are reported by ``performSelfInstall``.
     func performUpgrade() {
         switch upgradePath {
         case .selfInstall(let asset, let sha, let version):
             performSelfInstall(asset: asset, sha256: sha, version: version)
-        case .unavailable, .homebrewManaged, .homebrewUpToDate, .homebrewUnverified, .none:
+        case .unavailable, .none:
             return
         }
-    }
-
-    /// Put the Homebrew upgrade command on the pasteboard.
-    ///
-    /// Reads the command off the route rather than taking it as a parameter, so what the user
-    /// copies is what the decision produced — the sheet cannot compose a command of its own, and
-    /// the cask token in it came from the Caskroom entry that actually owns this bundle.
-    ///
-    /// Returns whether the write happened, because `Clipboard.write` can fail and reporting
-    /// 「已复制」 anyway is worse than not copying: the user pastes something stale and never
-    /// learns why. The failure is also surfaced through `notify`, since a sheet that closes
-    /// takes any inline message with it.
-    @discardableResult
-    func copyUpgradeCommand() -> Bool {
-        let command: String
-        switch upgradePath {
-        case .homebrewManaged(let c, _, _), .homebrewUnverified(let c, _):
-            command = c
-        case .selfInstall, .unavailable, .homebrewUpToDate, .none:
-            return false
-        }
-        guard Clipboard.write(command) else {
-            notify(title: "写剪贴板失败", body: "升级命令没有复制，请手动输入 \(command)")
-            return false
-        }
-        return true
     }
 
     /// Download, verify, stage and hand off — reporting each stage into the sheet.
