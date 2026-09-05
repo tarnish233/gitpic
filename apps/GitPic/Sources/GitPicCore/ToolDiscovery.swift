@@ -68,11 +68,19 @@ public enum ToolDiscovery {
         /// nothing. Only then does `path == nil` mean the tool is not there.
         public let conclusive: Bool
         public let reason: String?
+        /// Which shell was asked.
+        ///
+        /// Carried rather than re-derived, because the answer is only ever true *of this shell*.
+        /// PATH is per-shell configuration, so a probe of `$SHELL` says nothing about a different
+        /// shell the person may actually type into — and reporting a bare "reachable" invited
+        /// exactly that reading. Anything rendering a verdict names the shell it came from.
+        public let shell: URL?
 
-        public init(path: URL?, conclusive: Bool, reason: String?) {
+        public init(path: URL?, conclusive: Bool, reason: String?, shell: URL? = nil) {
             self.path = path
             self.conclusive = conclusive
             self.reason = reason
+            self.shell = shell
         }
     }
 
@@ -133,14 +141,15 @@ public enum ToolDiscovery {
         let shell = environment?["SHELL"]
             ?? ProcessInfo.processInfo.environment["SHELL"]
             ?? "/bin/zsh"
+        let shellURL = URL(fileURLWithPath: shell)
         guard FileManager.default.isExecutableFile(atPath: shell) else {
             return ShellProbe(path: nil, conclusive: false,
-                              reason: "找不到可执行的登录 shell（\(shell)）")
+                              reason: "找不到可执行的登录 shell（\(shell)）", shell: shellURL)
         }
         let out: ProcessOutcome
         do {
             out = try ChildProcess.run(
-                executable: URL(fileURLWithPath: shell),
+                executable: shellURL,
                 args: ["-l", "-i", "-c",
                        "command -v /bin/sh >/dev/null 2>&1 && echo \(probeOpen);"
                            + " command -v \(tool); echo \(probeClose)"],
@@ -148,7 +157,7 @@ public enum ToolDiscovery {
                 timeout: 8)
         } catch {
             return ShellProbe(path: nil, conclusive: false,
-                              reason: "登录 shell 无法启动：\(error)")
+                              reason: "登录 shell 无法启动：\(error)", shell: shellURL)
         }
         // Decoded leniently: `String(data:encoding: .utf8)` returns nil for the
         // *whole* blob when one byte in it is not UTF-8, so a latin-1 motd
@@ -168,22 +177,22 @@ public enum ToolDiscovery {
         // for a path.
         let stdout = String(decoding: out.stdout, as: UTF8.self)
         if let path = commandVPath(in: stdout, tool: tool) {
-            return ShellProbe(path: path, conclusive: true, reason: nil)
+            return ShellProbe(path: path, conclusive: true, reason: nil, shell: shellURL)
         }
         if out.timedOut {
             return ShellProbe(path: nil, conclusive: false,
-                              reason: "登录 shell 在 8 秒内没有回答")
+                              reason: "登录 shell 在 8 秒内没有回答", shell: shellURL)
         }
         switch Self.probeAnswer(in: stdout) {
         case .none:
             return ShellProbe(path: nil, conclusive: false,
-                              reason: "登录 shell 没有跑完这次查找，无法判断有没有装 \(tool)")
+                              reason: "登录 shell 没有跑完这次查找，无法判断有没有装 \(tool)", shell: shellURL)
         case .some(let answer) where !answer.isEmpty:
             return ShellProbe(path: nil, conclusive: false,
                               reason: "\(tool) 在登录 shell 里不是一个可执行文件"
-                                  + "（像是别名或者 shell 函数），没法直接调用")
+                                  + "（像是别名或者 shell 函数），没法直接调用", shell: shellURL)
         case .some:
-            return ShellProbe(path: nil, conclusive: true, reason: nil)
+            return ShellProbe(path: nil, conclusive: true, reason: nil, shell: shellURL)
         }
     }
 

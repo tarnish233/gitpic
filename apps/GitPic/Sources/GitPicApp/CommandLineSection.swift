@@ -13,10 +13,17 @@ struct CommandLineSection: View {
     let onInstall: (_ replacing: Bool) -> Void
     let onRemove: () -> Void
     let onCopySetup: () -> Void
+    let onCopyPath: (CommandLineTool.Shell) -> Void
 
     @State private var confirmingRepoint = false
     @State private var confirmingOverwrite = false
     @State private var confirmingRemoval = false
+
+    /// Computed from the verdict rather than passed in: it is a couple of `fileExists` calls, and
+    /// deriving it here keeps "which shell was measured" in one place.
+    private var otherShells: [(shell: CommandLineTool.Shell, setUp: CommandLineTool.SetUp)] {
+        CommandLineTool.otherShellsNeedingPath(measured: reach.shell)
+    }
 
     var body: some View {
         Section("命令行") {
@@ -51,6 +58,32 @@ struct CommandLineSection: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
+
+                // Stated for every shell that looks in use and was not the one measured, because
+                // the verdict above is only ever true of one shell. The author's own machine is
+                // the case this exists for: `$SHELL` is zsh and `~/.zshrc` exports
+                // `~/.local/bin`, so the row above says "reachable" — while the fish used for
+                // actual work had never heard of the directory and `gitpic` was `Unknown
+                // command` there. Worded as a fact rather than a warning: the app cannot tell
+                // whether that shell's PATH is already right without spending 8 seconds per
+                // shell asking, and a false alarm here is worse than a line of information.
+                ForEach(otherShells, id: \.shell) { other in
+                    Text("\(other.shell.rawValue) 的 PATH 是单独配置的。\(other.setUp.why)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Text(other.setUp.lines.joined(separator: "\n"))
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                        Button {
+                            onCopyPath(other.shell)
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("复制 \(other.shell.rawValue) 的 PATH 设置")
+                    }
+                }
             }
 
             LabeledContent("补全") {

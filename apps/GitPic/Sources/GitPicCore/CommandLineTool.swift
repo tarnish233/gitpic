@@ -44,29 +44,47 @@ public enum CommandLineTool {
         }
     }
 
+    /// Whether the command can be typed, **in one named shell**.
+    ///
+    /// The shell is part of every verdict rather than context the caller is trusted to remember.
+    /// PATH is per-shell configuration, so "reachable" is only ever true of the shell that was
+    /// asked: measured on the author's machine, where `$SHELL` is `/bin/zsh` and
+    /// `~/.zshrc` exports `~/.local/bin`, while the fish used for actual work had never heard of
+    /// that directory and `gitpic` was `Unknown command` there. A bare "终端可直接使用" was true
+    /// and useless, which is the worst combination a status row can be.
     public enum Reach: Sendable, Equatable {
-        case reachable
-        case shadowed(by: URL)
-        case notOnPath
+        case reachable(shell: URL)
+        case shadowed(by: URL, shell: URL)
+        case notOnPath(shell: URL)
         case unknown(reason: String)
+
+        /// The shell this verdict is about, if it is about one.
+        public var shell: URL? {
+            switch self {
+            case .reachable(let shell), .notOnPath(let shell): shell
+            case .shadowed(_, let shell): shell
+            case .unknown: nil
+            }
+        }
 
         public var label: String {
             switch self {
-            case .reachable:  "终端可直接使用"
-            case .shadowed:   "另一个 gitpic 排在前面"
-            case .notOnPath:  "安装目录不在 PATH 中"
-            case .unknown:    "无法确认终端 PATH"
+            case .reachable(let shell):  "在 \(shell.lastPathComponent) 中可直接使用"
+            case .shadowed:              "另一个 gitpic 排在前面"
+            case .notOnPath(let shell):  "安装目录不在 \(shell.lastPathComponent) 的 PATH 中"
+            case .unknown:               "无法确认终端 PATH"
             }
         }
 
         public var detail: String {
             switch self {
-            case .reachable:
-                "登录 shell 会从 \(CommandLineTool.link.path) 找到 gitpic。"
-            case .shadowed(let path):
-                "登录 shell 现在会先运行：\(path.path)"
-            case .notOnPath:
-                "把 ~/.local/bin 加到登录 shell 的 PATH 后才能直接输入 gitpic。"
+            case .reachable(let shell):
+                "\(shell.path) 会从 \(CommandLineTool.link.path) 找到 gitpic。"
+                    + "其他 shell 有各自的 PATH 配置，不受这一条影响。"
+            case .shadowed(let path, let shell):
+                "\(shell.path) 现在会先运行：\(path.path)"
+            case .notOnPath(let shell):
+                "把 ~/.local/bin 加到 \(shell.lastPathComponent) 的 PATH 后才能直接输入 gitpic。"
             case .unknown(let reason):
                 reason
             }
@@ -121,6 +139,80 @@ public enum CommandLineTool {
                 nil
             }
         }
+
+        /// How to put `~/.local/bin` on *this* shell's PATH.
+        ///
+        /// Separate from ``setUp``, which is about loading completions, because the two are
+        /// independent and conflating them hid a real gap: fish needs no completion setup at all
+        /// and so returned `nil`, while its PATH is configured entirely separately from every
+        /// other shell's — a fish user reading "no setup needed" got a command they could not run.
+        ///
+        /// fish gets `fish_add_path` rather than a `config.fish` line because it sets a universal
+        /// variable, so it persists without editing a file and without being applied twice. It
+        /// needs fish 3.2 or newer; older fish wants `set -U fish_user_paths ~/.local/bin
+        /// $fish_user_paths`, which is not offered here because the line that works on a current
+        /// fish is the one worth putting in front of somebody.
+        public var pathSetUp: SetUp {
+            switch self {
+            case .zsh:
+                SetUp(
+                    lines: ["export PATH=\"$HOME/.local/bin:$PATH\""],
+                    file: "~/.zshrc",
+                    why: "zsh 交互式启动只读 ~/.zshrc。")
+            case .bash:
+                SetUp(
+                    lines: ["export PATH=\"$HOME/.local/bin:$PATH\""],
+                    file: "~/.bash_profile",
+                    why: "bash 登录时读 ~/.bash_profile。")
+            case .fish:
+                SetUp(
+                    lines: ["fish_add_path ~/.local/bin"],
+                    file: "（不用改文件，运行一次即可）",
+                    why: "fish 不读其他 shell 的配置；fish_add_path 写的是 universal 变量，跨会话持久。")
+            }
+        }
+
+        /// Whether this shell looks like one the person actually uses, judged only from files.
+        ///
+        /// Deliberately a file check and not a probe. The reason to look at all is that PATH is
+        /// per-shell, so the app has to say *something* about shells it did not measure — and
+        /// spawning each of them costs up to 8 seconds apiece for an answer nobody asked for.
+        /// What this cannot tell is whether that shell's PATH is *already* right, so what it
+        /// feeds is a statement of fact ("this shell configures PATH separately, here is its
+        /// line"), never a warning that something is wrong.
+        public func looksInUse(home: URL) -> Bool {
+            let candidates: [String]
+            switch self {
+            case .zsh:  candidates = [".zshrc", ".zprofile"]
+            case .bash: candidates = [".bash_profile", ".bashrc"]
+            case .fish: candidates = [".config/fish"]
+            }
+            return candidates.contains {
+                FileManager.default.fileExists(atPath: home.appendingPathComponent($0).path)
+            }
+        }
+
+        /// The shell whose name is `path`'s last component, if it is one of ours.
+        public static func named(_ path: URL) -> Shell? {
+            Shell(rawValue: path.lastPathComponent)
+        }
+    }
+
+    /// Shells that look in use, are not the one already measured, and therefore need their own
+    /// PATH entry — each with the line that adds it.
+    ///
+    /// `measured` is skipped because its verdict is on screen already; a second line telling the
+    /// user to configure the shell just reported as working is noise. A shell this does not
+    /// recognise (`nu`, `elvish`, a login shell at an unusual path) yields nothing rather than a
+    /// guess: the app installs completions for three shells and speaks about those three.
+    public static func otherShellsNeedingPath(
+        measured: URL?,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> [(shell: Shell, setUp: SetUp)] {
+        let already = measured.flatMap(Shell.named)
+        return Shell.allCases
+            .filter { $0 != already && $0.looksInUse(home: home) }
+            .map { ($0, $0.pathSetUp) }
     }
 
     public enum Failure: Error, Sendable, Equatable {
@@ -196,10 +288,15 @@ public enum CommandLineTool {
     /// Interpret one login-shell probe without resolving the path it printed. The unresolved
     /// path is the fact that matters: it says which PATH entry wins, including a symlink.
     public static func reach(of link: URL, probe: ToolDiscovery.ShellProbe) -> Reach {
-        if let path = probe.path {
-            return samePath(path, link) ? .reachable : .shadowed(by: path)
+        // A probe that cannot even name the shell it asked has nothing to attribute a verdict to,
+        // so it is `unknown` regardless of what it found.
+        guard let shell = probe.shell else {
+            return .unknown(reason: probe.reason ?? "无法确定登录 shell。")
         }
-        if probe.conclusive { return .notOnPath }
+        if let path = probe.path {
+            return samePath(path, link) ? .reachable(shell: shell) : .shadowed(by: path, shell: shell)
+        }
+        if probe.conclusive { return .notOnPath(shell: shell) }
         return .unknown(reason: probe.reason ?? "登录 shell 没有给出可判断的结果。")
     }
 

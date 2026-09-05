@@ -63,17 +63,21 @@ macOS 自己的登录项，所以「系统设置 ▸ 通用 ▸ 登录项与扩�
 和 App 用的是同一个文件 —— 升 App 就是升命令，两者不可能版本不一致。配置和历史也是同一份：App 里改了
 仓库，终端里立刻生效，反之也一样。
 
-同一页会说实话：链接装没装、指向哪里、以及登录 shell 里 `gitpic` 到底命中哪一个。要是 PATH 上还有另
+同一页会说实话：链接装没装、指向哪里、以及**具体哪个 shell** 里 `gitpic` 命中哪一个。要是 PATH 上还有另
 一份 `gitpic` 排在前面，它会把胜出的那条路径写出来，而不是假装装好了。
 
-`~/.local/bin` 不在 PATH 上的话，把这行加进 shell 配置：
+它检查的是登录 shell（`$SHELL`），而 **PATH 是每个 shell 各自配置的** —— 所以如果你平时用的不是登录
+shell，那一行结论对你实际敲命令的地方不成立。面板会把机器上检测到的其他 shell 各自需要的那一行列出来
+（旁边有复制按钮）：
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
+| shell | 让 `~/.local/bin` 生效 |
+|---|---|
+| zsh | `export PATH="$HOME/.local/bin:$PATH"` 加进 `~/.zshrc` |
+| bash | 同上，加进 `~/.bash_profile` |
+| fish | `fish_add_path ~/.local/bin`（运行一次即可，写的是 universal 变量，不用改文件） |
 
-zsh 补全另外还要 `fpath=(~/.zfunc $fpath)` 和 `autoload -Uz compinit && compinit`。需要粘的行界面上
-会摆出来 —— **GitPic 自己永远不会去改你的 shell 配置文件。**
+zsh 补全另外还要 `fpath=(~/.zfunc $fpath)` 和 `autoload -Uz compinit && compinit`；bash 和 fish 的补全
+装好就能用，不需要任何设置。需要粘的行界面上都会摆出来 —— **GitPic 自己永远不会去改你的 shell 配置文件。**
 
 不装 App，或者用 Linux / Intel Mac / Windows / CI：从[发布页](https://github.com/tarnish233/gitpic/releases)
 下对应平台的压缩包解压出 `gitpic`（CI 在 `v*` tag 上构建；macOS 需

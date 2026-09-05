@@ -869,6 +869,21 @@ final class AppModel {
         }
     }
 
+    /// Copy the line that puts `~/.local/bin` on one shell's PATH.
+    ///
+    /// Separate from ``copyCommandLineSetup``, which copies zsh's *completion* setup. Both hand
+    /// the user text and neither writes a file: the app never edits a shell config, and a fish
+    /// user's `fish_add_path` is no exception even though it is a command rather than a line to
+    /// paste — running it for them would still be reaching into their shell configuration.
+    func copyCommandLinePath(for shell: CommandLineTool.Shell) {
+        let setUp = shell.pathSetUp
+        if Clipboard.write(setUp.lines.joined(separator: "\n")) {
+            notify(title: "已复制 \(shell.rawValue) 的 PATH 设置", body: setUp.why)
+        } else {
+            commandLineFailure = "写剪贴板失败，请手动复制 \(shell.rawValue) 的 PATH 设置。"
+        }
+    }
+
     private func commandLineCompletions(
         using runner: GitpicRunner
     ) async throws -> [CommandLineTool.Shell: Data] {

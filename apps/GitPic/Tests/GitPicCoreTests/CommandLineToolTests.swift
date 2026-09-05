@@ -36,27 +36,111 @@ struct CommandLineToolTests {
                 == .occupied)
     }
 
-    @Test("the four PATH results are interpreted from the unresolved entry")
+    @Test("the four PATH results are interpreted from the unresolved entry, and name their shell")
     func reachability() {
         let link = URL(fileURLWithPath: "/Users/example/.local/bin/gitpic")
+        let zsh = URL(fileURLWithPath: "/bin/zsh")
         #expect(CommandLineTool.reach(
             of: link,
-            probe: .init(path: link, conclusive: true, reason: nil)) == .reachable)
+            probe: .init(path: link, conclusive: true, reason: nil, shell: zsh))
+                == .reachable(shell: zsh))
 
         let winner = URL(fileURLWithPath: "/opt/example/bin/gitpic")
         #expect(CommandLineTool.reach(
             of: link,
-            probe: .init(path: winner, conclusive: true, reason: nil))
-                == .shadowed(by: winner))
+            probe: .init(path: winner, conclusive: true, reason: nil, shell: zsh))
+                == .shadowed(by: winner, shell: zsh))
 
         #expect(CommandLineTool.reach(
             of: link,
-            probe: .init(path: nil, conclusive: true, reason: nil)) == .notOnPath)
+            probe: .init(path: nil, conclusive: true, reason: nil, shell: zsh))
+                == .notOnPath(shell: zsh))
 
         #expect(CommandLineTool.reach(
             of: link,
-            probe: .init(path: nil, conclusive: false, reason: "profile stopped"))
+            probe: .init(path: nil, conclusive: false, reason: "profile stopped", shell: zsh))
                 == .unknown(reason: "profile stopped"))
+
+        // Every verdict about a shell says which one, so a reader cannot take "reachable" for a
+        // statement about the shell they happen to be typing into.
+        for reach: CommandLineTool.Reach in [
+            .reachable(shell: zsh), .shadowed(by: winner, shell: zsh), .notOnPath(shell: zsh),
+        ] {
+            #expect(reach.shell == zsh)
+            #expect(reach.label.contains("zsh") || reach.detail.contains("zsh"),
+                    "\(reach) names no shell")
+        }
+        #expect(CommandLineTool.Reach.unknown(reason: "x").shell == nil)
+    }
+
+    /// **A probe that cannot name its shell cannot deliver a verdict about one.** Reach used to be
+    /// derived from `path` and `conclusive` alone, so a probe with no shell still produced a
+    /// confident `reachable` — attributing an answer to nothing in particular, which is the whole
+    /// habit this change exists to break.
+    @Test("a probe with no shell is unknown however much else it found")
+    func reachWithoutAShellIsUnknown() {
+        let link = URL(fileURLWithPath: "/Users/example/.local/bin/gitpic")
+        for probe: ToolDiscovery.ShellProbe in [
+            .init(path: link, conclusive: true, reason: nil, shell: nil),
+            .init(path: nil, conclusive: true, reason: nil, shell: nil),
+        ] {
+            guard case .unknown = CommandLineTool.reach(of: link, probe: probe) else {
+                Issue.record("a shell-less probe produced a verdict about a shell")
+                continue
+            }
+        }
+    }
+
+    /// The gap this release closes: PATH is per-shell, and the app measures one shell.
+    ///
+    /// Measured on the author's machine — `$SHELL` is `/bin/zsh`, `~/.zshrc:126` exports
+    /// `~/.local/bin`, so the pane said "reachable"; the fish used for actual work had never heard
+    /// of the directory and `gitpic` was `Unknown command` there. The shell that was measured is
+    /// left out because its verdict is already on screen.
+    @Test("shells that look in use, other than the measured one, get their own PATH line")
+    func otherShellsNeedingPath() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitpic-shells-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(
+            at: home.appendingPathComponent(".config/fish"), withIntermediateDirectories: true)
+        try Data().write(to: home.appendingPathComponent(".zshrc"))
+
+        let measuredZsh = CommandLineTool.otherShellsNeedingPath(
+            measured: URL(fileURLWithPath: "/bin/zsh"), home: home)
+        #expect(measuredZsh.map(\.shell) == [.fish],
+                "fish is present and was not measured; zsh was measured and bash is absent")
+        #expect(measuredZsh.first?.setUp.lines == ["fish_add_path ~/.local/bin"])
+
+        // Measure fish instead and the pairing flips, which is what proves `measured` is doing
+        // the work rather than fish simply always being listed.
+        let measuredFish = CommandLineTool.otherShellsNeedingPath(
+            measured: URL(fileURLWithPath: "/opt/homebrew/bin/fish"), home: home)
+        #expect(measuredFish.map(\.shell) == [.zsh])
+
+        // A shell the app does not install completions for is not spoken about at all, rather
+        // than being treated as "nothing was measured" and listing everything.
+        let measuredNu = CommandLineTool.otherShellsNeedingPath(
+            measured: URL(fileURLWithPath: "/opt/homebrew/bin/nu"), home: home)
+        #expect(measuredNu.map(\.shell) == [.zsh, .fish])
+
+        // An empty home has no shell to talk about, so nothing is offered.
+        let bare = home.appendingPathComponent("bare")
+        try FileManager.default.createDirectory(at: bare, withIntermediateDirectories: true)
+        #expect(CommandLineTool.otherShellsNeedingPath(measured: nil, home: bare).isEmpty)
+    }
+
+    /// Every shell has a PATH line, they differ, and none of them is a file the app would write.
+    @Test("each shell's PATH setup is present, distinct, and never written by the app")
+    func pathSetUpPerShell() {
+        let all = CommandLineTool.Shell.allCases.map(\.pathSetUp)
+        #expect(all.allSatisfy { !$0.lines.isEmpty && !$0.why.isEmpty && !$0.file.isEmpty })
+        #expect(Set(all.flatMap(\.lines)).count == Set(all.map(\.lines)).count,
+                "two shells share a PATH line, which would make the copy button ambiguous")
+        // fish configures PATH with a command rather than a file edit, so it must not be
+        // described as a line to paste into something.
+        #expect(CommandLineTool.Shell.fish.pathSetUp.lines == ["fish_add_path ~/.local/bin"])
+        #expect(CommandLineTool.Shell.zsh.pathSetUp.file == "~/.zshrc")
     }
 
     @Test("install creates missing directories and the expected link")
@@ -181,13 +265,14 @@ struct CommandLineToolTests {
     @Test("status and PATH prose are nonempty and distinguish every state")
     func prose() {
         let destination = URL(fileURLWithPath: "/tmp/other/gitpic")
+        let shell = URL(fileURLWithPath: "/bin/zsh")
         let statuses: [CommandLineTool.Status] = [
             .notInstalled, .linked, .dangling(destination: destination),
             .pointsElsewhere(destination: destination), .occupied,
         ]
         let reaches: [CommandLineTool.Reach] = [
-            .reachable, .shadowed(by: destination), .notOnPath,
-            .unknown(reason: "cannot ask shell"),
+            .reachable(shell: shell), .shadowed(by: destination, shell: shell),
+            .notOnPath(shell: shell), .unknown(reason: "cannot ask shell"),
         ]
 
         #expect(statuses.allSatisfy { $0.label.isEmpty == false && $0.detail.isEmpty == false })
@@ -196,40 +281,65 @@ struct CommandLineToolTests {
         #expect(Set(reaches.map(\.label)).count == reaches.count)
     }
 
-    /// **The rule is about writers, and a comment cannot write anything.**
+    /// **The rule is that nothing writes a shell rc file — not that nothing may name one.**
     ///
-    /// Comment lines are skipped, because the first form of this scan banned the *subject*: it
-    /// failed the moment `ToolDiscovery.loginShellProbe` documented why it needs `-i`, which is a
-    /// statement about which startup files zsh reads and has no way to be made without naming
-    /// `.zshrc`. A tripwire that catches prose about the hazard gets reworded around rather than
-    /// obeyed, and the reworded comment is worse than the one it replaced. Anchored on code the
-    /// way `QuitPathContractTests` anchors on a receiver instead of the bare word `terminate`,
-    /// for the same reason.
+    /// This scan has now been too broad twice, in the same way each time, and the second time is
+    /// what fixed the shape. First it banned the *subject*, so it failed the moment
+    /// `ToolDiscovery.loginShellProbe` documented why it needs `-i` — a statement about which
+    /// startup files zsh reads, unmakeable without naming `.zshrc`. Comment lines were skipped and
+    /// it failed again as soon as `pathSetUp` had to tell a bash user which file to edit and
+    /// `looksInUse` had to check whether those files exist. Both of those are the app doing its
+    /// job, and neither writes anything.
     ///
-    /// A line that names an rc file *and* carries code still fails, so `write(to: rc) // ~/.zshrc`
-    /// is not a way through. What no string scan can catch is a path assembled from pieces; that
-    /// is why the real guarantee is structural — `Shell.setUp` returns text and no writer for it
-    /// exists in either target — and this is the weaker half.
-    @Test("no app source writes or names a shell rc file outside Shell.setUp")
+    /// So the assertion is now about the hazard rather than the vocabulary: a line may name an rc
+    /// file, and may not name one *while calling something that writes*. A tripwire that catches
+    /// legitimate code gets reworded around rather than obeyed, and each rewording left the code
+    /// less able to explain itself than the version before.
+    ///
+    /// What no string scan can catch is a path assembled from pieces, or a write two lines below
+    /// the name. That is why the real guarantee is structural — `SetUp` is a value carrying text,
+    /// and no writer for one exists in either target — and this stays the weaker half. The
+    /// positive assertions at the end are the other half of the job: the guidance has to remain
+    /// *present*, since a silent way to satisfy "never writes an rc file" is to stop telling
+    /// anyone what to put in one.
+    @Test("no app source writes a shell rc file")
     func rcFilesHaveNoWriter() throws {
         let sources = try appSources()
-        let forbidden = [".zshrc", ".bash_profile", ".bashrc", "config.fish"]
-        var hits = 0
+        let rcFiles = [".zshrc", ".zprofile", ".bash_profile", ".bashrc", "config.fish"]
+        let writers = [
+            ".write(", "write(to:", "createFile", "FileHandle", "removeItem",
+            "createSymbolicLink", "Darwin.rename", "appendingData", "\">>\"",
+        ]
+        var named = 0
 
         for source in sources {
             let text = try String(contentsOf: source, encoding: .utf8)
-            for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            for (offset, line) in text.split(separator: "\n", omittingEmptySubsequences: false)
+                .enumerated() {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if trimmed.hasPrefix("//") || trimmed.hasPrefix("*") || trimmed.hasPrefix("/*") {
                     continue
                 }
-                guard forbidden.contains(where: { line.contains($0) }) else { continue }
-                hits += 1
-                #expect(source.lastPathComponent == "CommandLineTool.swift")
-                #expect(line.contains("file: \"~/.zshrc\""))
+                guard rcFiles.contains(where: { line.contains($0) }) else { continue }
+                named += 1
+                if let writer = writers.first(where: { line.contains($0) }) {
+                    Issue.record("""
+                        \(source.lastPathComponent):\(offset + 1) names a shell rc file on a line \
+                        that calls `\(writer)`. GitPic hands the user text to paste and never \
+                        edits their shell configuration.
+                        \(trimmed)
+                        """)
+                }
             }
         }
-        #expect(hits == 1, "the zsh setup literal must stay visible to the UI")
+
+        // The guidance still exists and still reaches the UI as text.
+        #expect(named > 0, "no source names an rc file at all — the setup guidance has gone")
+        #expect(CommandLineTool.Shell.zsh.setUp?.file == "~/.zshrc")
+        #expect(CommandLineTool.Shell.bash.pathSetUp.file == "~/.bash_profile")
+        // fish is the one whose PATH is set by a command rather than a file, so it must not be
+        // described as an rc file to edit.
+        #expect(!rcFiles.contains(CommandLineTool.Shell.fish.pathSetUp.file))
     }
 
     private func atomicRename(_ source: URL, _ destination: URL) throws {

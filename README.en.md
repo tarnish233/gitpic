@@ -80,18 +80,22 @@ versions. Config and history are shared too — change the repository in the app
 sees it immediately, and the other way round.
 
 The same pane tells you the truth about it: whether the link is installed, where it points, and
-which `gitpic` a login shell actually finds. If another `gitpic` sits earlier on `PATH`, it names
-the path that wins rather than claiming success.
+which `gitpic` **a named shell** actually finds. If another `gitpic` sits earlier on `PATH`, it
+names the path that wins rather than claiming success.
 
-If `~/.local/bin` is not on your `PATH`, add it in your shell config:
+What it asks is the login shell (`$SHELL`), and **PATH is configured per shell** — so if the shell
+you actually work in is not your login shell, that verdict does not hold where you type. The pane
+lists the line each other shell it can see needs, with a copy button:
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
+| shell | to put `~/.local/bin` on PATH |
+|---|---|
+| zsh | `export PATH="$HOME/.local/bin:$PATH"` in `~/.zshrc` |
+| bash | the same, in `~/.bash_profile` |
+| fish | `fish_add_path ~/.local/bin` — run once; it sets a universal variable, no file to edit |
 
 zsh completions additionally want `fpath=(~/.zfunc $fpath)` and
-`autoload -Uz compinit && compinit`. The lines to paste are shown in the pane —
-**GitPic never edits your shell config files itself.**
+`autoload -Uz compinit && compinit`; bash and fish completions work as soon as they are installed.
+Every line to paste is shown in the pane — **GitPic never edits your shell config files itself.**
 
 Without the app, or on Linux / Intel Mac / Windows / CI: download the archive for your platform
 from the [releases page](https://github.com/tarnish233/gitpic/releases) and unpack `gitpic` (all
