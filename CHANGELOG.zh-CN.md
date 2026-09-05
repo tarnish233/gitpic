@@ -4,6 +4,43 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.21.1] - 2026-09-05
+
+### 命令行那一栏现在会说清是哪个 shell，其他 shell 各给一行
+
+- 「可达」改成「在 zsh 中可直接使用」—— PATH 是每个 shell 各自配的，一个结论盖不住全部
+- 机器上检测到的其他 shell 会各自列出需要的那一行，fish 给的是 `fish_add_path ~/.local/bin`
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+实测出来的缺口：本机 `$SHELL` 是 `/bin/zsh`，`~/.zshrc:126` 导出了 `~/.local/bin`，所以面板报「终端可
+直接使用」—— 而平时干活用的 fish 从来不知道这个目录，`gitpic` 在那里是 `Unknown command`。那句结论**没有
+说错**，它只是没说清是关于哪个 shell 的，而一个真的又没用的状态行是最糟的组合。
+
+0.21.0 修掉的是「探测读不到 `.zshrc`」（`-l` 少了 `-i`）。这一版修的是同一个根源的另一面：探测问的是**登录
+shell**，而不是你实际用的那个。
+
+### App
+
+- `Reach` 的三个与 shell 有关的分支都带上 shell：`reachable(shell:)`、`shadowed(by:shell:)`、
+  `notOnPath(shell:)`，文案随之点名（「在 zsh 中可直接使用」「安装目录不在 fish 的 PATH 中」）。
+  `ShellProbe` 也记住它问的是哪个 shell —— 结论只对被问的那个成立，所以来源不再是调用方要自己记住的
+  上下文。探测连 shell 都报不出时，无论找到什么都是 `unknown`，不再给出一个无所归属的自信答案。
+- 新增 `Shell.pathSetUp`，和管补全的 `setUp` 分开。两者混在一起正好藏住了这个缺口：fish 的补全**不需要
+  任何设置**所以 `setUp` 是 `nil`，而它的 PATH 恰恰是配置方式最不一样的那个 —— fish 用户看到「不需要
+  设置」，拿到的却是一条跑不起来的命令。fish 给 `fish_add_path` 而不是往 `config.fish` 里加行：它写的是
+  universal 变量，不用改文件也不会被重复应用。
+- 面板会把「看起来在用、且不是刚测过的那个」的 shell 各列一行并带复制按钮。判断只看文件是否存在
+  （fish 看 `~/.config/fish`），不额外起 shell —— 每个 shell 探一次要花最多 8 秒，为没人问的问题。因此
+  文案是陈述而非告警：它无法知道那个 shell 的 PATH 是不是**已经**对了。
+- **`app 永不改 shell 配置文件`那条源码扫描重写了。** 它两次都太宽，而且是同一种宽：先是禁了这个*话题*
+  （`loginShellProbe` 解释为什么要 `-i` 时必须提到 `.zshrc`），跳过注释之后又拦住了 `pathSetUp` 告诉
+  bash 用户改哪个文件、和 `looksInUse` 检查那些文件是否存在。两者都是 app 在正常干活且都不写任何东西。
+  现在断言的是危害本身：一行可以命名 rc 文件，但不能在**同时调用写入 API** 的情况下命名。另外补了正向
+  断言 —— 指引必须仍然存在，否则「永不写 rc 文件」有个不出声的满足方式：干脆不再告诉任何人该写什么。
+
+
+
 ## [0.21.0] - 2026-09-05
 
 ### 安装和更新只剩一条路：下 DMG，之后 app 自己更新

@@ -4,6 +4,52 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.1] - 2026-09-05
+
+### The command-line row names its shell, and every other shell gets its own line
+
+- "Reachable" becomes "reachable in zsh" — PATH is per-shell, so one verdict cannot cover them all
+- Other shells found on the machine each get the line they need; fish gets `fish_add_path ~/.local/bin`
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+The gap, as measured: `$SHELL` here is `/bin/zsh` and `~/.zshrc:126` exports `~/.local/bin`, so the
+pane reported the command as reachable from the terminal — while the fish used for actual work had
+never heard of that directory and `gitpic` was `Unknown command` there. The verdict was **not
+wrong**; it simply did not say which shell it was about, and a status row that is true and useless
+is the worst combination available.
+
+0.21.0 fixed the probe not reading `.zshrc` (`-l` without `-i`). This fixes the other face of the
+same root cause: the probe asks the *login* shell, not the one you work in.
+
+### App
+
+- `Reach`'s three shell-dependent cases now carry it — `reachable(shell:)`,
+  `shadowed(by:shell:)`, `notOnPath(shell:)` — and the prose names it. `ShellProbe` records the
+  shell it asked, because the answer is only ever true of that shell, so its provenance is no
+  longer context the caller is trusted to remember. A probe that cannot name its shell is
+  `unknown` however much else it found, rather than a confident verdict attributed to nothing.
+- New `Shell.pathSetUp`, separate from the completion-oriented `setUp`. Conflating them is exactly
+  what hid this: fish needs no completion setup at all and so returned `nil`, while its PATH is the
+  one configured least like everyone else's — a fish user read "no setup needed" and got a command
+  they could not run. fish gets `fish_add_path` rather than a `config.fish` line because it sets a
+  universal variable, so it persists without editing a file and without being applied twice.
+- The pane lists a line, with a copy button, for each shell that looks in use and was not the one
+  measured. Presence is judged from files only (fish from `~/.config/fish`), with no extra spawn:
+  probing each shell costs up to 8 seconds apiece for an answer nobody asked for. So the wording is
+  a statement of fact rather than a warning — it cannot know whether that shell's PATH is
+  *already* right.
+- **The "never writes a shell rc file" source scan was rewritten.** It had been too broad twice, in
+  the same way: first it banned the *subject*, failing as soon as `loginShellProbe` documented why
+  it needs `-i` (unmakeable without naming `.zshrc`); with comments skipped it then blocked
+  `pathSetUp` telling a bash user which file to edit and `looksInUse` checking whether those files
+  exist. Both are the app doing its job and neither writes anything. It now asserts the hazard: a
+  line may name an rc file, and may not name one while calling something that writes. Positive
+  assertions were added alongside, because "never writes an rc file" has a silent way to pass —
+  stop telling anyone what to put in one.
+
+
+
 ## [0.21.0] - 2026-09-05
 
 ### One way in and one way on: the DMG, then the app updates itself
