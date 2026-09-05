@@ -217,6 +217,11 @@ jobs:
       # GITPIC_LIVE is intentionally unset: the live suite uploads to a real
       # repository and needs a gitpic credential (`auth.toml`), neither of which
       # belongs in CI.
+      # A mocked exit code cannot test universal-variable persistence across fish processes.
+      # This is a test dependency, not an installation path for GitPic.
+      - name: Install fish for isolated shell regression tests
+        run: brew install fish
+
       - name: Swift tests (offline only)
         working-directory: apps/GitPic
         run: swift test

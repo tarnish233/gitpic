@@ -4,6 +4,30 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### fish 自动配置真正生效
+
+- 修复 fish 点「自动配置」后仍显示未配置的问题，并保留已有路径
+- 重复配置不再误报失败，保存后会验证新终端能否使用
+- 配置时显示进度，失败原因直接显示在对应 shell 旁
+
+<!-- release-notes-end: user-facing summary above; implementation details below -->
+
+### App
+
+- fish 写入前只清除子进程里的 global 遮蔽，再用 `fish_add_path --universal` 更新原有持久列表。
+  仅添加 `--universal` 不够：函数从当前可见变量构建列表，可能把被遮住的用户 universal 路径覆盖掉。
+  不使用 `--no-config`，因为实测本机 fish 在该模式下不持久保存 universal 变量。
+- `fish_add_path` 返回 1 也可能是「已经存在」；改查写入结果，并在独立的 login + interactive fish 中
+  同时验证持久变量与实际 PATH。启动配置覆盖 PATH 时明确报错，不会为了修复而改用户启动文件。
+- 路径通过独立 argv 传递，兼容空格、引号和 shell 特殊字符。检测以带标记的回答为准，超时、启动失败、
+  提前退出均不冒充「未配置」；已有启动配置直接设置 PATH 也能识别。非致命启动噪声不丢弃已完成的回答。
+- fish 配置移到后台队列，当前 shell 行显示处理进度及错误；刷新在两次异步检测之后检查代次，避免旧结果
+  覆盖新状态。移除错误的 `fish_remove_path` 提示，已配置文案不再假定路径一定由 GitPic 写入。
+- 真实 fish 回归使用临时 HOME/XDG 和 Finder 风格 PATH，覆盖 Cargo global 遮蔽、隐藏 universal 路径保留、
+  重复配置、交互启动覆盖、特殊路径和假成功。CI 与发布测试均安装 fish，避免只验证模拟退出码。
+
 ## [0.21.3] - 2026-09-05
 
 ### 修两个会弄坏 shell 配置的缺陷

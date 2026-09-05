@@ -724,10 +724,12 @@ final class AppModel {
     /// A dictionary rather than three flags because the set is `Shell.allCases` filtered by what
     /// the machine actually has, and a shell that is absent must render as nothing at all — not as
     /// an unconfigured one the user is invited to fix.
-    private(set) var shellConfiguration: [CommandLineTool.Shell: Bool] = [:]
+    private(set) var shellConfiguration: [CommandLineTool.Shell: CommandLineTool.ShellConfiguration] = [:]
     /// Separate from ``busy``: this work belongs to 通用 and must not disable config saves.
     private(set) var commandLineWorking = false
     private(set) var commandLineFailure: String?
+    private(set) var commandLineWorkingShell: CommandLineTool.Shell?
+    private(set) var commandLineFailureShell: CommandLineTool.Shell?
 
     private var commandLineProbeGeneration = 0
     private nonisolated static let commandLineProbeQueue =
@@ -740,12 +742,15 @@ final class AppModel {
     /// putting its eight-second ceiling on the cooperative pool would park one of that pool's
     /// threads for the whole wait.
     func refreshCommandLine() async {
+        commandLineProbeGeneration += 1
+        let generation = commandLineProbeGeneration
         guard let tools else {
+            commandLineProbing = false
+            shellConfiguration = [:]
             if toolState == .missing {
                 commandLineStatus = .notInstalled
                 commandLineReach = .unknown(
                     reason: "找不到 GitPic 内置的 gitpic，无法检查命令行安装。")
-                commandLineProbing = false
                 completionsInstalled = false
             }
             return
@@ -754,42 +759,57 @@ final class AppModel {
         commandLineStatus = CommandLineTool.status(
             of: CommandLineTool.link, expecting: tools.gitpic)
         completionsInstalled = currentCompletionsInstalled()
-        commandLineProbeGeneration += 1
-        let generation = commandLineProbeGeneration
         commandLineProbing = true
 
         let probe = await Self.probeCommandLine()
         guard commandLineProbeGeneration == generation else { return }
+        let configurations = await loadShellConfiguration(loginShell: probe.shell)
+        // The fish check also suspends. A refresh started before a configuration write must
+        // not overwrite the newer refresh's result when it eventually finishes.
+        guard commandLineProbeGeneration == generation else { return }
         commandLineReach = CommandLineTool.reach(of: CommandLineTool.link, probe: probe)
+        shellConfiguration = configurations
         commandLineProbing = false
-        await refreshShellConfiguration(loginShell: probe.shell)
     }
 
-    /// Which shells GitPic has configured, and which look in use but are not configured yet.
-    ///
-    /// Read after the PATH probe because the login shell it names is what tells fish apart from a
-    /// fish that merely happens to be installed. zsh and bash are answered from files; fish needs
-    /// one `fish -c`, which is a bare fish with no config sourced and returns in tens of
-    /// milliseconds — not the 8-second login-and-interactive probe.
-    func refreshShellConfiguration(loginShell: URL?) async {
-        var found: [CommandLineTool.Shell: Bool] = [:]
+    /// File-backed shells are inspected directly; fish is asked in a fresh interactive login
+    /// session, on the probe queue. Return a snapshot so the caller can reject a stale generation.
+    private func loadShellConfiguration(
+        loginShell: URL?
+    ) async -> [CommandLineTool.Shell: CommandLineTool.ShellConfiguration] {
+        var found: [CommandLineTool.Shell: CommandLineTool.ShellConfiguration] = [:]
         let home = FileManager.default.homeDirectoryForCurrentUser
         for shell in CommandLineTool.Shell.allCases where shell.looksInUse(home: home) {
             switch shell {
             case .zsh, .bash:
                 found[shell] = CommandLineTool.isConfigured(shell, home: home)
+                    ? .configured : .notConfigured
             case .fish:
                 guard let fish = CommandLineTool.locateFish(loginShell: loginShell) else { continue }
                 found[shell] = await Self.probeFishPath(fish: fish)
             }
         }
-        shellConfiguration = found
+        return found
     }
 
-    private nonisolated static func probeFishPath(fish: URL) async -> Bool {
+    private nonisolated static func probeFishPath(
+        fish: URL
+    ) async -> CommandLineTool.ShellConfiguration {
         await withCheckedContinuation { continuation in
             commandLineProbeQueue.async {
-                continuation.resume(returning: CommandLineTool.fishPathConfigured(fish: fish))
+                continuation.resume(returning: CommandLineTool.fishPathConfiguration(fish: fish))
+            }
+        }
+    }
+
+    private nonisolated static func configureFish(fish: URL) async throws -> CommandLineTool.Configured {
+        try await withCheckedThrowingContinuation { continuation in
+            commandLineProbeQueue.async {
+                do {
+                    continuation.resume(returning: try CommandLineTool.configureFish(fish: fish))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
             }
         }
     }
@@ -799,7 +819,12 @@ final class AppModel {
         guard !commandLineWorking else { return }
         commandLineWorking = true
         commandLineFailure = nil
-        defer { commandLineWorking = false }
+        commandLineFailureShell = shell
+        commandLineWorkingShell = shell
+        defer {
+            commandLineWorking = false
+            commandLineWorkingShell = nil
+        }
 
         do {
             let result: CommandLineTool.Configured
@@ -815,7 +840,7 @@ final class AppModel {
                     commandLineFailure = "找不到 fish，无法配置它的 PATH。"
                     return
                 }
-                result = try CommandLineTool.configureFish(fish: fish)
+                result = try await Self.configureFish(fish: fish)
             }
             await refreshCommandLine()
             switch result {
@@ -824,8 +849,8 @@ final class AppModel {
                        body: "已写入 \(file)，原文件备份为 \(file).gitpic.bak。开新终端后生效。")
             case .unchanged(let file):
                 notify(title: "\(shell.rawValue) 无需改动", body: "\(file) 里的配置已经是最新的。")
-            case .ranCommand(let command):
-                notify(title: "已配置 \(shell.rawValue)", body: "已运行 \(command)。开新终端后生效。")
+            case .ranCommand:
+                notify(title: "已配置 fish", body: "已保存持久 PATH，并确认新启动的 fish 已包含安装目录。")
             }
         } catch {
             commandLineFailure = Self.commandLineMessage(error)
@@ -837,15 +862,20 @@ final class AppModel {
 
     /// Take GitPic's block back out of one shell's startup file.
     ///
-    /// fish is not offered here: `fish_add_path` records a universal variable that
-    /// `fish_remove_path` would have to undo, and reaching into a shell's variable store to remove
+    /// fish is not offered here: removing an entry from its shared universal variable store
+    /// can also remove a path the user configured independently. Reaching into that store to remove
     /// an entry the user may have since curated is a different and less reversible act than
     /// deleting a block we can see we wrote. The path stays, and the pane says so.
     func unconfigureShell(_ shell: CommandLineTool.Shell) async {
         guard !commandLineWorking, shell.usesStartupFile else { return }
         commandLineWorking = true
         commandLineFailure = nil
-        defer { commandLineWorking = false }
+        commandLineFailureShell = shell
+        commandLineWorkingShell = shell
+        defer {
+            commandLineWorking = false
+            commandLineWorkingShell = nil
+        }
 
         do {
             let removed = try CommandLineTool.unconfigure(shell)
@@ -869,6 +899,7 @@ final class AppModel {
         guard let runner, let tools, !commandLineWorking else { return }
         commandLineWorking = true
         commandLineFailure = nil
+        commandLineFailureShell = nil
         defer { commandLineWorking = false }
 
         do {
@@ -911,6 +942,7 @@ final class AppModel {
         guard let runner, let tools, !commandLineWorking else { return }
         commandLineWorking = true
         commandLineFailure = nil
+        commandLineFailureShell = nil
         defer { commandLineWorking = false }
 
         do {

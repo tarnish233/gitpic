@@ -14,7 +14,9 @@ struct CommandLineSection: View {
     let onInstall: (_ replacing: Bool) -> Void
     let onRemove: () -> Void
     let onCopySetup: () -> Void
-    let shellConfiguration: [CommandLineTool.Shell: Bool]
+    let shellConfiguration: [CommandLineTool.Shell: CommandLineTool.ShellConfiguration]
+    let workingShell: CommandLineTool.Shell?
+    let failureShell: CommandLineTool.Shell?
     let onConfigureShell: (CommandLineTool.Shell) -> Void
     let onUnconfigureShell: (CommandLineTool.Shell) -> Void
 
@@ -28,7 +30,7 @@ struct CommandLineSection: View {
         }
         // fish's path is a universal variable, so there is no block to point at and nothing for a
         // "移除" button to undo without reaching into a store the user may have curated since.
-        return "已通过 fish_add_path 记录（universal 变量）。移除请自行运行 fish_remove_path。"
+        return "已确认新启动的 fish 的 PATH 包含安装目录。GitPic 不会自动移除用户已有的 fish 路径。"
     }
 
     var body: some View {
@@ -76,15 +78,18 @@ struct CommandLineSection: View {
             // An explicit button, a named file, a backup and a removal serve the same intent and
             // actually finish the job.
             ForEach(CommandLineTool.Shell.allCases, id: \.self) { shell in
-                if let configured = shellConfiguration[shell] {
+                if let configuration = shellConfiguration[shell] {
                     LabeledContent(shell.rawValue) {
                         HStack(spacing: 8) {
-                            Label(
-                                configured ? "已配置" : "未配置",
-                                systemImage: configured
-                                    ? "checkmark.circle.fill" : "circle.dashed")
-                                .foregroundStyle(configured ? .green : .secondary)
-                            if configured {
+                            if workingShell == shell {
+                                ProgressView().controlSize(.small)
+                                Text("正在处理并验证…").foregroundStyle(.secondary)
+                            } else {
+                                let appearance = shellAppearance(configuration)
+                                Label(configuration.label, systemImage: appearance.icon)
+                                    .foregroundStyle(appearance.color)
+                            }
+                            if configuration == .configured {
                                 if shell.usesStartupFile {
                                     Button("移除") { onUnconfigureShell(shell) }
                                         .controlSize(.small)
@@ -97,10 +102,16 @@ struct CommandLineSection: View {
                             }
                         }
                     }
-                    Text(configured ? configuredDetail(shell) : shell.pathSetUp.why)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
+                    if failureShell == shell, let failure {
+                        failureLabel(failure)
+                    } else if case .unknown(let reason) = configuration {
+                        failureLabel(reason)
+                    } else {
+                        Text(configuration == .configured ? configuredDetail(shell) : shell.pathSetUp.why)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
                 }
             }
 
@@ -115,7 +126,7 @@ struct CommandLineSection: View {
             // Only when zsh is present *and* GitPic has not configured it. The managed block
             // already carries these lines, so showing them beside a configured zsh was the pane
             // telling the user to do by hand what it had just done for them.
-            if completionsInstalled, shellConfiguration[.zsh] == false,
+            if completionsInstalled, shellConfiguration[.zsh] == .notConfigured,
                let setUp = CommandLineTool.Shell.zsh.setUp {
                 Text("不想让 GitPic 改 \(setUp.file) 的话，手动加这两行也一样。\(setUp.why)")
                     .font(.caption)
@@ -127,11 +138,8 @@ struct CommandLineSection: View {
                     .controlSize(.small)
             }
 
-            if let failure {
-                Label(failure, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .textSelection(.enabled)
+            if let failure, failureShell.flatMap({ shellConfiguration[$0] }) == nil {
+                failureLabel(failure)
             }
 
             HStack(spacing: 8) {
@@ -180,6 +188,23 @@ struct CommandLineSection: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("会移除命令链接；内容被修改过的补全文件会保留。")
+        }
+    }
+
+    private func failureLabel(_ message: String) -> some View {
+        Label(message, systemImage: "exclamationmark.triangle.fill")
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .textSelection(.enabled)
+    }
+
+    private func shellAppearance(
+        _ configuration: CommandLineTool.ShellConfiguration
+    ) -> (icon: String, color: Color) {
+        switch configuration {
+        case .configured: ("checkmark.circle.fill", .green)
+        case .notConfigured: ("circle.dashed", .secondary)
+        case .unknown: ("questionmark.circle", .orange)
         }
     }
 

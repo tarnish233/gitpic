@@ -126,6 +126,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # A mocked exit code cannot test universal-variable persistence across fish processes.
+      # This is a test dependency, not an installation path for GitPic.
+      - name: Install fish for isolated shell regression tests
+        run: brew install fish
+
       - name: Swift version
         run: swift --version
 

@@ -110,7 +110,7 @@ struct CommandLineToolTests {
             measured: URL(fileURLWithPath: "/bin/zsh"), home: home)
         #expect(measuredZsh.map(\.shell) == [.fish],
                 "fish is present and was not measured; zsh was measured and bash is absent")
-        #expect(measuredZsh.first?.setUp.lines == ["fish_add_path ~/.local/bin"])
+        #expect(measuredZsh.first?.setUp == CommandLineTool.Shell.fish.pathSetUp)
 
         // Measure fish instead and the pairing flips, which is what proves `measured` is doing
         // the work rather than fish simply always being listed.
@@ -130,7 +130,7 @@ struct CommandLineToolTests {
         #expect(CommandLineTool.otherShellsNeedingPath(measured: nil, home: bare).isEmpty)
     }
 
-    /// Every shell has a PATH line, they differ, and none of them is a file the app would write.
+    /// Each shell has distinct, nonempty manual PATH instructions.
     @Test("each shell's PATH setup is present and distinct")
     func pathSetUpPerShell() {
         let all = CommandLineTool.Shell.allCases.map(\.pathSetUp)
@@ -138,7 +138,7 @@ struct CommandLineToolTests {
         #expect(Set(all.flatMap(\.lines)).count == Set(all.map(\.lines)).count,
                 "two shells share a PATH line, which would make the copy button ambiguous")
         // fish configures PATH with a command rather than a file edit.
-        #expect(CommandLineTool.Shell.fish.pathSetUp.lines == ["fish_add_path ~/.local/bin"])
+        #expect(CommandLineTool.Shell.fish.pathSetUp.lines.first?.hasPrefix("fish -c ") == true)
         #expect(CommandLineTool.Shell.zsh.pathSetUp.file == "~/.zshrc")
     }
 
@@ -616,40 +616,6 @@ struct ShellConfigurationTests {
         try Data("path+=(~/.local/bin)\n".utf8)
             .write(to: home.appendingPathComponent(".zprofile"))
         #expect(CommandLineTool.pathAlreadyConfigured(.zsh, home: home))
-    }
-
-    /// fish is configured by a command, so the test asserts which command — no fish needed.
-    @Test("fish is configured with fish_add_path, and the probe asks with contains")
-    func fishUsesItsOwnApi() throws {
-        var calls: [[String]] = []
-        let fish = URL(fileURLWithPath: "/opt/homebrew/bin/fish")
-        let dir = URL(fileURLWithPath: "/Users/example/.local/bin")
-
-        let result = try CommandLineTool.configureFish(fish: fish, directory: dir) { _, args in
-            calls.append(args); return 0
-        }
-        #expect(result == .ranCommand("fish_add_path /Users/example/.local/bin"))
-        #expect(calls == [["-c", "fish_add_path /Users/example/.local/bin"]])
-
-        // Captured rather than asserted inside the closure: an `#expect` nested in an argument to
-        // `#expect` expands recursively and does not compile.
-        var probeArgs: [[String]] = []
-        let configured = CommandLineTool.fishPathConfigured(fish: fish, directory: dir) { _, args in
-            probeArgs.append(args)
-            return 0
-        }
-        #expect(configured)
-        #expect(probeArgs == [["-c", "contains /Users/example/.local/bin $fish_user_paths"]])
-        #expect(!CommandLineTool.fishPathConfigured(fish: fish, directory: dir) { _, _ in 1 })
-        // A fish that cannot be run at all is "not configured", never a crash.
-        #expect(!CommandLineTool.fishPathConfigured(fish: fish, directory: dir) { _, _ in
-            throw CommandLineTool.Failure.notOwned(path: "x")
-        })
-
-        // A non-zero exit from the write is an error, not a silent success.
-        #expect(throws: (any Error).self) {
-            try CommandLineTool.configureFish(fish: fish, directory: dir) { _, _ in 7 }
-        }
     }
 }
 

@@ -220,10 +220,10 @@ public enum CommandLineTool {
 
         /// Whether this shell configures PATH by a file the app can manage, or by a command.
         ///
-        /// fish is the odd one and it is the *better* one: `fish_add_path` records a universal
-        /// variable, so nothing has to be appended to a startup file at all and running it twice
-        /// changes nothing. zsh and bash have no equivalent — PATH there comes from a startup file
-        /// or from nowhere — which is why those two get a managed block.
+        /// fish needs an explicit `fish_add_path --universal`: without the scope flag it updates
+        /// an existing global variable instead, and the write dies with the child process.
+        /// No startup-file edit is needed. zsh and bash have no equivalent — PATH there comes
+        /// from a startup file or from nowhere — which is why those two get a managed block.
         public var usesStartupFile: Bool {
             switch self {
             case .zsh, .bash: true
@@ -335,11 +335,10 @@ public enum CommandLineTool {
         /// and so returned `nil`, while its PATH is configured entirely separately from every
         /// other shell's — a fish user reading "no setup needed" got a command they could not run.
         ///
-        /// fish gets `fish_add_path` rather than a `config.fish` line because it sets a universal
-        /// variable, so it persists without editing a file and without being applied twice. It
-        /// needs fish 3.2 or newer; older fish wants `set -U fish_user_paths ~/.local/bin
-        /// $fish_user_paths`, which is not offered here because the line that works on a current
-        /// fish is the one worth putting in front of somebody.
+        /// fish gets a child process rather than a startup-file line. Clearing that child's
+        /// global shadow preserves the original universal list without altering the caller's
+        /// live global variable. The app uses `configureFish` to additionally verify a fresh
+        /// login-interactive session; these are only the equivalent manual writing instructions.
         public var pathSetUp: SetUp {
             switch self {
             case .zsh:
@@ -354,9 +353,14 @@ public enum CommandLineTool {
                     why: "bash 登录时读 ~/.bash_profile。")
             case .fish:
                 SetUp(
-                    lines: ["fish_add_path ~/.local/bin"],
+                    lines: [
+                        "fish -c 'set --erase --global fish_user_paths; "
+                            + "fish_add_path --universal -- \"$HOME/.local/bin\"; "
+                            + "set --query --universal fish_user_paths; "
+                            + "and contains -- \"$HOME/.local/bin\" $fish_user_paths'",
+                    ],
                     file: "（不用改文件，运行一次即可）",
-                    why: "fish 不读其他 shell 的配置；fish_add_path 写的是 universal 变量，跨会话持久。")
+                    why: "自动配置会将安装目录写入 fish 的 universal 变量，并验证新启动的 fish。")
             }
         }
 
@@ -401,6 +405,21 @@ public enum CommandLineTool {
         return Shell.allCases
             .filter { $0 != already && $0.looksInUse(home: home) }
             .map { ($0, $0.pathSetUp) }
+    }
+
+    /// A failed probe is not evidence that configuration is absent.
+    public enum ShellConfiguration: Sendable, Equatable {
+        case configured
+        case notConfigured
+        case unknown(reason: String)
+
+        public var label: String {
+            switch self {
+            case .configured: "已配置"
+            case .notConfigured: "未配置"
+            case .unknown: "无法确认"
+            }
+        }
     }
 
     public enum Failure: Error, Sendable, Equatable {
@@ -617,53 +636,6 @@ public enum CommandLineTool {
             // counting it would make a rewrite decide the line is no longer needed and drop it.
             return ManagedBlock.removing(from: text).contains(".local/bin")
         }
-    }
-
-    /// Ask fish to record the install directory, using fish's own idempotent API.
-    ///
-    /// `fish_add_path` writes a *universal variable*, so nothing is appended to a startup file and
-    /// running it twice changes nothing — which is why fish needs no managed block and gets a
-    /// button that simply works. `run` is injected so the decision and the spawn can be tested
-    /// apart, the same seam `install(rename:)` uses.
-    @discardableResult
-    public static func configureFish(
-        fish: URL,
-        directory: URL = link.deletingLastPathComponent(),
-        run: (URL, [String]) throws -> Int32 = defaultRun
-    ) throws -> Configured {
-        let command = "fish_add_path \(directory.path)"
-        let status = try run(fish, ["-c", command])
-        guard status == 0 else {
-            throw Failure.fileSystem(
-                operation: "配置 fish 的 PATH", path: fish.path,
-                reason: "fish 以状态 \(status) 退出")
-        }
-        return .ranCommand(command)
-    }
-
-    /// Whether fish's universal variables already carry the install directory.
-    public static func fishPathConfigured(
-        fish: URL,
-        directory: URL = link.deletingLastPathComponent(),
-        run: (URL, [String]) throws -> Int32 = defaultRun
-    ) -> Bool {
-        let probe = "contains \(directory.path) $fish_user_paths"
-        return (try? run(fish, ["-c", probe])) == 0
-    }
-
-    /// Where fish is, if it is anywhere the app can find without a shell.
-    ///
-    /// The two Homebrew prefixes and `/usr/local/bin` — fish is not shipped with macOS, so a
-    /// package manager put it there. Falls back to the login shell when that is fish itself.
-    public static func locateFish(loginShell: URL?) -> URL? {
-        if let loginShell, loginShell.lastPathComponent == "fish" { return loginShell }
-        return ["/opt/homebrew/bin/fish", "/usr/local/bin/fish", "/opt/local/bin/fish"]
-            .first { FileManager.default.isExecutableFile(atPath: $0) }
-            .map { URL(fileURLWithPath: $0) }
-    }
-
-    public static func defaultRun(_ executable: URL, _ args: [String]) throws -> Int32 {
-        try ChildProcess.run(executable: executable, args: args, timeout: 8).status
     }
 
     public static func reach(of link: URL, probe: ToolDiscovery.ShellProbe) -> Reach {

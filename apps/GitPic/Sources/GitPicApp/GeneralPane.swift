@@ -127,6 +127,8 @@ struct GeneralPane: View {
                 },
                 onCopySetup: model.copyCommandLineSetup,
                 shellConfiguration: model.shellConfiguration,
+                workingShell: model.commandLineWorkingShell,
+                failureShell: model.commandLineFailureShell,
                 onConfigureShell: { shell in Task { await model.configureShell(shell) } },
                 onUnconfigureShell: { shell in Task { await model.unconfigureShell(shell) } })
         }

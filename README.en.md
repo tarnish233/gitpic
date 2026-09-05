@@ -90,10 +90,13 @@ gives every shell it finds on the machine its own status row and an **Auto-confi
 | shell | what auto-configure does | removal |
 |---|---|---|
 | zsh | maintains a marked block in `~/.zshrc` (PATH + completion loading) | a Remove button, block only |
-| bash | the same, in `~/.bash_profile` | a Remove button |
-| fish | runs `fish_add_path ~/.local/bin` — a universal variable, no file touched | run `fish_remove_path` yourself |
+| bash | the same, in the first existing login file; creates `~/.bash_profile` only if none exists | a Remove button |
+| fish | saves a universal variable and verifies a fresh fish session; no startup-file edit | existing paths are not removed automatically |
 
-**GitPic only ever writes between its own markers**, and never touches a byte outside them:
+fish configuration preserves existing persistent paths and is safe to repeat. Progress and errors appear
+beside the fish row. A timeout or startup failure is shown as unknown, not as unconfigured.
+
+**For bash / zsh, GitPic only ever writes between its own markers**, and never touches a byte outside them:
 
 ```
 # >>> gitpic >>>

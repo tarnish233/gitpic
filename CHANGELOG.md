@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### fish auto-configuration that sticks
+
+- Fix fish staying unconfigured after auto-configuration, while preserving existing paths
+- Repeated configuration succeeds; saved changes are checked in a fresh terminal session
+- Show progress and actionable errors beside the shell being configured
+
+<!-- release-notes-end: user-facing summary above; implementation details below -->
+
+### App
+
+- Clear only the writing child's global shadow before `fish_add_path --universal` updates the original
+  persistent list. The flag alone is insufficient: the function builds its list from the visible variable
+  and can overwrite hidden, curated universal entries. Do not use `--no-config`: the installed fish was
+  measured not to persist universal variables in that mode.
+- Exit status 1 can mean an already-present path. Check the resulting value, then verify both persistence
+  and effective PATH in a separate login-interactive fish. Startup overrides are reported, never repaired
+  by rewriting user startup files.
+- Pass paths as separate argv values, including spaces, quotes and shell metacharacters. Framed responses
+  distinguish completed checks from timeouts, spawn failures and premature exits. Recognize existing PATH
+  configuration; nonfatal startup noise does not invalidate an answer the probe actually completed.
+- Run fish configuration on the background queue, with per-shell progress and errors. Reject stale refreshes
+  after both asynchronous probes. Remove the incorrect `fish_remove_path` hint and stop implying every
+  already-configured path was written by GitPic.
+- Real-fish regressions use temporary HOME/XDG directories and a Finder-like PATH, covering Cargo globals,
+  hidden universal entries, idempotence, interactive overrides, literal paths and false success. Both CI
+  and release tests install fish rather than relying solely on mocked exit statuses.
+
 ## [0.21.3] - 2026-09-05
 
 ### Two defects that could damage a shell configuration
