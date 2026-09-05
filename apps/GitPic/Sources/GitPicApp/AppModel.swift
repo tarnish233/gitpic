@@ -719,6 +719,12 @@ final class AppModel {
         reason: "还没有检查登录 shell。")
     private(set) var commandLineProbing = false
     private(set) var completionsInstalled = false
+    /// Per shell: present on this machine, and whether GitPic has configured it.
+    ///
+    /// A dictionary rather than three flags because the set is `Shell.allCases` filtered by what
+    /// the machine actually has, and a shell that is absent must render as nothing at all — not as
+    /// an unconfigured one the user is invited to fix.
+    private(set) var shellConfiguration: [CommandLineTool.Shell: Bool] = [:]
     /// Separate from ``busy``: this work belongs to 通用 and must not disable config saves.
     private(set) var commandLineWorking = false
     private(set) var commandLineFailure: String?
@@ -756,6 +762,104 @@ final class AppModel {
         guard commandLineProbeGeneration == generation else { return }
         commandLineReach = CommandLineTool.reach(of: CommandLineTool.link, probe: probe)
         commandLineProbing = false
+        await refreshShellConfiguration(loginShell: probe.shell)
+    }
+
+    /// Which shells GitPic has configured, and which look in use but are not configured yet.
+    ///
+    /// Read after the PATH probe because the login shell it names is what tells fish apart from a
+    /// fish that merely happens to be installed. zsh and bash are answered from files; fish needs
+    /// one `fish -c`, which is a bare fish with no config sourced and returns in tens of
+    /// milliseconds — not the 8-second login-and-interactive probe.
+    func refreshShellConfiguration(loginShell: URL?) async {
+        var found: [CommandLineTool.Shell: Bool] = [:]
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        for shell in CommandLineTool.Shell.allCases where shell.looksInUse(home: home) {
+            switch shell {
+            case .zsh, .bash:
+                found[shell] = CommandLineTool.isConfigured(shell, home: home)
+            case .fish:
+                guard let fish = CommandLineTool.locateFish(loginShell: loginShell) else { continue }
+                found[shell] = await Self.probeFishPath(fish: fish)
+            }
+        }
+        shellConfiguration = found
+    }
+
+    private nonisolated static func probeFishPath(fish: URL) async -> Bool {
+        await withCheckedContinuation { continuation in
+            commandLineProbeQueue.async {
+                continuation.resume(returning: CommandLineTool.fishPathConfigured(fish: fish))
+            }
+        }
+    }
+
+    /// Put GitPic's managed block in one shell's startup file, or run fish's own command.
+    func configureShell(_ shell: CommandLineTool.Shell) async {
+        guard !commandLineWorking else { return }
+        commandLineWorking = true
+        commandLineFailure = nil
+        defer { commandLineWorking = false }
+
+        do {
+            let result: CommandLineTool.Configured
+            switch shell {
+            case .zsh, .bash:
+                // Only add a PATH line the shell does not already get from somewhere else, so a
+                // curated PATH does not gain a duplicate entry.
+                result = try CommandLineTool.configure(
+                    shell, needsPath: !CommandLineTool.pathAlreadyConfigured(shell))
+            case .fish:
+                guard let fish = CommandLineTool.locateFish(
+                    loginShell: commandLineReach.shell) else {
+                    commandLineFailure = "找不到 fish，无法配置它的 PATH。"
+                    return
+                }
+                result = try CommandLineTool.configureFish(fish: fish)
+            }
+            await refreshCommandLine()
+            switch result {
+            case .wrote(let file, _):
+                notify(title: "已配置 \(shell.rawValue)",
+                       body: "已写入 \(file)，原文件备份为 \(file).gitpic.bak。开新终端后生效。")
+            case .unchanged(let file):
+                notify(title: "\(shell.rawValue) 无需改动", body: "\(file) 里的配置已经是最新的。")
+            case .ranCommand(let command):
+                notify(title: "已配置 \(shell.rawValue)", body: "已运行 \(command)。开新终端后生效。")
+            }
+        } catch {
+            commandLineFailure = Self.commandLineMessage(error)
+            Diagnostics.log("shell configuration failed for \(shell.rawValue):"
+                            + " \(String(describing: error))")
+            await refreshCommandLine()
+        }
+    }
+
+    /// Take GitPic's block back out of one shell's startup file.
+    ///
+    /// fish is not offered here: `fish_add_path` records a universal variable that
+    /// `fish_remove_path` would have to undo, and reaching into a shell's variable store to remove
+    /// an entry the user may have since curated is a different and less reversible act than
+    /// deleting a block we can see we wrote. The path stays, and the pane says so.
+    func unconfigureShell(_ shell: CommandLineTool.Shell) async {
+        guard !commandLineWorking, shell.startupFile != nil else { return }
+        commandLineWorking = true
+        commandLineFailure = nil
+        defer { commandLineWorking = false }
+
+        do {
+            let removed = try CommandLineTool.unconfigure(shell)
+            await refreshCommandLine()
+            if removed, let file = shell.startupFile {
+                notify(title: "已移除 \(shell.rawValue) 配置",
+                       body: "\(file) 里 GitPic 的块已删除，其余内容未改动。")
+            }
+        } catch {
+            commandLineFailure = Self.commandLineMessage(error)
+            Diagnostics.log("shell unconfiguration failed for \(shell.rawValue):"
+                            + " \(String(describing: error))")
+            await refreshCommandLine()
+        }
     }
 
     /// Install the link and all three completion scripts from the bundled CLI.
@@ -814,15 +918,29 @@ final class AppModel {
                 expecting: tools.gitpic,
                 completions: completions)
             Self.defaults.removeObject(forKey: Self.completionsVersionKey)
+            // The managed blocks go with the command they exist for. Leaving them behind would
+            // leave a `.zshrc` adding a directory to PATH and autoloading a completion for a
+            // command that is no longer there — the exact litter this feature promises to clean up
+            // after itself. fish is untouched for the reason `unconfigureShell` gives.
+            var unconfigured: [String] = []
+            for shell in CommandLineTool.Shell.allCases where shell.startupFile != nil {
+                if (try? CommandLineTool.unconfigure(shell)) == true {
+                    unconfigured.append(shell.rawValue)
+                }
+            }
             await refreshCommandLine()
 
+            let cleaned = unconfigured.isEmpty
+                ? ""
+                : "，并清理了 \(unconfigured.joined(separator: "、")) 的配置块"
             if result.preserved.isEmpty {
-                notify(title: "命令行工具已移除", body: "gitpic 链接和 GitPic 生成的补全已移除。")
+                notify(title: "命令行工具已移除",
+                       body: "gitpic 链接和 GitPic 生成的补全已移除\(cleaned)。")
             } else {
                 let shells = result.preserved.map(\.rawValue).joined(separator: "、")
                 notify(
                     title: "命令行工具已移除",
-                    body: "保留了内容被修改过的 \(shells) 补全文件。")
+                    body: "保留了内容被修改过的 \(shells) 补全文件\(cleaned)。")
             }
         } catch {
             commandLineFailure = Self.commandLineMessage(error)

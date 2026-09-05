@@ -14,15 +14,21 @@ struct CommandLineSection: View {
     let onRemove: () -> Void
     let onCopySetup: () -> Void
     let onCopyPath: (CommandLineTool.Shell) -> Void
+    let shellConfiguration: [CommandLineTool.Shell: Bool]
+    let onConfigureShell: (CommandLineTool.Shell) -> Void
+    let onUnconfigureShell: (CommandLineTool.Shell) -> Void
 
     @State private var confirmingRepoint = false
     @State private var confirmingOverwrite = false
     @State private var confirmingRemoval = false
 
-    /// Computed from the verdict rather than passed in: it is a couple of `fileExists` calls, and
-    /// deriving it here keeps "which shell was measured" in one place.
-    private var otherShells: [(shell: CommandLineTool.Shell, setUp: CommandLineTool.SetUp)] {
-        CommandLineTool.otherShellsNeedingPath(measured: reach.shell)
+    private func configuredDetail(_ shell: CommandLineTool.Shell) -> String {
+        if let file = shell.startupFile {
+            return "GitPic 在 \(file) 里维护一个带标记的块；原文件备份为 \(file).gitpic.bak。"
+        }
+        // fish's path is a universal variable, so there is no block to point at and nothing for a
+        // "移除" button to undo without reaching into a store the user may have curated since.
+        return "已通过 fish_add_path 记录（universal 变量）。移除请自行运行 fish_remove_path。"
     }
 
     var body: some View {
@@ -58,31 +64,43 @@ struct CommandLineSection: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
+            }
 
-                // Stated for every shell that looks in use and was not the one measured, because
-                // the verdict above is only ever true of one shell. The author's own machine is
-                // the case this exists for: `$SHELL` is zsh and `~/.zshrc` exports
-                // `~/.local/bin`, so the row above says "reachable" — while the fish used for
-                // actual work had never heard of the directory and `gitpic` was `Unknown
-                // command` there. Worded as a fact rather than a warning: the app cannot tell
-                // whether that shell's PATH is already right without spending 8 seconds per
-                // shell asking, and a false alarm here is worse than a line of information.
-                ForEach(otherShells, id: \.shell) { other in
-                    Text("\(other.shell.rawValue) 的 PATH 是单独配置的。\(other.setUp.why)")
+            // One row per shell the machine actually has. PATH and completion loading are both
+            // per-shell configuration, so there is no single answer to show — and the version that
+            // showed one said "reachable" to someone whose fish could not find the command.
+            //
+            // Buttons rather than lines to copy. The app used to refuse to touch a startup file at
+            // all and printed the text instead; that satisfied "never change someone's shell
+            // config behind their back" by leaving three blocks of manual instructions on screen.
+            // An explicit button, a named file, a backup and a removal serve the same intent and
+            // actually finish the job.
+            ForEach(CommandLineTool.Shell.allCases, id: \.self) { shell in
+                if let configured = shellConfiguration[shell] {
+                    LabeledContent(shell.rawValue) {
+                        HStack(spacing: 8) {
+                            Label(
+                                configured ? "已配置" : "未配置",
+                                systemImage: configured
+                                    ? "checkmark.circle.fill" : "circle.dashed")
+                                .foregroundStyle(configured ? .green : .secondary)
+                            if configured {
+                                if shell.startupFile != nil {
+                                    Button("移除") { onUnconfigureShell(shell) }
+                                        .controlSize(.small)
+                                        .disabled(working)
+                                }
+                            } else {
+                                Button("自动配置") { onConfigureShell(shell) }
+                                    .controlSize(.small)
+                                    .disabled(working)
+                            }
+                        }
+                    }
+                    Text(configured ? configuredDetail(shell) : shell.pathSetUp.why)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    HStack(spacing: 8) {
-                        Text(other.setUp.lines.joined(separator: "\n"))
-                            .font(.caption.monospaced())
-                            .textSelection(.enabled)
-                        Button {
-                            onCopyPath(other.shell)
-                        } label: {
-                            Image(systemName: "doc.on.doc")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("复制 \(other.shell.rawValue) 的 PATH 设置")
-                    }
+                        .textSelection(.enabled)
                 }
             }
 
@@ -94,8 +112,12 @@ struct CommandLineSection: View {
                     .foregroundStyle(completionsInstalled ? .green : .secondary)
             }
 
-            if completionsInstalled, let setUp = CommandLineTool.Shell.zsh.setUp {
-                Text("zsh 还需要把下面两行加入 \(setUp.file)。\(setUp.why)")
+            // Only when zsh is present *and* GitPic has not configured it. The managed block
+            // already carries these lines, so showing them beside a configured zsh was the pane
+            // telling the user to do by hand what it had just done for them.
+            if completionsInstalled, shellConfiguration[.zsh] == false,
+               let setUp = CommandLineTool.Shell.zsh.setUp {
+                Text("不想让 GitPic 改 \(setUp.file) 的话，手动加这两行也一样。\(setUp.why)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(setUp.lines.joined(separator: "\n"))

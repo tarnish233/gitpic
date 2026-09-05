@@ -67,17 +67,28 @@ macOS 自己的登录项，所以「系统设置 ▸ 通用 ▸ 登录项与扩�
 一份 `gitpic` 排在前面，它会把胜出的那条路径写出来，而不是假装装好了。
 
 它检查的是登录 shell（`$SHELL`），而 **PATH 是每个 shell 各自配置的** —— 所以如果你平时用的不是登录
-shell，那一行结论对你实际敲命令的地方不成立。面板会把机器上检测到的其他 shell 各自需要的那一行列出来
-（旁边有复制按钮）：
+shell，那一行结论对你实际敲命令的地方不成立。面板会给机器上检测到的每个 shell 单独一行状态，各带一个
+**「自动配置」**按钮：
 
-| shell | 让 `~/.local/bin` 生效 |
-|---|---|
-| zsh | `export PATH="$HOME/.local/bin:$PATH"` 加进 `~/.zshrc` |
-| bash | 同上，加进 `~/.bash_profile` |
-| fish | `fish_add_path ~/.local/bin`（运行一次即可，写的是 universal 变量，不用改文件） |
+| shell | 自动配置做什么 | 移除 |
+|---|---|---|
+| zsh | 在 `~/.zshrc` 里维护一个带标记的块（PATH + 补全加载） | 有「移除」按钮，只删块 |
+| bash | 同上，在 `~/.bash_profile` | 有「移除」按钮 |
+| fish | 运行 `fish_add_path ~/.local/bin`（universal 变量，不改文件） | 自行 `fish_remove_path` |
 
-zsh 补全另外还要 `fpath=(~/.zfunc $fpath)` 和 `autoload -Uz compinit && compinit`；bash 和 fish 的补全
-装好就能用，不需要任何设置。需要粘的行界面上都会摆出来 —— **GitPic 自己永远不会去改你的 shell 配置文件。**
+**GitPic 只在自己那对标记之间写字**，块外一个字节都不动：
+
+```
+# >>> gitpic >>>
+...
+# <<< gitpic <<<
+```
+
+第一次写入前会把原文件备份成 `<文件>.gitpic.bak`（之后的改写不会覆盖这份备份，所以它永远是「GitPic
+动手之前」的那一版）。重复配置是替换而不是叠加。移除命令行工具时这些块会一起清掉。已经自己配好
+PATH 的 shell 不会被加第二遍 —— 它会先看你的启动文件里有没有提到过。
+
+不想让 app 碰你的配置文件也行：面板上仍然会把需要粘的行摆出来，手动加完全等价。
 
 不装 App，或者用 Linux / Intel Mac / Windows / CI：从[发布页](https://github.com/tarnish233/gitpic/releases)
 下对应平台的压缩包解压出 `gitpic`（CI 在 `v*` tag 上构建；macOS 需

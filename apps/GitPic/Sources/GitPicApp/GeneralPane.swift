@@ -126,7 +126,10 @@ struct GeneralPane: View {
                     Task { await model.removeCommandLineTool() }
                 },
                 onCopySetup: model.copyCommandLineSetup,
-                onCopyPath: model.copyCommandLinePath)
+                onCopyPath: model.copyCommandLinePath,
+                shellConfiguration: model.shellConfiguration,
+                onConfigureShell: { shell in Task { await model.configureShell(shell) } },
+                onUnconfigureShell: { shell in Task { await model.unconfigureShell(shell) } })
         }
         .formChrome()
         // Both switches mirror state that 系统设置 can change, so both are re-read

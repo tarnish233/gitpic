@@ -60,15 +60,23 @@ genuinely provided. `~/.local/bin` rather than `/usr/local/bin` because it is us
 no privileged helper, and no authorisation prompt out of an unnotarised bundle. Two rules
 for anything touching `GitPicCore/CommandLineTool.swift`:
 
-- **It never edits a shell rc file.** `Shell.setUp` returns the lines for the user to paste
-  and no writer for them exists in either target; a source scan in `CommandLineToolTests`
-  fails if `.zshrc`, `.bash_profile`, `.bashrc` or `config.fish` appears anywhere under
-  `Sources/` outside that one literal.
-- **Reachability is measured with a login shell, never with `ProcessInfo.environment["PATH"]`.**
-  A Finder-launched app inherits only `/usr/bin:/bin:/usr/sbin:/sbin`, so the environment
-  reports "not on PATH" for everybody, including machines where it plainly is.
-  `ToolDiscovery.loginShellProbe` returns the *unresolved* winning PATH entry, which is the
-  spelling the link has to be compared against.
+- **It writes shell startup files, and only inside its own markers.** This reverses an earlier rule
+  that the app must never touch them, which was enforced by a source scan asserting no writer
+  existed. That rule's intent — never change someone's shell config behind their back — was being
+  met by leaving three blocks of manual instructions on screen instead, one per shell. The app now
+  writes between `# >>> gitpic >>>` and `# <<< gitpic <<<` in `~/.zshrc` and `~/.bash_profile`, via
+  `CommandLineTool.ManagedBlock`, and nothing else in either target may name a startup file — a
+  scan in `CommandLineToolTests` holds that confinement. The properties that replace the old
+  guarantee are behavioural and asserted on real files: bytes outside the markers preserved, writing
+  idempotent, removal byte-exact, and a `<name>.gitpic.bak` backup that later rewrites never
+  overwrite. fish is the exception and needs no block: `fish_add_path` records a universal variable.
+- **Reachability is measured with a login *and interactive* shell, never with
+  `ProcessInfo.environment["PATH"]`.** A Finder-launched app inherits only
+  `/usr/bin:/bin:/usr/sbin:/sbin`, so the environment reports "not on PATH" for everybody. `-i` as
+  well as `-l` because zsh reads `.zshrc` for interactive shells only — without it the probe missed
+  `~/.local/bin` exported from `.zshrc`, which is where this feature's own link lives. And PATH is
+  per-shell, so every verdict names the shell it is about: `Reach` carries a `shell` and
+  `ToolDiscovery.ShellProbe` records which one it asked.
 
 `apps/GitPic/` is a macOS menu-bar app (SwiftUI) that drives the CLI over its
 `--json` contract; `scripts/build-app.sh` builds the bundle with the `gitpic`

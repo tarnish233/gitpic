@@ -103,6 +103,100 @@ public enum CommandLineTool {
         }
     }
 
+    /// A delimited region of a shell startup file that GitPic owns and nothing else may occupy.
+    ///
+    /// **This replaces a flat refusal to touch startup files, and the refusal was the weaker
+    /// policy.** The app used to print the lines and let the user paste them, enforced by a source
+    /// scan asserting no writer existed. The intent behind that rule was "never change someone's
+    /// shell configuration behind their back" — but "do nothing" is only one way to satisfy it, and
+    /// it satisfied it by handing every user three blocks of manual instructions, one per shell.
+    /// An explicit button, a preview of the exact text, a backup of the file as it was before
+    /// GitPic ever touched it, and a removal that puts it back, serve the same intent and actually
+    /// finish the job. rustup, conda and nvm all take this shape.
+    ///
+    /// What the app promises instead, and what the tests hold it to:
+    ///
+    /// - Every byte outside the markers is preserved exactly, including a file with no trailing
+    ///   newline and a file whose content sits *after* the block.
+    /// - Writing twice replaces the block rather than appending a second one.
+    /// - Removal leaves the file byte-identical to what it was before the block existed.
+    /// - The first write backs the file up to `<name>.gitpic.bak`, so "before GitPic" is always
+    ///   recoverable even if the block is later edited by hand.
+    ///
+    /// The markers are the whole mechanism, so they are ordinary comments in every shell this
+    /// writes for and are matched as whole lines — a marker mentioned inside a heredoc or a string
+    /// on a longer line is not a marker.
+    public enum ManagedBlock {
+        public static let begin = "# >>> gitpic >>>"
+        public static let end = "# <<< gitpic <<<"
+
+        /// The line indices of an existing block, markers included, or `nil`.
+        ///
+        /// Takes the *first* `begin` and the first `end` after it. A file carrying two blocks is
+        /// already damaged; touching only the first is the repair that loses least, and the second
+        /// stays visible to the reader instead of being silently swallowed.
+        static func range(in lines: [String]) -> ClosedRange<Int>? {
+            guard let start = lines.firstIndex(where: { $0.trimmed == begin }) else { return nil }
+            guard let end = lines[start...].firstIndex(where: { $0.trimmed == Self.end })
+            else { return nil }
+            return start...end
+        }
+
+        public static func present(in text: String) -> Bool {
+            range(in: text.splitLines().body) != nil
+        }
+
+        /// `text` with `lines` as the block: replacing one that is there, else appended.
+        public static func applying(_ lines: [String], to text: String) -> String {
+            let split = text.splitLines()
+            var body = split.body
+            let block = [begin] + lines + [end]
+            if let existing = range(in: body) {
+                body.replaceSubrange(existing, with: block)
+            } else {
+                // **Exactly one blank line before an appended block, always — unless the file is
+                // empty.** Skipping it when the file already ended blank felt tidier and broke the
+                // round trip: `removing` eats one preceding blank unconditionally, so a file ending
+                // in a blank line came back one line shorter than it went in. The two have to agree
+                // about who owns that line, and "the block always brings its own" is the version
+                // that needs no lookahead. Measured by `roundTrip` over a file ending "a\nb\n\n".
+                body += (body.isEmpty ? [] : [""]) + block
+            }
+            return split.rejoin(body)
+        }
+
+        /// `text` with the block gone and nothing else altered.
+        ///
+        /// The blank line `applying` inserted before the block goes with it, so writing and then
+        /// removing is a round trip rather than a slow accumulation of empty lines.
+        public static func removing(from text: String) -> String {
+            let split = text.splitLines()
+            var body = split.body
+            guard var existing = range(in: body) else { return text }
+            if existing.lowerBound > 0, body[existing.lowerBound - 1].trimmed.isEmpty {
+                existing = (existing.lowerBound - 1)...existing.upperBound
+            }
+            body.removeSubrange(existing)
+            return split.rejoin(body)
+        }
+    }
+
+    /// A file's lines plus whether it ended with a newline, so a rejoin is byte-exact.
+    ///
+    /// Carrying the final-newline flag is what makes `removing(from: applying(x)) == x` hold for a
+    /// file that does not end in one — which is not a curiosity: a hand-edited `.zshrc` saved by an
+    /// editor that does not add the final newline is exactly the file this must not corrupt.
+    struct LineSplit {
+        let body: [String]
+        let endedWithNewline: Bool
+
+        func rejoin(_ lines: [String]) -> String {
+            if lines.isEmpty { return "" }
+            let joined = lines.joined(separator: "\n")
+            return endedWithNewline ? joined + "\n" : joined
+        }
+    }
+
     /// The three completion formats the app owns. This intentionally does not mirror every
     /// shell clap supports; these are the formats with conventional per-user autoload paths.
     public enum Shell: String, CaseIterable, Sendable, Hashable {
@@ -121,6 +215,62 @@ public enum CommandLineTool {
                 home.appendingPathComponent(".zfunc/_gitpic")
             case .fish:
                 home.appendingPathComponent(".config/fish/completions/gitpic.fish")
+            }
+        }
+
+        /// Whether this shell configures PATH by a file the app can manage, or by a command.
+        ///
+        /// fish is the odd one and it is the *better* one: `fish_add_path` records a universal
+        /// variable, so nothing has to be appended to a startup file at all and running it twice
+        /// changes nothing. zsh and bash have no equivalent — PATH there comes from a startup file
+        /// or from nowhere — which is why those two get a managed block.
+        public var startupFile: String? {
+            switch self {
+            case .zsh:  ".zshrc"
+            case .bash: ".bash_profile"
+            case .fish: nil
+            }
+        }
+
+        public func startupFileURL(home: URL) -> URL? {
+            startupFile.map(home.appendingPathComponent)
+        }
+
+        /// What GitPic writes between its markers for this shell.
+        ///
+        /// `needsPath` is false when the directory is already on that shell's PATH by some other
+        /// route, so the block does not add a duplicate entry to a PATH the user already curated.
+        ///
+        /// **zsh gets a `compdef` branch rather than a second `compinit`.** The block is appended,
+        /// so it lands *after* whatever a plugin manager did — and oh-my-zsh runs `compinit` at
+        /// `.zshrc:83` on the author's machine, long before the end of the file. Adding `~/.zfunc`
+        /// to `fpath` there is too late to be scanned. Re-running `compinit` does work and is what
+        /// the old manual instructions told people to paste, at the cost of a second full scan of
+        /// every directory in `fpath` on each shell start. Registering just this one completion
+        /// when `compdef` already exists costs nothing and is measured to work; the `compinit`
+        /// branch remains for a bare zsh where nothing has run it.
+        public func managedLines(needsPath: Bool) -> [String] {
+            let path = needsPath ? ["export PATH=\"$HOME/.local/bin:$PATH\""] : []
+            switch self {
+            case .zsh:
+                return path + [
+                    "fpath=(~/.zfunc $fpath)",
+                    "if (( $+functions[compdef] )); then",
+                    "  autoload -Uz _gitpic && compdef _gitpic gitpic",
+                    "else",
+                    "  autoload -Uz compinit && compinit",
+                    "fi",
+                ]
+            case .bash:
+                // bash-completion v2 autoloads from this directory on demand, but only once it has
+                // itself been sourced — macOS ships bash 3.2 with no bash-completion at all, so the
+                // guard is what keeps this line harmless on a machine that never installed it.
+                return path + [
+                    "[[ -r \"$HOME/.local/share/bash-completion/completions/gitpic\" ]] &&",
+                    "  . \"$HOME/.local/share/bash-completion/completions/gitpic\"",
+                ]
+            case .fish:
+                return path
             }
         }
 
@@ -222,6 +372,8 @@ public enum CommandLineTool {
         case notOwned(path: String)
         case missingCompletion(shell: Shell)
         case emptyCompletion(shell: Shell)
+        /// A shell whose PATH is not configured by a file the app can write.
+        case notFileConfigured(shell: Shell)
         case fileSystem(operation: String, path: String, reason: String)
 
         public var message: String {
@@ -238,6 +390,8 @@ public enum CommandLineTool {
                 "缺少 \(shell.rawValue) 补全文本，什么都没有移除。"
             case .emptyCompletion(let shell):
                 "gitpic 没有生成 \(shell.rawValue) 补全，什么都没有写入。"
+            case .notFileConfigured(let shell):
+                "\(shell.rawValue) 的 PATH 不是由启动文件配置的，没有可写入的块。"
             case .fileSystem(let operation, let path, let reason):
                 "\(operation)失败（\(path)）：\(reason)"
             }
@@ -287,6 +441,167 @@ public enum CommandLineTool {
 
     /// Interpret one login-shell probe without resolving the path it printed. The unresolved
     /// path is the fact that matters: it says which PATH entry wins, including a symlink.
+    /// What configuring one shell did.
+    public enum Configured: Sendable, Equatable {
+        /// The block was written or rewritten.
+        case wrote(file: String, lines: [String])
+        /// Already exactly right; nothing was touched.
+        case unchanged(file: String)
+        /// fish takes a command instead of a file.
+        case ranCommand(String)
+    }
+
+    /// Write GitPic's managed block into one shell's startup file, backing the file up first.
+    ///
+    /// The backup is written **only when there was no block yet**, so `<name>.gitpic.bak` always
+    /// means "this file before GitPic ever touched it" — the version worth having. Backing up on
+    /// every write would overwrite that with a copy that already contains our block, which is the
+    /// one state a backup is useless in.
+    ///
+    /// The write itself is atomic, so an interrupted save cannot leave a half-written `.zshrc` —
+    /// a file that would break every new shell the user opens, including the one they would need
+    /// to repair it.
+    @discardableResult
+    public static func configure(
+        _ shell: Shell,
+        needsPath: Bool,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) throws -> Configured {
+        guard let file = shell.startupFileURL(home: home), let name = shell.startupFile else {
+            throw Failure.notFileConfigured(shell: shell)
+        }
+        let lines = shell.managedLines(needsPath: needsPath)
+        let existing = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+        let updated = ManagedBlock.applying(lines, to: existing)
+        if updated == existing { return .unchanged(file: name) }
+
+        do {
+            if !ManagedBlock.present(in: existing),
+               FileManager.default.fileExists(atPath: file.path) {
+                let backup = file.appendingPathExtension("gitpic.bak")
+                if !FileManager.default.fileExists(atPath: backup.path) {
+                    try Data(existing.utf8).write(to: backup, options: .atomic)
+                }
+            }
+            try FileManager.default.createDirectory(
+                at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(updated.utf8).write(to: file, options: .atomic)
+        } catch {
+            throw fileFailure("写入 \(name)", at: file, error: error)
+        }
+        return .wrote(file: name, lines: lines)
+    }
+
+    /// Take GitPic's block back out of one shell's startup file, leaving everything else alone.
+    ///
+    /// The backup is deliberately *not* deleted. It is the only copy of the file from before the
+    /// app touched it, and a removal is exactly when someone might want it.
+    @discardableResult
+    public static func unconfigure(
+        _ shell: Shell,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) throws -> Bool {
+        guard let file = shell.startupFileURL(home: home), let name = shell.startupFile,
+              let existing = try? String(contentsOf: file, encoding: .utf8),
+              ManagedBlock.present(in: existing)
+        else { return false }
+        do {
+            try Data(ManagedBlock.removing(from: existing).utf8).write(to: file, options: .atomic)
+        } catch {
+            throw fileFailure("清理 \(name)", at: file, error: error)
+        }
+        return true
+    }
+
+    /// Whether GitPic's block is currently in this shell's startup file.
+    public static func isConfigured(
+        _ shell: Shell,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> Bool {
+        guard let file = shell.startupFileURL(home: home),
+              let text = try? String(contentsOf: file, encoding: .utf8)
+        else { return false }
+        return ManagedBlock.present(in: text)
+    }
+
+    /// Whether this shell's own startup files already put the install directory on PATH.
+    ///
+    /// A text search, not a probe: the question is only "would adding our line create a duplicate",
+    /// and for that a mention is enough evidence. Getting it wrong in either direction is cheap —
+    /// a missed mention adds a redundant PATH entry, a false one omits a line the user can still
+    /// add — whereas asking each shell costs up to 8 seconds apiece.
+    ///
+    /// Every file that shell reads is searched, not just the one the block goes in: the author's
+    /// own `~/.local/bin` export sits in `.zshrc` while Homebrew's `PATH` arrives from `.zprofile`,
+    /// and a block written to `.zshrc` that ignored `.zprofile` would duplicate whatever lives
+    /// there.
+    public static func pathAlreadyConfigured(
+        _ shell: Shell,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> Bool {
+        let files: [String]
+        switch shell {
+        case .zsh:  files = [".zshrc", ".zprofile", ".zshenv"]
+        case .bash: files = [".bash_profile", ".bashrc", ".profile"]
+        case .fish: files = [".config/fish/config.fish"]
+        }
+        return files.contains { name in
+            guard let text = try? String(
+                contentsOf: home.appendingPathComponent(name), encoding: .utf8)
+            else { return false }
+            // Outside our own block: a mention *inside* it is this app's work, not the user's, so
+            // counting it would make a rewrite decide the line is no longer needed and drop it.
+            return ManagedBlock.removing(from: text).contains(".local/bin")
+        }
+    }
+
+    /// Ask fish to record the install directory, using fish's own idempotent API.
+    ///
+    /// `fish_add_path` writes a *universal variable*, so nothing is appended to a startup file and
+    /// running it twice changes nothing — which is why fish needs no managed block and gets a
+    /// button that simply works. `run` is injected so the decision and the spawn can be tested
+    /// apart, the same seam `install(rename:)` uses.
+    @discardableResult
+    public static func configureFish(
+        fish: URL,
+        directory: URL = link.deletingLastPathComponent(),
+        run: (URL, [String]) throws -> Int32 = defaultRun
+    ) throws -> Configured {
+        let command = "fish_add_path \(directory.path)"
+        let status = try run(fish, ["-c", command])
+        guard status == 0 else {
+            throw Failure.fileSystem(
+                operation: "配置 fish 的 PATH", path: fish.path,
+                reason: "fish 以状态 \(status) 退出")
+        }
+        return .ranCommand(command)
+    }
+
+    /// Whether fish's universal variables already carry the install directory.
+    public static func fishPathConfigured(
+        fish: URL,
+        directory: URL = link.deletingLastPathComponent(),
+        run: (URL, [String]) throws -> Int32 = defaultRun
+    ) -> Bool {
+        let probe = "contains \(directory.path) $fish_user_paths"
+        return (try? run(fish, ["-c", probe])) == 0
+    }
+
+    /// Where fish is, if it is anywhere the app can find without a shell.
+    ///
+    /// The two Homebrew prefixes and `/usr/local/bin` — fish is not shipped with macOS, so a
+    /// package manager put it there. Falls back to the login shell when that is fish itself.
+    public static func locateFish(loginShell: URL?) -> URL? {
+        if let loginShell, loginShell.lastPathComponent == "fish" { return loginShell }
+        return ["/opt/homebrew/bin/fish", "/usr/local/bin/fish", "/opt/local/bin/fish"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+            .map { URL(fileURLWithPath: $0) }
+    }
+
+    public static func defaultRun(_ executable: URL, _ args: [String]) throws -> Int32 {
+        try ChildProcess.run(executable: executable, args: args, timeout: 8).status
+    }
+
     public static func reach(of link: URL, probe: ToolDiscovery.ShellProbe) -> Reach {
         // A probe that cannot even name the shell it asked has nothing to attribute a verdict to,
         // so it is `unknown` regardless of what it found.
@@ -469,5 +784,23 @@ public enum CommandLineTool {
             operation: operation,
             path: url.path,
             reason: (error as NSError).localizedDescription)
+    }
+}
+
+extension String {
+    var trimmed: String { trimmingCharacters(in: .whitespaces) }
+
+    /// Split for editing while keeping enough to put the file back exactly.
+    ///
+    /// An empty file yields no lines rather than one empty line, so appending a block to it does
+    /// not produce a leading blank.
+    func splitLines() -> CommandLineTool.LineSplit {
+        let ended = hasSuffix("\n")
+        var body = components(separatedBy: "\n")
+        if ended { body.removeLast() }
+        // Only a genuinely empty string has no lines. `"\n"` has one empty line, and collapsing
+        // the two together lost the difference — a file holding a single newline came back empty.
+        if isEmpty { body = [] }
+        return CommandLineTool.LineSplit(body: body, endedWithNewline: ended)
     }
 }

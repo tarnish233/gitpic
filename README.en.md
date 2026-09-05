@@ -85,17 +85,30 @@ names the path that wins rather than claiming success.
 
 What it asks is the login shell (`$SHELL`), and **PATH is configured per shell** — so if the shell
 you actually work in is not your login shell, that verdict does not hold where you type. The pane
-lists the line each other shell it can see needs, with a copy button:
+gives every shell it finds on the machine its own status row and an **Auto-configure** button:
 
-| shell | to put `~/.local/bin` on PATH |
-|---|---|
-| zsh | `export PATH="$HOME/.local/bin:$PATH"` in `~/.zshrc` |
-| bash | the same, in `~/.bash_profile` |
-| fish | `fish_add_path ~/.local/bin` — run once; it sets a universal variable, no file to edit |
+| shell | what auto-configure does | removal |
+|---|---|---|
+| zsh | maintains a marked block in `~/.zshrc` (PATH + completion loading) | a Remove button, block only |
+| bash | the same, in `~/.bash_profile` | a Remove button |
+| fish | runs `fish_add_path ~/.local/bin` — a universal variable, no file touched | run `fish_remove_path` yourself |
 
-zsh completions additionally want `fpath=(~/.zfunc $fpath)` and
-`autoload -Uz compinit && compinit`; bash and fish completions work as soon as they are installed.
-Every line to paste is shown in the pane — **GitPic never edits your shell config files itself.**
+**GitPic only ever writes between its own markers**, and never touches a byte outside them:
+
+```
+# >>> gitpic >>>
+...
+# <<< gitpic <<<
+```
+
+Before the first write the file is backed up to `<name>.gitpic.bak`, and later rewrites do not
+overwrite that backup — so it always means "before GitPic touched this". Configuring twice replaces
+the block rather than stacking a second one, and removing the command-line tool takes the blocks
+with it. A shell that already puts the directory on PATH is not given a second entry: the startup
+files are checked for an existing mention first.
+
+Prefer the app not to touch your files? The lines are still shown in the pane, and adding them by
+hand is exactly equivalent.
 
 Without the app, or on Linux / Intel Mac / Windows / CI: download the archive for your platform
 from the [releases page](https://github.com/tarnish233/gitpic/releases) and unpack `gitpic` (all

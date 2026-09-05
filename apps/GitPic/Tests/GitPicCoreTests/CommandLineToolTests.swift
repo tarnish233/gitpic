@@ -281,38 +281,31 @@ struct CommandLineToolTests {
         #expect(Set(reaches.map(\.label)).count == reaches.count)
     }
 
-    /// **The rule is that nothing writes a shell rc file — not that nothing may name one.**
+    /// **The "nothing writes a shell rc file" guarantee is gone, deliberately, and this is what
+    /// replaced it.**
     ///
-    /// This scan has now been too broad twice, in the same way each time, and the second time is
-    /// what fixed the shape. First it banned the *subject*, so it failed the moment
-    /// `ToolDiscovery.loginShellProbe` documented why it needs `-i` — a statement about which
-    /// startup files zsh reads, unmakeable without naming `.zshrc`. Comment lines were skipped and
-    /// it failed again as soon as `pathSetUp` had to tell a bash user which file to edit and
-    /// `looksInUse` had to check whether those files exist. Both of those are the app doing its
-    /// job, and neither writes anything.
+    /// That scan asserted an absence, and the absence was the whole policy: print the lines, let
+    /// the user paste them. It also went too broad twice in the same way — first banning the
+    /// *subject*, so it failed when `loginShellProbe` documented why it needs `-i`; then, with
+    /// comments skipped, blocking `pathSetUp` from naming the file a bash user must edit. Now the
+    /// app writes `.zshrc` on purpose, and the old scan **still passed**, because `configure`
+    /// writes through a `URL` variable rather than a literal. A tripwire whose name promises
+    /// something the code no longer does, and which passes anyway, is worse than no tripwire: it
+    /// is a false assurance in the exact place someone would look for the real one.
     ///
-    /// So the assertion is now about the hazard rather than the vocabulary: a line may name an rc
-    /// file, and may not name one *while calling something that writes*. A tripwire that catches
-    /// legitimate code gets reworded around rather than obeyed, and each rewording left the code
-    /// less able to explain itself than the version before.
-    ///
-    /// What no string scan can catch is a path assembled from pieces, or a write two lines below
-    /// the name. That is why the real guarantee is structural — `SetUp` is a value carrying text,
-    /// and no writer for one exists in either target — and this stays the weaker half. The
-    /// positive assertions at the end are the other half of the job: the guidance has to remain
-    /// *present*, since a silent way to satisfy "never writes an rc file" is to stop telling
-    /// anyone what to put in one.
-    @Test("no app source writes a shell rc file")
-    func rcFilesHaveNoWriter() throws {
-        let sources = try appSources()
-        let rcFiles = [".zshrc", ".zprofile", ".bash_profile", ".bashrc", "config.fish"]
-        let writers = [
-            ".write(", "write(to:", "createFile", "FileHandle", "removeItem",
-            "createSymbolicLink", "Darwin.rename", "appendingData", "\">>\"",
-        ]
-        var named = 0
+    /// What protects the user now is `ManagedBlock`'s behaviour — every byte outside the markers
+    /// preserved, writing idempotent, removal exact, the pre-GitPic file backed up — asserted
+    /// directly, on real files, in `ManagedBlockTests` and `ShellConfigurationTests`. This scan
+    /// holds the one thing those cannot: that the *subject* stays confined to one file.
+    /// Startup-file handling anywhere else would be a second implementation of the same delicate
+    /// edit, reviewed by nobody, and that is the regression worth catching.
+    @Test("shell startup files are handled in exactly one source file")
+    func startupFileHandlingIsConfined() throws {
+        let rcFiles = [".zshrc", ".zprofile", ".zshenv", ".bash_profile", ".bashrc", "config.fish"]
+        var offenders: [String] = []
+        var namedInOwner = 0
 
-        for source in sources {
+        for source in try appSources() {
             let text = try String(contentsOf: source, encoding: .utf8)
             for (offset, line) in text.split(separator: "\n", omittingEmptySubsequences: false)
                 .enumerated() {
@@ -321,25 +314,26 @@ struct CommandLineToolTests {
                     continue
                 }
                 guard rcFiles.contains(where: { line.contains($0) }) else { continue }
-                named += 1
-                if let writer = writers.first(where: { line.contains($0) }) {
-                    Issue.record("""
-                        \(source.lastPathComponent):\(offset + 1) names a shell rc file on a line \
-                        that calls `\(writer)`. GitPic hands the user text to paste and never \
-                        edits their shell configuration.
-                        \(trimmed)
-                        """)
+                if source.lastPathComponent == "CommandLineTool.swift" {
+                    namedInOwner += 1
+                } else {
+                    offenders.append("\(source.lastPathComponent):\(offset + 1)  \(trimmed)")
                 }
             }
         }
 
-        // The guidance still exists and still reaches the UI as text.
-        #expect(named > 0, "no source names an rc file at all — the setup guidance has gone")
-        #expect(CommandLineTool.Shell.zsh.setUp?.file == "~/.zshrc")
-        #expect(CommandLineTool.Shell.bash.pathSetUp.file == "~/.bash_profile")
-        // fish is the one whose PATH is set by a command rather than a file, so it must not be
-        // described as an rc file to edit.
-        #expect(!rcFiles.contains(CommandLineTool.Shell.fish.pathSetUp.file))
+        #expect(offenders.isEmpty, """
+            shell startup files are named outside CommandLineTool.swift. Editing one is delicate \
+            enough that it lives in a single reviewed place, behind ManagedBlock:
+            \(offenders.joined(separator: "\n"))
+            """)
+        #expect(namedInOwner > 0, "the owner names none — startup-file support has vanished")
+
+        // And the guidance the UI shows still exists. "Never writes an rc file" had a silent way to
+        // pass, and so does "handles them in one place": stop handling them at all.
+        #expect(CommandLineTool.Shell.zsh.startupFile == ".zshrc")
+        #expect(CommandLineTool.Shell.bash.startupFile == ".bash_profile")
+        #expect(CommandLineTool.Shell.fish.startupFile == nil)
     }
 
     private func atomicRename(_ source: URL, _ destination: URL) throws {
@@ -393,5 +387,267 @@ private struct CommandLineFixture {
 
     func remove() {
         try? FileManager.default.removeItem(at: root)
+    }
+}
+
+/// The delimited region GitPic writes into a shell startup file.
+///
+/// These are the tests that let the app touch `.zshrc` at all. The policy it replaced — print the
+/// lines, never write them — needed no proof beyond "no writer exists"; this one needs proof that
+/// everything outside the markers survives, that writing is idempotent, and that removal is exact.
+@Suite("Managed shell block")
+struct ManagedBlockTests {
+    private let lines = ["export PATH=\"$HOME/.local/bin:$PATH\"", "fpath=(~/.zfunc $fpath)"]
+
+    private func block(_ body: [String]) -> String {
+        ([CommandLineTool.ManagedBlock.begin] + body + [CommandLineTool.ManagedBlock.end])
+            .joined(separator: "\n")
+    }
+
+    @Test("appending to a file keeps every byte of it, newline or no newline")
+    func appendPreservesTheFile() {
+        for original in ["", "alias ll='ls -l'\n", "alias ll='ls -l'", "a\nb\n\n", "\n"] {
+            let written = CommandLineTool.ManagedBlock.applying(lines, to: original)
+            #expect(written.hasPrefix(original) || original.trimmed.isEmpty,
+                    "original text was altered: \(original.debugDescription) -> \(written.debugDescription)")
+            #expect(written.contains(block(lines)), "the block is not present verbatim")
+            #expect(CommandLineTool.ManagedBlock.present(in: written))
+        }
+    }
+
+    /// The property the whole design rests on: uninstall puts the file back.
+    @Test("write then remove is a byte-exact round trip")
+    func roundTrip() {
+        for original in [
+            "",
+            "alias ll='ls -l'\n",
+            "alias ll='ls -l'",            // no trailing newline, as some editors save
+            "a\nb\n\n",                    // trailing blank lines
+            "# comment only\n",
+            "eval \"$(brew shellenv)\"\nsource $ZSH/oh-my-zsh.sh\n",
+        ] {
+            let written = CommandLineTool.ManagedBlock.applying(lines, to: original)
+            let restored = CommandLineTool.ManagedBlock.removing(from: written)
+            #expect(restored == original,
+                    "round trip changed the file: \(original.debugDescription) -> \(restored.debugDescription)")
+        }
+    }
+
+    @Test("writing twice replaces the block instead of stacking a second one")
+    func idempotent() {
+        let once = CommandLineTool.ManagedBlock.applying(lines, to: "setopt AUTO_CD\n")
+        let twice = CommandLineTool.ManagedBlock.applying(lines, to: once)
+        #expect(once == twice)
+
+        // And a changed body replaces rather than appends, so an upgrade cannot leave two blocks.
+        let changed = CommandLineTool.ManagedBlock.applying(["export FOO=1"], to: once)
+        #expect(changed.components(separatedBy: CommandLineTool.ManagedBlock.begin).count == 2,
+                "a second begin marker appeared")
+        #expect(changed.contains("export FOO=1"))
+        #expect(!changed.contains("fpath=(~/.zfunc $fpath)"))
+        #expect(CommandLineTool.ManagedBlock.removing(from: changed) == "setopt AUTO_CD\n")
+    }
+
+    /// Content the user added *after* the block is the case a naive "truncate from the marker"
+    /// implementation destroys, and it is the likeliest real shape: the block goes in, and the
+    /// person keeps editing their file afterwards.
+    @Test("content after the block survives a rewrite and a removal")
+    func contentAfterTheBlock() {
+        let original = "before\n"
+        let written = CommandLineTool.ManagedBlock.applying(lines, to: original)
+        let edited = written + "\nafter=1\n"
+
+        let rewritten = CommandLineTool.ManagedBlock.applying(["export NEW=1"], to: edited)
+        #expect(rewritten.contains("before"))
+        #expect(rewritten.contains("after=1"), "the user's later edit was lost")
+        #expect(rewritten.contains("export NEW=1"))
+
+        let removed = CommandLineTool.ManagedBlock.removing(from: rewritten)
+        #expect(removed == "before\n\nafter=1\n", "\(removed.debugDescription)")
+    }
+
+    /// The markers are the entire mechanism, so a line that merely mentions one is not one.
+    @Test("a marker inside a longer line is not a marker")
+    func markersAreWholeLines() {
+        let decoy = "echo \"\(CommandLineTool.ManagedBlock.begin)\" >> log\n"
+        #expect(!CommandLineTool.ManagedBlock.present(in: decoy))
+        #expect(CommandLineTool.ManagedBlock.removing(from: decoy) == decoy)
+
+        // Indentation is not a difference: a marker the user re-indented is still ours to replace.
+        let indented = "  \(CommandLineTool.ManagedBlock.begin)\n  x\n  \(CommandLineTool.ManagedBlock.end)\n"
+        #expect(CommandLineTool.ManagedBlock.present(in: indented))
+    }
+
+    @Test("removing from a file that has no block changes nothing")
+    func removingNothing() {
+        for original in ["", "alias ll='ls -l'\n", "no block here"] {
+            #expect(CommandLineTool.ManagedBlock.removing(from: original) == original)
+        }
+    }
+
+    /// A `begin` with no `end` is not a block. Treating it as one would let a half-written file
+    /// swallow everything below it on the next write.
+    @Test("an unterminated begin marker is not treated as a block")
+    func unterminatedBlock() {
+        let broken = "\(CommandLineTool.ManagedBlock.begin)\nexport X=1\nkeep=me\n"
+        #expect(!CommandLineTool.ManagedBlock.present(in: broken))
+        #expect(CommandLineTool.ManagedBlock.removing(from: broken) == broken)
+        // The next write appends a proper block and leaves the damaged lines visible rather than
+        // absorbing them.
+        let written = CommandLineTool.ManagedBlock.applying(lines, to: broken)
+        #expect(written.contains("keep=me"))
+    }
+}
+
+/// Writing the block into a real file, and taking it back out.
+@Suite("Shell startup configuration")
+struct ShellConfigurationTests {
+    private func makeHome() throws -> URL {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitpic-cfg-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        return home
+    }
+
+    @Test("configuring writes the block, backs the original up, and is idempotent")
+    func configureZsh() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let rc = home.appendingPathComponent(".zshrc")
+        let original = "source $ZSH/oh-my-zsh.sh\n"
+        try Data(original.utf8).write(to: rc)
+
+        let first = try CommandLineTool.configure(.zsh, needsPath: true, home: home)
+        #expect(first == .wrote(file: ".zshrc", lines:
+            CommandLineTool.Shell.zsh.managedLines(needsPath: true)))
+        #expect(CommandLineTool.isConfigured(.zsh, home: home))
+
+        let written = try String(contentsOf: rc, encoding: .utf8)
+        #expect(written.hasPrefix(original), "the user's own line was disturbed")
+        #expect(written.contains("compdef _gitpic gitpic"))
+
+        // The backup is the file from *before* GitPic, which is the only version worth keeping.
+        let backup = rc.appendingPathExtension("gitpic.bak")
+        #expect(try String(contentsOf: backup, encoding: .utf8) == original)
+
+        // Second run changes nothing at all, including the backup.
+        #expect(try CommandLineTool.configure(.zsh, needsPath: true, home: home)
+                == .unchanged(file: ".zshrc"))
+        #expect(try String(contentsOf: rc, encoding: .utf8) == written)
+        #expect(try String(contentsOf: backup, encoding: .utf8) == original)
+    }
+
+    /// The backup must not be overwritten by a later write, or it stops meaning "before GitPic".
+    @Test("a rewrite keeps the original backup rather than snapshotting our own block")
+    func backupSurvivesARewrite() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let rc = home.appendingPathComponent(".zshrc")
+        let original = "setopt AUTO_CD\n"
+        try Data(original.utf8).write(to: rc)
+
+        try CommandLineTool.configure(.zsh, needsPath: true, home: home)
+        try CommandLineTool.configure(.zsh, needsPath: false, home: home)   // different body
+
+        let backup = rc.appendingPathExtension("gitpic.bak")
+        #expect(try String(contentsOf: backup, encoding: .utf8) == original,
+                "the backup now contains a version that already had our block in it")
+        let text = try String(contentsOf: rc, encoding: .utf8)
+        #expect(text.components(separatedBy: CommandLineTool.ManagedBlock.begin).count == 2,
+                "a second block appeared")
+        #expect(!text.contains("export PATH"), "needsPath: false still wrote the PATH line")
+    }
+
+    @Test("unconfiguring restores the file exactly and leaves the backup in place")
+    func unconfigure() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let rc = home.appendingPathComponent(".zshrc")
+        let original = "alias g=git\n\nexport EDITOR=nvim\n"
+        try Data(original.utf8).write(to: rc)
+
+        try CommandLineTool.configure(.zsh, needsPath: true, home: home)
+        #expect(try CommandLineTool.unconfigure(.zsh, home: home))
+        #expect(try String(contentsOf: rc, encoding: .utf8) == original,
+                "removal did not restore the file byte for byte")
+        #expect(!CommandLineTool.isConfigured(.zsh, home: home))
+
+        // The backup is deliberately kept: a removal is exactly when someone may want it.
+        #expect(FileManager.default.fileExists(
+            atPath: rc.appendingPathExtension("gitpic.bak").path))
+
+        // Removing again is a no-op that reports it did nothing.
+        #expect(try CommandLineTool.unconfigure(.zsh, home: home) == false)
+    }
+
+    @Test("configuring a shell with no startup file is refused rather than guessed at")
+    func fishHasNoBlock() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        #expect(CommandLineTool.Shell.fish.startupFile == nil)
+        #expect(throws: CommandLineTool.Failure.notFileConfigured(shell: .fish)) {
+            try CommandLineTool.configure(.fish, needsPath: true, home: home)
+        }
+    }
+
+    /// `needsPath` exists so a shell that already exports the directory does not get a duplicate.
+    @Test("an existing mention outside our block counts, one inside it does not")
+    func pathAlreadyConfigured() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let rc = home.appendingPathComponent(".zshrc")
+
+        try Data("setopt AUTO_CD\n".utf8).write(to: rc)
+        #expect(!CommandLineTool.pathAlreadyConfigured(.zsh, home: home))
+
+        try Data("export PATH=\"$HOME/.local/bin:$PATH\"\n".utf8).write(to: rc)
+        #expect(CommandLineTool.pathAlreadyConfigured(.zsh, home: home))
+
+        // A mention *inside* our own block is our work, not the user's. Counting it would make the
+        // next rewrite decide the line is redundant and drop it, undoing PATH on the third run.
+        try Data("setopt AUTO_CD\n".utf8).write(to: rc)
+        try CommandLineTool.configure(.zsh, needsPath: true, home: home)
+        #expect(!CommandLineTool.pathAlreadyConfigured(.zsh, home: home),
+                "our own block was mistaken for the user's configuration")
+
+        // Any file the shell reads counts, not just the one the block goes in.
+        try Data("setopt AUTO_CD\n".utf8).write(to: rc)
+        try Data("path+=(~/.local/bin)\n".utf8)
+            .write(to: home.appendingPathComponent(".zprofile"))
+        #expect(CommandLineTool.pathAlreadyConfigured(.zsh, home: home))
+    }
+
+    /// fish is configured by a command, so the test asserts which command — no fish needed.
+    @Test("fish is configured with fish_add_path, and the probe asks with contains")
+    func fishUsesItsOwnApi() throws {
+        var calls: [[String]] = []
+        let fish = URL(fileURLWithPath: "/opt/homebrew/bin/fish")
+        let dir = URL(fileURLWithPath: "/Users/example/.local/bin")
+
+        let result = try CommandLineTool.configureFish(fish: fish, directory: dir) { _, args in
+            calls.append(args); return 0
+        }
+        #expect(result == .ranCommand("fish_add_path /Users/example/.local/bin"))
+        #expect(calls == [["-c", "fish_add_path /Users/example/.local/bin"]])
+
+        // Captured rather than asserted inside the closure: an `#expect` nested in an argument to
+        // `#expect` expands recursively and does not compile.
+        var probeArgs: [[String]] = []
+        let configured = CommandLineTool.fishPathConfigured(fish: fish, directory: dir) { _, args in
+            probeArgs.append(args)
+            return 0
+        }
+        #expect(configured)
+        #expect(probeArgs == [["-c", "contains /Users/example/.local/bin $fish_user_paths"]])
+        #expect(!CommandLineTool.fishPathConfigured(fish: fish, directory: dir) { _, _ in 1 })
+        // A fish that cannot be run at all is "not configured", never a crash.
+        #expect(!CommandLineTool.fishPathConfigured(fish: fish, directory: dir) { _, _ in
+            throw CommandLineTool.Failure.notOwned(path: "x")
+        })
+
+        // A non-zero exit from the write is an error, not a silent success.
+        #expect(throws: (any Error).self) {
+            try CommandLineTool.configureFish(fish: fish, directory: dir) { _, _ in 7 }
+        }
     }
 }
