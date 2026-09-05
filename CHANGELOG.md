@@ -4,6 +4,45 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.3] - 2026-09-05
+
+### Two defects that could damage a shell configuration
+
+- A startup file that cannot be read is now refused, not treated as empty and overwritten
+- bash's block goes in the file bash actually reads, instead of creating a `.bash_profile` that shadows `.profile`
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+Both were introduced and released in 0.21.2, and both could genuinely lose a user's configuration.
+Both were raised by Codex while reviewing the *next* step's UI plan, and both were reproduced by a
+test before being fixed.
+
+### App
+
+- **An undecodable startup file is no longer treated as an empty one.** It was
+  `(try? String(contentsOf:)) ?? ""`, so a `.zshrc` that exists but is not valid UTF-8 — one latin-1
+  comment is enough — read as the empty string: the backup was written from *that*, and the file
+  replaced with nothing but GitPic's block. Measured: a 51-byte `.zshrc` carrying
+  `export SECRET_TOKEN=…` came out as 223 bytes of block with a 0-byte `.gitpic.bak` beside it. The
+  file was gone, and the backup exists precisely to prevent that. A file that cannot be read is now a
+  refusal: nothing is written, and the error names the file, because the only safe repair is a human
+  looking at it.
+- **bash's block goes in the file bash actually reads.** `man bash` is explicit: a login shell sources
+  `~/.bash_profile`, `~/.bash_login`, `~/.profile` — "the first one that exists and is readable". The
+  target was unconditionally `.bash_profile`, while "this shell looks in use" was satisfied by a mere
+  `.bashrc`. So a user whose login configuration lived in `.profile` and who pressed *auto-configure*
+  got a **new** `.bash_profile`, and from then on bash never read `.profile` again: their PATH,
+  exports and aliases still on disk, silently no longer loaded. Worse than never configuring bash,
+  and reachable from a button labelled 自动配置. Now it takes the first of the three that exists, and
+  creates `.bash_profile` only when none does — at which point it shadows nothing.
+- Because the block can land in `.profile`, which `sh` reads too, the bash block's completion guard
+  is `[` rather than `[[`. `[[` is a bash keyword that a POSIX shell reports as a syntax error, which
+  would break every new `sh` the user starts. Asserted by running `/bin/sh -n` over the block.
+- Removed dead code left by 0.21.2: `onCopyPath` was threaded all the way through and never invoked,
+  making `copyCommandLinePath` unreachable. Three comments still claiming the app never modifies a
+  shell configuration file were rewritten — false since 0.21.2, when AGENTS.md was updated and the
+  code was not.
+
 ## [0.21.2] - 2026-09-05
 
 ### bash, zsh and fish all get a one-click auto-configure

@@ -4,6 +4,37 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.21.3] - 2026-09-05
+
+### 修两个会弄坏 shell 配置的缺陷
+
+- 读不出来的启动文件现在拒绝写入，而不是被当成空文件覆盖掉
+- bash 的块写进 bash 真正会读的那个文件，不再凭空造出 `.bash_profile` 把 `.profile` 挤掉
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+两个都是 0.21.2 引入并发布出去的，都能真的弄丢用户的配置。都由 Codex 在审查下一步 UI 方案时指出，都在
+修复前用测试复现过。
+
+### App
+
+- **读不出来的启动文件不再被当成空文件。** 原来是 `(try? String(contentsOf:)) ?? ""`，所以一个存在但不是
+  合法 UTF-8 的 `.zshrc`（一句 latin-1 注释就够）会读成空串：备份从这个空串写出来，原文件被整个覆盖成只有
+  GitPic 的块。实测：一份 51 字节、含 `export SECRET_TOKEN=…` 的 `.zshrc` 变成 223 字节的块，旁边是 0 字节
+  的 `.gitpic.bak` —— 文件没了，而备份正是为了防止这一种情况才存在的。现在读不出来就是拒绝：什么都不写，
+  错误里点名那个文件，因为唯一安全的修法是人去看一眼。
+- **bash 的块写进 bash 真正读的那个文件。** `man bash` 写明 login shell 读 `~/.bash_profile`、
+  `~/.bash_login`、`~/.profile` 中「第一个存在且可读的」。原来无条件选 `.bash_profile`，而「这个 shell
+  在用」只要有 `.bashrc` 就成立 —— 所以一个把登录配置放在 `.profile` 的用户点下「自动配置」，会**得到一个
+  新的** `.bash_profile`，从此 bash 再也不读 `.profile`：他的 PATH、export、alias 还在磁盘上，只是静默不
+  再加载。这比压根不配置 bash 更糟，而且是从一个叫「自动配置」的按钮点出来的。现在取三者中第一个存在的，
+  三个都没有时才创建 `.bash_profile`（此时不遮蔽任何东西）。
+- 因为块可能落进 `.profile`，而 `.profile` 也被 `sh` 读，bash 块里的补全守卫从 `[[` 改成 `[` ——
+  `[[` 是 bash 关键字，POSIX shell 会报语法错误，那会弄坏用户每一个新开的 `sh`。由 `/bin/sh -n` 实跑断言。
+- 清掉 0.21.2 留下的死代码：`onCopyPath` 一路传下去却从没被调用，`copyCommandLinePath` 因此不可达。
+  三处仍在宣称「app 永不修改 shell 配置文件」的注释也改了 —— 0.21.2 起这句已经是假的，我当时改了 AGENTS.md
+  却漏了代码里的。
+
 ## [0.21.2] - 2026-09-05
 
 ### bash、zsh、fish 都能一键自动配置，不用再手动粘行
