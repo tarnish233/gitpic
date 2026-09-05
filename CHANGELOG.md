@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Simpler command-line settings
+
+- One compact card shows installation status and the selected shell's setup action
+- Paths, manual instructions and removal move into Advanced options
+- Progress and errors remain visible instead of disappearing into a disclosure
+
+<!-- release-notes-end: user-facing summary above; implementation details below -->
+
+### App
+
+- Replace three parallel shell status/explanation stacks with a native segmented picker and one shell's
+  controls. Healthy PATH details and completion information move under a collapsed Advanced disclosure;
+  PATH conflicts, inconclusive probes and configuration failures stay visible on the main card.
+- Keep the selected shell's named-file/backup consent beside its action. Preserve confirmation for file
+  replacement, link repointing and command removal; shared fish universal paths remain non-removable.
+- Refreshes preserve a valid choice and fall back only when it disappears. Returning to General during
+  configuration selects the shell in flight. Add selection and UI-wiring regressions, and inspect real
+  SwiftUI components across states, appearances and window widths.
+
 ## [0.21.4] - 2026-09-05
 
 ### fish auto-configuration that sticks

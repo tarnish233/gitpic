@@ -84,8 +84,10 @@ which `gitpic` **a named shell** actually finds. If another `gitpic` sits earlie
 names the path that wins rather than claiming success.
 
 What it asks is the login shell (`$SHELL`), and **PATH is configured per shell** — so if the shell
-you actually work in is not your login shell, that verdict does not hold where you type. The pane
-gives every shell it finds on the machine its own status row and an **Auto-configure** button:
+you actually work in is not your login shell, that verdict does not hold where you type. Choose bash,
+zsh or fish in the shell picker to see just that shell's status and **Auto-configure** action; other
+shells are not unfinished tasks. Installation paths, full PATH diagnostics, manual setup and removal
+live under the collapsed Advanced disclosure. Errors and PATH conflicts remain visible:
 
 | shell | what auto-configure does | removal |
 |---|---|---|

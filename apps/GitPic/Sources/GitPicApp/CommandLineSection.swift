@@ -2,7 +2,8 @@ import Foundation
 import SwiftUI
 import GitPicCore
 
-/// The user-owned terminal command and completions installed by GitPic.app.
+/// One compact card: install once, choose a shell, configure it. Technical details and removal
+/// are secondary; failures and conflicting PATH results must never be hidden in the disclosure.
 struct CommandLineSection: View {
     let status: CommandLineTool.Status
     let reach: CommandLineTool.Reach
@@ -20,170 +21,74 @@ struct CommandLineSection: View {
     let onConfigureShell: (CommandLineTool.Shell) -> Void
     let onUnconfigureShell: (CommandLineTool.Shell) -> Void
 
+    @State private var selectedShell: CommandLineTool.Shell?
+    @State private var showingDetails = false
     @State private var confirmingRepoint = false
     @State private var confirmingOverwrite = false
     @State private var confirmingRemoval = false
 
-    private func configuredDetail(_ shell: CommandLineTool.Shell) -> String {
-        if let file = shell.startupFile(home: FileManager.default.homeDirectoryForCurrentUser) {
-            return "GitPic 在 \(file) 里维护一个带标记的块；原文件备份为 \(file).gitpic.bak。"
-        }
-        // fish's path is a universal variable, so there is no block to point at and nothing for a
-        // "移除" button to undo without reaching into a store the user may have curated since.
-        return "已确认新启动的 fish 的 PATH 包含安装目录。GitPic 不会自动移除用户已有的 fish 路径。"
-    }
-
     var body: some View {
         Section("命令行") {
-            LabeledContent("安装位置") {
-                Text(CommandLineTool.link.path)
-                    .font(.caption.monospaced())
-                    .textSelection(.enabled)
-            }
+            VStack(alignment: .leading, spacing: 12) {
+                installationRow
 
-            LabeledContent("命令") {
-                Label(status.label, systemImage: statusAppearance.icon)
-                    .foregroundStyle(statusAppearance.color)
-            }
-            Text(status.detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-
-            LabeledContent("终端") {
-                if probing {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("正在检查 PATH…")
-                    }
-                } else {
-                    Label(reach.label, systemImage: reachAppearance.icon)
-                        .foregroundStyle(reachAppearance.color)
-                }
-            }
-            if !probing {
-                Text(reach.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
-
-            // One row per shell the machine actually has. PATH and completion loading are both
-            // per-shell configuration, so there is no single answer to show — and the version that
-            // showed one said "reachable" to someone whose fish could not find the command.
-            //
-            // Buttons rather than lines to copy. The app used to refuse to touch a startup file at
-            // all and printed the text instead; that satisfied "never change someone's shell
-            // config behind their back" by leaving three blocks of manual instructions on screen.
-            // An explicit button, a named file, a backup and a removal serve the same intent and
-            // actually finish the job.
-            ForEach(CommandLineTool.Shell.allCases, id: \.self) { shell in
-                if let configuration = shellConfiguration[shell] {
-                    LabeledContent(shell.rawValue) {
-                        HStack(spacing: 8) {
-                            if workingShell == shell {
-                                ProgressView().controlSize(.small)
-                                Text("正在处理并验证…").foregroundStyle(.secondary)
-                            } else {
-                                let appearance = shellAppearance(configuration)
-                                Label(configuration.label, systemImage: appearance.icon)
-                                    .foregroundStyle(appearance.color)
-                            }
-                            if configuration == .configured {
-                                if shell.usesStartupFile {
-                                    Button("移除") { onUnconfigureShell(shell) }
-                                        .controlSize(.small)
-                                        .disabled(working)
-                                }
-                            } else {
-                                Button("自动配置") { onConfigureShell(shell) }
-                                    .controlSize(.small)
-                                    .disabled(working)
-                            }
-                        }
-                    }
-                    if failureShell == shell, let failure {
-                        failureLabel(failure)
-                    } else if case .unknown(let reason) = configuration {
-                        failureLabel(reason)
-                    } else {
-                        Text(configuration == .configured ? configuredDetail(shell) : shell.pathSetUp.why)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                }
-            }
-
-            LabeledContent("补全") {
-                Label(
-                    completionsInstalled ? "bash、zsh、fish 已安装" : "尚未完整安装",
-                    systemImage: completionsInstalled
-                        ? "checkmark.circle.fill" : "circle.dashed")
-                    .foregroundStyle(completionsInstalled ? .green : .secondary)
-            }
-
-            // Only when zsh is present *and* GitPic has not configured it. The managed block
-            // already carries these lines, so showing them beside a configured zsh was the pane
-            // telling the user to do by hand what it had just done for them.
-            if completionsInstalled, shellConfiguration[.zsh] == .notConfigured,
-               let setUp = CommandLineTool.Shell.zsh.setUp {
-                Text("不想让 GitPic 改 \(setUp.file) 的话，手动加这两行也一样。\(setUp.why)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(setUp.lines.joined(separator: "\n"))
-                    .font(.caption.monospaced())
-                    .textSelection(.enabled)
-                Button("复制 zsh 设置", systemImage: "doc.on.doc", action: onCopySetup)
-                    .controlSize(.small)
-            }
-
-            if let failure, failureShell.flatMap({ shellConfiguration[$0] }) == nil {
-                failureLabel(failure)
-            }
-
-            HStack(spacing: 8) {
-                if showsInstallButton {
-                    Button(action: beginInstall) {
-                        ZStack {
-                            Text(installTitle).opacity(working ? 0 : 1)
-                            if working { ProgressView().controlSize(.small) }
-                        }
-                    }
-                    .disabled(installDisabled || working)
+                if status == .linked {
+                    Divider()
+                    shellSettings
                 }
 
-                if case .linked = status {
-                    Button("移除命令行工具", role: .destructive) {
-                        confirmingRemoval = true
-                    }
-                    .disabled(working)
+                // An error from another shell (or from installation/removal) remains visible
+                // even if the user changes the picker or the failed shell disappears.
+                if let failure, status != .linked || failureShell != selectedShell
+                    || selectedShell == nil {
+                    CommandLineNotice(message: failure)
                 }
+
+                if status == .linked, !probing, let warning = reachWarning {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        CommandLineNotice(message: warning)
+                        Spacer(minLength: 0)
+                        Button("详情") { showingDetails = true }
+                            .controlSize(.small)
+                    }
+                }
+
+                Divider()
+                DisclosureGroup("高级选项", isExpanded: $showingDetails) {
+                    CommandLineDetails(
+                        status: status, reach: reach, probing: probing,
+                        completionsInstalled: completionsInstalled, working: working,
+                        shell: selectedShell,
+                        configuration: selectedShell.flatMap { shellConfiguration[$0] },
+                        onCopySetup: onCopySetup, onUnconfigure: onUnconfigureShell,
+                        onRemove: { confirmingRemoval = true })
+                        .padding(.top, 12)
+                }
+                .font(.callout)
             }
-            .controlSize(.small)
+            .padding(.vertical, 4)
         }
-        .confirmationDialog(
-            "让命令行链接改为当前 GitPic？",
-            isPresented: $confirmingRepoint
-        ) {
+        .onChange(of: availableShells, initial: true) { _, available in
+            selectedShell = CommandLineTool.preferredShell(
+                current: workingShell ?? selectedShell ?? (failure == nil ? nil : failureShell),
+                available: available, loginShell: reach.shell)
+        }
+        .onChange(of: workingShell, initial: true) { _, shell in
+            if let shell, availableShells.contains(shell) { selectedShell = shell }
+        }
+        .confirmationDialog("让命令行链接改为当前 GitPic？", isPresented: $confirmingRepoint) {
             Button("重新指向", role: .destructive) { onInstall(true) }
             Button("取消", role: .cancel) {}
         } message: {
             Text(status.detail)
         }
-        .confirmationDialog(
-            "替换现有的 gitpic 文件？",
-            isPresented: $confirmingOverwrite
-        ) {
+        .confirmationDialog("替换现有的 gitpic 文件？", isPresented: $confirmingOverwrite) {
             Button("替换文件", role: .destructive) { onInstall(true) }
             Button("取消", role: .cancel) {}
         } message: {
             Text("\(CommandLineTool.link.path) 不是符号链接。替换会永久覆盖这个文件。")
         }
-        .confirmationDialog(
-            "移除命令行工具？",
-            isPresented: $confirmingRemoval
-        ) {
+        .confirmationDialog("移除命令行工具？", isPresented: $confirmingRemoval) {
             Button("移除", role: .destructive, action: onRemove)
             Button("取消", role: .cancel) {}
         } message: {
@@ -191,39 +96,87 @@ struct CommandLineSection: View {
         }
     }
 
-    private func failureLabel(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.caption)
-            .foregroundStyle(.orange)
-            .textSelection(.enabled)
-    }
-
-    private func shellAppearance(
-        _ configuration: CommandLineTool.ShellConfiguration
-    ) -> (icon: String, color: Color) {
-        switch configuration {
-        case .configured: ("checkmark.circle.fill", .green)
-        case .notConfigured: ("circle.dashed", .secondary)
-        case .unknown: ("questionmark.circle", .orange)
+    private var installationRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "terminal")
+                .font(.title2)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("gitpic").font(.headline.monospaced())
+                Text(installationCaption)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            if working, workingShell == nil || workingShell != selectedShell || status != .linked {
+                ProgressView().controlSize(.small)
+                    .accessibilityLabel("正在更新命令行工具")
+            } else if showsInstallButton {
+                Button(installTitle, action: beginInstall)
+                    .controlSize(.small)
+                    .disabled(installDisabled || working)
+            } else {
+                Label("已安装", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.callout)
+            }
         }
     }
 
-    private var statusAppearance: (icon: String, color: Color) {
+    @ViewBuilder
+    private var shellSettings: some View {
+        if let selectedShell, let configuration = shellConfiguration[selectedShell] {
+            Picker("配置终端", selection: $selectedShell) {
+                ForEach(availableShells, id: \.self) { shell in
+                    Text(shell.rawValue).tag(Optional(shell))
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(working)
+
+            CommandLineShellRow(
+                shell: selectedShell, configuration: configuration,
+                working: working, workingShell: workingShell,
+                failure: failureShell == selectedShell ? failure : nil,
+                onConfigure: { onConfigureShell(selectedShell) })
+        } else if probing {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("正在检测可用终端…").foregroundStyle(.secondary)
+            }
+        } else {
+            Text("未检测到可配置的终端。可在高级选项查看安装信息。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var availableShells: [CommandLineTool.Shell] {
+        CommandLineTool.Shell.allCases.filter { shellConfiguration[$0] != nil }
+    }
+
+    private var installationCaption: String {
         switch status {
-        case .linked:          ("checkmark.circle.fill", .green)
-        case .notInstalled:    ("square.and.arrow.down", .secondary)
-        case .dangling:        ("link.badge.plus", .orange)
-        case .pointsElsewhere: ("arrow.triangle.branch", .orange)
-        case .occupied:        ("exclamationmark.triangle.fill", .orange)
+        case .linked:
+            completionsInstalled ? "随应用更新，无需单独升级。" : "命令已安装，补全文件尚未齐全。"
+        case .notInstalled:
+            "在终端中上传图片，包含命令补全。"
+        case .dangling:
+            "原来的应用已不在，需重新安装命令。"
+        case .pointsElsewhere:
+            "命令链接指向另一个位置。"
+        case .occupied:
+            "安装位置已有文件，替换前会再次确认。"
         }
     }
 
-    private var reachAppearance: (icon: String, color: Color) {
+    private var reachWarning: String? {
         switch reach {
-        case .reachable:  ("terminal.fill", .green)
-        case .shadowed:   ("arrow.up.arrow.down", .orange)
-        case .notOnPath:  ("exclamationmark.circle", .orange)
-        case .unknown:    ("questionmark.circle", .secondary)
+        case .reachable: nil
+        case .shadowed(_, let shell): "\(shell.lastPathComponent) 会优先运行另一份 gitpic。"
+        case .notOnPath(let shell): "\(shell.lastPathComponent) 还找不到 gitpic。"
+        case .unknown: "暂时无法确认登录终端的 PATH。"
         }
     }
 
@@ -234,22 +187,19 @@ struct CommandLineSection: View {
 
     private var installTitle: String {
         switch status {
-        case .notInstalled:       "安装命令行工具"
-        case .linked:             "补齐命令行工具"
-        case .dangling:           "重新安装命令行工具"
-        case .pointsElsewhere:    "改为使用此 GitPic"
-        case .occupied:           "替换现有 gitpic"
+        case .notInstalled: "安装"
+        case .linked: "补齐安装"
+        case .dangling: "重新安装"
+        case .pointsElsewhere: "改为当前版本…"
+        case .occupied: "替换…"
         }
     }
 
     private func beginInstall() {
         switch status {
-        case .pointsElsewhere:
-            confirmingRepoint = true
-        case .occupied:
-            confirmingOverwrite = true
-        case .notInstalled, .linked, .dangling:
-            onInstall(false)
+        case .pointsElsewhere: confirmingRepoint = true
+        case .occupied: confirmingOverwrite = true
+        case .notInstalled, .linked, .dangling: onInstall(false)
         }
     }
 }

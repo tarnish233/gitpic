@@ -32,14 +32,33 @@ struct ShellConfigurationContractTests {
         #expect(afterFish.contains("guard commandLineProbeGeneration == generation else { return }"))
     }
 
+    @Test("the normal card has one shell selection and keeps removal behind Advanced")
+    func progressiveDisclosure() throws {
+        let view = try source("CommandLineSection")
+        #expect(view.contains(".pickerStyle(.segmented)"))
+        #expect(view.contains("@State private var showingDetails = false"))
+        #expect(view.contains("DisclosureGroup(\"高级选项\""))
+        #expect(view.contains("CommandLineShellRow("))
+        #expect(view.contains(".onChange(of: workingShell, initial: true)"),
+                "returning to General while fish works must show fish, not the login shell")
+        #expect(view.contains(".confirmationDialog(\"替换现有的 gitpic 文件？\""))
+        #expect(view.contains(".confirmationDialog(\"移除命令行工具？\""))
+        let details = try source("CommandLineDetails")
+        #expect(details.contains("if shell.usesStartupFile"))
+        #expect(details.contains("onUnconfigure(shell)"))
+        #expect(details.contains("action: onRemove"))
+    }
+
     @Test("progress and failures reach the shell row instead of only a notification")
     func rowFeedback() throws {
         let pane = try source("GeneralPane")
         #expect(pane.contains("workingShell: model.commandLineWorkingShell"))
         #expect(pane.contains("failureShell: model.commandLineFailureShell"))
         let view = try source("CommandLineSection")
-        #expect(view.contains("if workingShell == shell"))
-        #expect(view.contains("if failureShell == shell, let failure"))
-        #expect(view.contains("else if case .unknown(let reason) = configuration"))
+        #expect(view.contains("failureShell != selectedShell"), "errors from another shell stay visible")
+        let row = try source("CommandLineShellRow")
+        #expect(row.contains("if workingShell == shell"))
+        #expect(row.contains("if let failure"))
+        #expect(row.contains("else if case .unknown(let reason) = configuration"))
     }
 }
