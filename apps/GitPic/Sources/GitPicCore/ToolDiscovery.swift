@@ -121,11 +121,18 @@ public enum ToolDiscovery {
     ///
     /// `environment` exists so a test can hand the child a `ZDOTDIR` and prove which startup
     /// files a given flag set actually reaches. Production passes `nil` and the child inherits.
+    /// Its `SHELL` also selects the shell to spawn, because an environment that names a shell and
+    /// then gets a different one tests nothing: handing a `ZDOTDIR` to whatever `$SHELL` happens
+    /// to be on the machine running the test made the result depend on that machine, and it did —
+    /// green here where `SHELL=/bin/zsh`, red on a runner where it is bash, which reads no
+    /// `ZDOTDIR` at all.
     public static func loginShellProbe(
         _ tool: String,
         environment: [String: String]? = nil
     ) -> ShellProbe {
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let shell = environment?["SHELL"]
+            ?? ProcessInfo.processInfo.environment["SHELL"]
+            ?? "/bin/zsh"
         guard FileManager.default.isExecutableFile(atPath: shell) else {
             return ShellProbe(path: nil, conclusive: false,
                               reason: "找不到可执行的登录 shell（\(shell)）")

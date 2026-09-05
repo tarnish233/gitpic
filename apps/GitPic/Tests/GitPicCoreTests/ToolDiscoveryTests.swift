@@ -134,6 +134,13 @@ struct LoginShellLookupTests {
     /// so this test does not perturb the others running beside it. `ZDOTDIR` redirects every one
     /// of zsh's per-user startup files, so writing only a `.zshrc` under it makes "which files
     /// did the shell read" the single variable.
+    ///
+    /// **Pinned to zsh, and the first version of this test was not.** It handed a `ZDOTDIR` to
+    /// whatever `$SHELL` named, which is zsh on this machine and bash on a CI runner — and bash
+    /// reads no `ZDOTDIR`, so the probe found nothing and the test failed there and only there.
+    /// The property under test belongs to the flag set rather than to any particular machine's
+    /// login shell, so the shell is named here and the probe takes it from the environment it is
+    /// given. What `$SHELL` is on the machine running this is now irrelevant to the outcome.
     @Test("the probe reads .zshrc, which only an interactive shell does")
     func probeReachesZshrc() throws {
         let shell = "/bin/zsh"
