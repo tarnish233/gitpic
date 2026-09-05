@@ -126,7 +126,6 @@ struct GeneralPane: View {
                     Task { await model.removeCommandLineTool() }
                 },
                 onCopySetup: model.copyCommandLineSetup,
-                onCopyPath: model.copyCommandLinePath,
                 shellConfiguration: model.shellConfiguration,
                 onConfigureShell: { shell in Task { await model.configureShell(shell) } },
                 onUnconfigureShell: { shell in Task { await model.unconfigureShell(shell) } })

@@ -131,14 +131,13 @@ struct CommandLineToolTests {
     }
 
     /// Every shell has a PATH line, they differ, and none of them is a file the app would write.
-    @Test("each shell's PATH setup is present, distinct, and never written by the app")
+    @Test("each shell's PATH setup is present and distinct")
     func pathSetUpPerShell() {
         let all = CommandLineTool.Shell.allCases.map(\.pathSetUp)
         #expect(all.allSatisfy { !$0.lines.isEmpty && !$0.why.isEmpty && !$0.file.isEmpty })
         #expect(Set(all.flatMap(\.lines)).count == Set(all.map(\.lines)).count,
                 "two shells share a PATH line, which would make the copy button ambiguous")
-        // fish configures PATH with a command rather than a file edit, so it must not be
-        // described as a line to paste into something.
+        // fish configures PATH with a command rather than a file edit.
         #expect(CommandLineTool.Shell.fish.pathSetUp.lines == ["fish_add_path ~/.local/bin"])
         #expect(CommandLineTool.Shell.zsh.pathSetUp.file == "~/.zshrc")
     }
@@ -331,9 +330,11 @@ struct CommandLineToolTests {
 
         // And the guidance the UI shows still exists. "Never writes an rc file" had a silent way to
         // pass, and so does "handles them in one place": stop handling them at all.
-        #expect(CommandLineTool.Shell.zsh.startupFile == ".zshrc")
-        #expect(CommandLineTool.Shell.bash.startupFile == ".bash_profile")
-        #expect(CommandLineTool.Shell.fish.startupFile == nil)
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        #expect(CommandLineTool.Shell.zsh.startupFile(home: home) == ".zshrc")
+        #expect(CommandLineTool.Shell.bash.usesStartupFile)
+        #expect(!CommandLineTool.Shell.fish.usesStartupFile)
+        #expect(CommandLineTool.Shell.fish.startupFile(home: home) == nil)
     }
 
     private func atomicRename(_ source: URL, _ destination: URL) throws {
@@ -584,7 +585,7 @@ struct ShellConfigurationTests {
     func fishHasNoBlock() throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        #expect(CommandLineTool.Shell.fish.startupFile == nil)
+        #expect(!CommandLineTool.Shell.fish.usesStartupFile)
         #expect(throws: CommandLineTool.Failure.notFileConfigured(shell: .fish)) {
             try CommandLineTool.configure(.fish, needsPath: true, home: home)
         }
@@ -649,5 +650,102 @@ struct ShellConfigurationTests {
         #expect(throws: (any Error).self) {
             try CommandLineTool.configureFish(fish: fish, directory: dir) { _, _ in 7 }
         }
+    }
+}
+
+/// The two ways writing a startup file could damage a machine, both shipped in 0.21.2.
+@Suite("Startup-file safety")
+struct StartupFileSafetyTests {
+    private func makeHome() throws -> URL {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitpic-safe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        return home
+    }
+
+    /// **A file that exists but cannot be decoded must not be treated as an empty one.**
+    ///
+    /// Shipped in 0.21.2 as `(try? String(contentsOf:)) ?? ""`. Measured then: a 51-byte `.zshrc`
+    /// carrying a latin-1 comment and `export SECRET_TOKEN=…` came out as 223 bytes containing only
+    /// GitPic's block, with a 0-byte `.gitpic.bak` beside it. The file was gone and the backup could
+    /// not bring it back — the single failure the backup exists to prevent.
+    @Test("an undecodable startup file is refused, not overwritten")
+    func undecodableFileIsRefused() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let rc = home.appendingPathComponent(".zshrc")
+
+        var bytes = Data("# caf".utf8)
+        bytes.append(0xE9)                              // latin-1 "é": not valid UTF-8
+        bytes.append(contentsOf: Data("\nexport SECRET_TOKEN=keepme\n".utf8))
+        try bytes.write(to: rc)
+
+        #expect(throws: CommandLineTool.Failure.unreadableStartupFile(file: ".zshrc")) {
+            try CommandLineTool.configure(.zsh, needsPath: true, home: home)
+        }
+        #expect(try Data(contentsOf: rc) == bytes, "the file was modified despite the refusal")
+        #expect(!FileManager.default.fileExists(
+            atPath: rc.appendingPathExtension("gitpic.bak").path),
+                "an empty backup was left behind, which is worse than none")
+    }
+
+    /// **bash reads exactly one login file, so creating the wrong one silences another.**
+    ///
+    /// `man bash`: a login shell sources `~/.bash_profile`, `~/.bash_login`, `~/.profile` — "the
+    /// first one that exists and is readable". 0.21.2 always wrote `.bash_profile`, so a user whose
+    /// login configuration lived in `.profile` got a new `.bash_profile` and bash stopped reading
+    /// `.profile` at all: their exports still on disk, silently no longer loaded. Worse than never
+    /// configuring bash, and reachable from a button labelled 自动配置.
+    @Test("bash's block goes in the file bash actually reads")
+    func bashPrecedence() throws {
+        // Only .profile exists: writing .bash_profile would shadow it.
+        let onlyProfile = try makeHome()
+        defer { try? FileManager.default.removeItem(at: onlyProfile) }
+        try Data("export FROM_PROFILE=1\n".utf8)
+            .write(to: onlyProfile.appendingPathComponent(".profile"))
+        #expect(CommandLineTool.Shell.bash.startupFile(home: onlyProfile) == ".profile")
+        try CommandLineTool.configure(.bash, needsPath: true, home: onlyProfile)
+        #expect(!FileManager.default.fileExists(
+            atPath: onlyProfile.appendingPathComponent(".bash_profile").path),
+                "a .bash_profile was created, so bash will never read .profile again")
+        let profile = try String(
+            contentsOf: onlyProfile.appendingPathComponent(".profile"), encoding: .utf8)
+        #expect(profile.contains("export FROM_PROFILE=1"))
+
+        // .bash_login takes precedence over .profile, and .bash_profile over both.
+        let loginHome = try makeHome()
+        defer { try? FileManager.default.removeItem(at: loginHome) }
+        try Data().write(to: loginHome.appendingPathComponent(".profile"))
+        try Data().write(to: loginHome.appendingPathComponent(".bash_login"))
+        #expect(CommandLineTool.Shell.bash.startupFile(home: loginHome) == ".bash_login")
+        try Data().write(to: loginHome.appendingPathComponent(".bash_profile"))
+        #expect(CommandLineTool.Shell.bash.startupFile(home: loginHome) == ".bash_profile")
+
+        // None of the three: creating .bash_profile shadows nothing, so it is the right target.
+        let bare = try makeHome()
+        defer { try? FileManager.default.removeItem(at: bare) }
+        #expect(CommandLineTool.Shell.bash.startupFile(home: bare) == ".bash_profile")
+
+        // zsh has no such ambiguity.
+        #expect(CommandLineTool.Shell.zsh.startupFile(home: bare) == ".zshrc")
+    }
+
+    /// The block can land in `.profile`, which `sh` reads too — so it must be POSIX.
+    @Test("the bash block is POSIX, because .profile is not bash-only")
+    func bashBlockIsPosix() throws {
+        let lines = CommandLineTool.Shell.bash.managedLines(needsPath: true)
+        #expect(!lines.contains { $0.contains("[[") },
+                "`[[` is a bash keyword; a POSIX sh reading .profile reports a syntax error")
+
+        // Asserted by running it: /bin/sh must parse the block without complaint.
+        let script = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitpic-posix-\(UUID().uuidString).sh")
+        defer { try? FileManager.default.removeItem(at: script) }
+        try Data(lines.joined(separator: "\n").utf8).write(to: script)
+        let out = try ChildProcess.run(
+            executable: URL(fileURLWithPath: "/bin/sh"),
+            args: ["-n", script.path], timeout: 8)
+        #expect(out.status == 0,
+                "/bin/sh -n rejected the block: \(String(decoding: out.stderr, as: UTF8.self))")
     }
 }

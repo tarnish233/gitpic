@@ -842,7 +842,7 @@ final class AppModel {
     /// an entry the user may have since curated is a different and less reversible act than
     /// deleting a block we can see we wrote. The path stays, and the pane says so.
     func unconfigureShell(_ shell: CommandLineTool.Shell) async {
-        guard !commandLineWorking, shell.startupFile != nil else { return }
+        guard !commandLineWorking, shell.usesStartupFile else { return }
         commandLineWorking = true
         commandLineFailure = nil
         defer { commandLineWorking = false }
@@ -850,7 +850,9 @@ final class AppModel {
         do {
             let removed = try CommandLineTool.unconfigure(shell)
             await refreshCommandLine()
-            if removed, let file = shell.startupFile {
+            if removed,
+               let file = shell.startupFile(
+                   home: FileManager.default.homeDirectoryForCurrentUser) {
                 notify(title: "已移除 \(shell.rawValue) 配置",
                        body: "\(file) 里 GitPic 的块已删除，其余内容未改动。")
             }
@@ -923,7 +925,7 @@ final class AppModel {
             // command that is no longer there — the exact litter this feature promises to clean up
             // after itself. fish is untouched for the reason `unconfigureShell` gives.
             var unconfigured: [String] = []
-            for shell in CommandLineTool.Shell.allCases where shell.startupFile != nil {
+            for shell in CommandLineTool.Shell.allCases where shell.usesStartupFile {
                 if (try? CommandLineTool.unconfigure(shell)) == true {
                     unconfigured.append(shell.rawValue)
                 }
@@ -987,20 +989,6 @@ final class AppModel {
         }
     }
 
-    /// Copy the line that puts `~/.local/bin` on one shell's PATH.
-    ///
-    /// Separate from ``copyCommandLineSetup``, which copies zsh's *completion* setup. Both hand
-    /// the user text and neither writes a file: the app never edits a shell config, and a fish
-    /// user's `fish_add_path` is no exception even though it is a command rather than a line to
-    /// paste — running it for them would still be reaching into their shell configuration.
-    func copyCommandLinePath(for shell: CommandLineTool.Shell) {
-        let setUp = shell.pathSetUp
-        if Clipboard.write(setUp.lines.joined(separator: "\n")) {
-            notify(title: "已复制 \(shell.rawValue) 的 PATH 设置", body: setUp.why)
-        } else {
-            commandLineFailure = "写剪贴板失败，请手动复制 \(shell.rawValue) 的 PATH 设置。"
-        }
-    }
 
     private func commandLineCompletions(
         using runner: GitpicRunner

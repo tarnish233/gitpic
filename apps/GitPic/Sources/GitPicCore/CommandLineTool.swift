@@ -224,16 +224,47 @@ public enum CommandLineTool {
         /// variable, so nothing has to be appended to a startup file at all and running it twice
         /// changes nothing. zsh and bash have no equivalent — PATH there comes from a startup file
         /// or from nowhere — which is why those two get a managed block.
-        public var startupFile: String? {
+        public var usesStartupFile: Bool {
             switch self {
-            case .zsh:  ".zshrc"
-            case .bash: ".bash_profile"
-            case .fish: nil
+            case .zsh, .bash: true
+            case .fish:       false
+            }
+        }
+
+        /// The startup file to write the block into, chosen the way the shell itself chooses.
+        ///
+        /// **bash reads exactly one login file and creating the wrong one silences another.** The
+        /// manual is explicit: a login bash sources `~/.bash_profile`, `~/.bash_login`, `~/.profile`
+        /// — "the first one that exists and is readable". This used to return `.bash_profile`
+        /// unconditionally, so a user whose login configuration lived in `.profile` and who pressed
+        /// *auto-configure* got a **new** `.bash_profile`, and from then on bash never read
+        /// `.profile` again. Their PATH, their exports, their aliases: still on disk, silently no
+        /// longer loaded. That is a worse outcome than never configuring bash at all, and it was
+        /// reachable from a button labelled 自动配置.
+        ///
+        /// So: the first of the three that exists, and `.bash_profile` only when none does — at
+        /// which point creating it shadows nothing. Writing into `.profile` is why the bash block's
+        /// completion guard uses `[` and not `[[`: `.profile` is read by `sh` too, and `[[` is not
+        /// POSIX.
+        ///
+        /// zsh has no such ambiguity. `.zshrc` is the interactive file and the only one that makes
+        /// `fpath` additions visible to a completion system that has already run.
+        public func startupFile(home: URL) -> String? {
+            switch self {
+            case .zsh:
+                return ".zshrc"
+            case .bash:
+                let candidates = [".bash_profile", ".bash_login", ".profile"]
+                return candidates.first {
+                    FileManager.default.fileExists(atPath: home.appendingPathComponent($0).path)
+                } ?? ".bash_profile"
+            case .fish:
+                return nil
             }
         }
 
         public func startupFileURL(home: URL) -> URL? {
-            startupFile.map(home.appendingPathComponent)
+            startupFile(home: home).map(home.appendingPathComponent)
         }
 
         /// What GitPic writes between its markers for this shell.
@@ -265,8 +296,13 @@ public enum CommandLineTool {
                 // bash-completion v2 autoloads from this directory on demand, but only once it has
                 // itself been sourced — macOS ships bash 3.2 with no bash-completion at all, so the
                 // guard is what keeps this line harmless on a machine that never installed it.
+                //
+                // `[` and not `[[`, because this block can land in `.profile` when that is the file
+                // bash actually reads, and `.profile` is read by `sh` as well. `[[` is a bash
+                // keyword that a POSIX shell reports as a syntax error, which would break every new
+                // `sh` the user starts.
                 return path + [
-                    "[[ -r \"$HOME/.local/share/bash-completion/completions/gitpic\" ]] &&",
+                    "[ -r \"$HOME/.local/share/bash-completion/completions/gitpic\" ] &&",
                     "  . \"$HOME/.local/share/bash-completion/completions/gitpic\"",
                 ]
             case .fish:
@@ -274,7 +310,9 @@ public enum CommandLineTool {
             }
         }
 
-        /// Shell startup edits the user must make themselves. GitPic never writes an rc file.
+        /// The completion-loading lines, for someone who would rather paste them than let the
+        /// app write them. `configure` puts these same lines in the managed block; this is the
+        /// manual equivalent, kept so declining the automatic route costs nothing.
         public var setUp: SetUp? {
             switch self {
             case .zsh:
@@ -374,6 +412,8 @@ public enum CommandLineTool {
         case emptyCompletion(shell: Shell)
         /// A shell whose PATH is not configured by a file the app can write.
         case notFileConfigured(shell: Shell)
+        /// The startup file is there but could not be read, so nothing was written.
+        case unreadableStartupFile(file: String)
         case fileSystem(operation: String, path: String, reason: String)
 
         public var message: String {
@@ -392,6 +432,9 @@ public enum CommandLineTool {
                 "gitpic 没有生成 \(shell.rawValue) 补全，什么都没有写入。"
             case .notFileConfigured(let shell):
                 "\(shell.rawValue) 的 PATH 不是由启动文件配置的，没有可写入的块。"
+            case .unreadableStartupFile(let file):
+                "\(file) 存在但读不出来（可能不是 UTF-8 编码），没有写入任何内容 —"
+                    + "请先检查这个文件。"
             case .fileSystem(let operation, let path, let reason):
                 "\(operation)失败（\(path)）：\(reason)"
             }
@@ -467,11 +510,31 @@ public enum CommandLineTool {
         needsPath: Bool,
         home: URL = FileManager.default.homeDirectoryForCurrentUser
     ) throws -> Configured {
-        guard let file = shell.startupFileURL(home: home), let name = shell.startupFile else {
+        guard let file = shell.startupFileURL(home: home),
+              let name = shell.startupFile(home: home) else {
             throw Failure.notFileConfigured(shell: shell)
         }
         let lines = shell.managedLines(needsPath: needsPath)
-        let existing = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+        // **"Absent" and "there but unreadable" are different answers, and conflating them destroyed
+        // the file.** This was `(try? String(contentsOf:)) ?? ""`, so a startup file that exists but
+        // is not valid UTF-8 — a latin-1 comment is enough — read as empty. The backup was then
+        // written from that empty string, and the file replaced with nothing but our block.
+        // Measured: a 51-byte `.zshrc` carrying `export SECRET_TOKEN=…` came out as 223 bytes of
+        // block with a 0-byte `.gitpic.bak` beside it. The user's file was gone and the backup could
+        // not bring it back — the one failure mode the backup exists to prevent.
+        //
+        // So a file that cannot be read is a refusal, not a blank slate. Nothing is written and the
+        // error names the file, because the only safe repair is a human looking at it.
+        let existing: String
+        if FileManager.default.fileExists(atPath: file.path) {
+            do {
+                existing = try String(contentsOf: file, encoding: .utf8)
+            } catch {
+                throw Failure.unreadableStartupFile(file: name)
+            }
+        } else {
+            existing = ""
+        }
         let updated = ManagedBlock.applying(lines, to: existing)
         if updated == existing { return .unchanged(file: name) }
 
@@ -501,7 +564,8 @@ public enum CommandLineTool {
         _ shell: Shell,
         home: URL = FileManager.default.homeDirectoryForCurrentUser
     ) throws -> Bool {
-        guard let file = shell.startupFileURL(home: home), let name = shell.startupFile,
+        guard let file = shell.startupFileURL(home: home),
+              let name = shell.startupFile(home: home),
               let existing = try? String(contentsOf: file, encoding: .utf8),
               ManagedBlock.present(in: existing)
         else { return false }

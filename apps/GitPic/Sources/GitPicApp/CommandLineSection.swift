@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import GitPicCore
 
@@ -13,7 +14,6 @@ struct CommandLineSection: View {
     let onInstall: (_ replacing: Bool) -> Void
     let onRemove: () -> Void
     let onCopySetup: () -> Void
-    let onCopyPath: (CommandLineTool.Shell) -> Void
     let shellConfiguration: [CommandLineTool.Shell: Bool]
     let onConfigureShell: (CommandLineTool.Shell) -> Void
     let onUnconfigureShell: (CommandLineTool.Shell) -> Void
@@ -23,7 +23,7 @@ struct CommandLineSection: View {
     @State private var confirmingRemoval = false
 
     private func configuredDetail(_ shell: CommandLineTool.Shell) -> String {
-        if let file = shell.startupFile {
+        if let file = shell.startupFile(home: FileManager.default.homeDirectoryForCurrentUser) {
             return "GitPic 在 \(file) 里维护一个带标记的块；原文件备份为 \(file).gitpic.bak。"
         }
         // fish's path is a universal variable, so there is no block to point at and nothing for a
@@ -85,7 +85,7 @@ struct CommandLineSection: View {
                                     ? "checkmark.circle.fill" : "circle.dashed")
                                 .foregroundStyle(configured ? .green : .secondary)
                             if configured {
-                                if shell.startupFile != nil {
+                                if shell.usesStartupFile {
                                     Button("移除") { onUnconfigureShell(shell) }
                                         .controlSize(.small)
                                         .disabled(working)
