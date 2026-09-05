@@ -4,6 +4,42 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.21.2] - 2026-09-05
+
+### bash、zsh、fish 都能一键自动配置，不用再手动粘行
+
+- 每个 shell 一行状态 + 一个「自动配置」按钮，已经配好的不再唠叨
+- zsh/bash 写一个带标记的块并备份原文件，移除时只删块；fish 走它自己的 `fish_add_path`
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+**推翻了一条自己定的规则。** 之前 app「永不修改用户的 shell 配置文件」，靠一条源码扫描保证没有写入者。
+那条规则的本意是「不要在用户不知情时动他的配置」，但「什么都不做」只是满足它的一种方式 —— 而它满足的
+代价是：三个 shell、三块手动说明，摆在面板上让人自己粘。一个明确的按钮、指名的文件、一份备份、以及一个
+能精确撤销的移除，服务的是同一个本意，而且真的把事做完了。rustup、conda、nvm 都是这个形状。
+
+### App
+
+- 新增 `ManagedBlock`：app 只在 `# >>> gitpic >>>` 和 `# <<< gitpic <<<` 之间写字。保证的性质由测试
+  钉死 —— 标记之外的每个字节原样保留（含无末尾换行的文件、以及块**之后**还有内容的文件）；重复写入是
+  替换而非叠加；移除后文件与块出现前字节一致；首次写入前备份成 `<文件>.gitpic.bak`，且之后的改写**不会**
+  覆盖这份备份，所以它永远是「GitPic 动手之前」那一版。用你本机真实的 126 行 `.zshrc`（p10k +
+  oh-my-zsh）实跑过一遍：没被加重复的 PATH 行，移除后字节完全一致。
+- **zsh 的块用 `compdef` 分支而不是再跑一次 `compinit`。** 块是追加的，落在插件管理器之后 —— 本机
+  oh-my-zsh 在 `.zshrc:83` 就跑了 `compinit`，那时再往 `fpath` 加 `~/.zfunc` 已经太晚。重跑 `compinit`
+  能用（那正是旧的手动说明让人粘的），代价是每次开 shell 多扫一遍 `fpath` 里所有目录。已有 `compdef` 时
+  只注册这一个补全，代价为零，实测有效；`compinit` 那条分支留给什么都没跑过的裸 zsh。
+- 已经自己把目录放进 PATH 的 shell 不会被加第二遍：写块前会搜它读的每一个启动文件（zsh 连 `.zprofile`
+  和 `.zshenv` 一起），而**我们自己块里**的那一行不算 —— 否则改写时会判定这行多余而把它删掉。
+- fish 不写块，走 `fish_add_path`（universal 变量、幂等）。移除也不代劳：那要动 `fish_remove_path`，而
+  伸手去改一个用户之后可能已经自己整理过的变量存储，和删掉一个看得见是我们写的块不是一回事。
+- 移除命令行工具时会一并清掉 zsh/bash 的块 —— 否则会留下一份为已经不存在的命令加 PATH、加载补全的配置。
+- **那条「永不写 rc 文件」的源码扫描换掉了，因为它变成了假保证。** 策略改了之后 app 确实会写 `.zshrc`，
+  而那条扫描**照样通过** —— `configure` 是通过 `URL` 变量写的，不是字面量。一条名字承诺了代码已不再做的
+  事、而且还通过的 tripwire，比没有 tripwire 更糟：它正好摆在有人会去找真保证的位置上。现在保护用户的是
+  `ManagedBlock` 的行为（在真实文件上直接断言），而这条扫描只守一件那些测试守不了的事：这个话题必须
+  收敛在一个文件里。
+
 ## [0.21.1] - 2026-09-05
 
 ### 命令行那一栏现在会说清是哪个 shell，其他 shell 各给一行

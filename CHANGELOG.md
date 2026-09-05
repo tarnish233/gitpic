@@ -4,6 +4,57 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.2] - 2026-09-05
+
+### bash, zsh and fish all get a one-click auto-configure
+
+- One status row and one Auto-configure button per shell; the ones already set up stop nagging
+- zsh/bash get a marked block plus a backup, removable block-only; fish uses its own `fish_add_path`
+
+<!-- release-notes-end: everything above is shared by the GitHub Release and the in-app update sheet; everything below stays in this file. Keep each bullet above to one line — the sheet renders with .inlineOnlyPreservingWhitespace, so newlines survive and wrapping breaks at 480pt -->
+
+**A rule this project set for itself has been overturned.** The app used to *never* modify a user's
+shell configuration, enforced by a source scan asserting no writer existed. The intent behind that
+rule was "never change someone's shell config behind their back" — but "do nothing" is only one way
+to satisfy it, and it satisfied it by leaving three blocks of manual instructions on screen, one per
+shell, for the user to paste. An explicit button, a named file, a backup, and a removal that undoes
+exactly what was added serve the same intent and actually finish the job. rustup, conda and nvm all
+take this shape.
+
+### App
+
+- New `ManagedBlock`: the app writes only between `# >>> gitpic >>>` and `# <<< gitpic <<<`. The
+  properties are pinned by tests — every byte outside the markers preserved (including a file with
+  no trailing newline, and one with content *after* the block); writing twice replaces rather than
+  stacks; removal leaves the file byte-identical to before the block existed; the first write backs
+  the file up to `<name>.gitpic.bak` and later rewrites do **not** overwrite that backup, so it
+  always means "before GitPic". Drilled against this machine's real 126-line `.zshrc` (p10k +
+  oh-my-zsh): no duplicate PATH line added, byte-identical after removal.
+- **zsh's block uses a `compdef` branch instead of a second `compinit`.** The block is appended, so
+  it lands after whatever a plugin manager did — oh-my-zsh runs `compinit` at `.zshrc:83` here, long
+  before the end of the file, by which point adding `~/.zfunc` to `fpath` is too late to be scanned.
+  Re-running `compinit` does work, and is what the old manual instructions told people to paste, at
+  the cost of rescanning every `fpath` directory on each shell start. Registering just this one
+  completion when `compdef` already exists costs nothing and is measured to work; the `compinit`
+  branch remains for a bare zsh where nothing has run it.
+- A shell that already puts the directory on PATH is not given a second entry: every startup file
+  that shell reads is searched first (zsh's `.zprofile` and `.zshenv` included), and a mention
+  inside *our own* block does not count — otherwise a rewrite would decide the line was redundant
+  and drop it.
+- fish gets no block. `fish_add_path` records a universal variable and is idempotent, so nothing has
+  to be appended anywhere. Removal is not automated: that means `fish_remove_path`, and reaching
+  into a variable store the user may have curated since is a different act from deleting a block we
+  can see we wrote.
+- Removing the command-line tool now clears the zsh/bash blocks too, rather than leaving a `.zshrc`
+  that adds a directory to PATH and autoloads a completion for a command that is gone.
+- **The "never writes an rc file" source scan was replaced, because it had become a false
+  assurance.** After the policy change the app demonstrably writes `.zshrc`, and that scan **still
+  passed** — `configure` writes through a `URL` variable rather than a literal. A tripwire whose
+  name promises something the code no longer does, and which passes anyway, is worse than none: it
+  sits exactly where someone would look for the real guarantee. What protects the user now is
+  `ManagedBlock`'s behaviour, asserted on real files; the scan holds the one thing those tests
+  cannot — that the subject stays confined to a single file.
+
 ## [0.21.1] - 2026-09-05
 
 ### The command-line row names its shell, and every other shell gets its own line
